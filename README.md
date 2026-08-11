@@ -1,0 +1,165 @@
+# Piper
+
+An HTTP(S) debugging proxy for Windows, written from scratch in C# on .NET 10 / WinForms.
+
+## Why this exists
+
+The **Composer** puts request search inside the editor: type a query, see matching captured
+requests, load one, edit, and send.
+
+The same query grammar drives the session-list filter and the composer search, so a query
+you learn in one place works in the other.
+
+## Layout
+
+```
+src/Piper.Core/          no UI dependencies, targets net10.0
+  Http/                     header collection, buffered reader, parser, content codecs
+  Http2/                    HPACK, framing, HTTP/2 client and server connections
+  Http3/                    QUIC varints, HTTP/3 framing, QPACK, h3 client, Alt-Svc cache
+  Proxy/                    proxy server, upstream connections, composer executor
+  Security/                 root CA, per-host leaf certs, trust store management
+  Sessions/                 session model, store, search query compiler
+src/Piper.App/           WinForms shell, targets net10.0-windows
+  Controls/                 session grid, inspectors, composer
+  Theme/                    dark palette and owner-drawn list/tab controls
+tests/Piper.SmokeTests/  end-to-end tests, no test framework needed
+tools/Piper.TrafficGen/  local origin + traffic generator for manual UI testing
+```
+
+## Running it
+
+```bash
+dotnet run --project src/Piper.App/Piper.App.csproj
+```
+
+It listens on `127.0.0.1:8888` and starts capturing when the window opens.
+
+To route the machine's traffic through it, use **Capture > Use as system proxy**. Your
+existing proxy settings are saved and restored when you turn it off or close the app.
+
+### HTTPS
+
+Decrypting HTTPS needs the generated root CA trusted, via **Tools > Trust root
+certificate**. Read the dialog before accepting: the private key sits unencrypted in
+`%LOCALAPPDATA%\Piper\Certificates`, so anything able to read it can impersonate any
+TLS site to your Windows account. **Tools > Remove trusted root certificate** reverses it.
+
+Nothing installs the root implicitly — it is only ever a deliberate menu action.
+
+## Search grammar
+
+Terms are ANDed. Prefix any term with `-` or `!` to negate it.
+
+| Form | Example | Matches |
+| --- | --- | --- |
+| bare word | `checkout` | URL, headers, or text bodies |
+| quoted | `"order id"` | literal phrase |
+| regex | `/orders\/[0-9]+/` | regular expression |
+| `method:` `m:` | `method:GET\|POST` | alternatives with `\|` |
+| `host:` `h:` | `host:api.example.com` | |
+| `path:` `query:` `url:` | `path:/v2/users` | |
+| `status:` `s:` | `status:404`, `status:4xx`, `status:>=400`, `status:200..299` | |
+| `ct:` | `ct:json` | content type |
+| `header:` | `header:Authorization`, `header:Accept=json` | request or response |
+| `reqheader:` `respheader:` | | one side only |
+| `body:` `req:` `resp:` | `body:user_id` | text bodies |
+| `size:` `reqsize:` | `size:>100kb` | `b`/`kb`/`mb`/`gb` suffixes |
+| `dur:` | `dur:>500` | milliseconds |
+| `is:` | `is:json`, `is:error`, `is:composed`, `is:slow` | see Help > Search syntax |
+
+Unknown fields are reported as a warning and ignored rather than failing the whole query.
+
+```
+method:POST host:api status:>=400 -is:image body:"order"
+```
+
+## Shortcuts
+
+| Key | Action |
+| --- | --- |
+| `F12` | start / stop capturing |
+| `Ctrl+K` | jump to the Composer search |
+| `Ctrl+E` | send the selected session to the Composer |
+| `Ctrl+X` | clear sessions |
+| `Ctrl+C` | copy selected URLs |
+| `Del` | remove selected sessions |
+| middle-click | send a session to the Composer |
+
+## Testing
+
+```bash
+dotnet run --project tests/Piper.SmokeTests/Piper.SmokeTests.csproj
+```
+
+Stands up real origin servers, runs the real proxy, and drives a real `HttpClient` through it —
+320+ assertions covering proxying, chunked de-framing, gzip decode, failure capture, the composer,
+header semantics, the full search grammar, HTTP/2 (HPACK against RFC 7541's own worked vectors,
+framing, padding, flow control, multiplexing, and the real MITM path negotiating h2 on either or
+both legs) and HTTP/3 (QUIC varints and QPACK against the RFC 9000/9204 worked vectors, plus a
+real QUIC listener on loopback). Exit code is 0 on success. No test framework, so it runs without
+a NuGet restore.
+
+To exercise the UI by hand, start the app and run:
+
+```bash
+dotnet run --project tools/Piper.TrafficGen/Piper.TrafficGen.csproj -- 8888 19200
+```
+
+That serves a spread of status codes, content types and body shapes on `127.0.0.1:19200`
+and sends them through the proxy. It must be a .NET process rather than Windows
+PowerShell: .NET Framework's `WebProxy` unconditionally bypasses the proxy for loopback
+targets, so `Invoke-WebRequest -Proxy` would never reach Piper.
+
+## What works
+
+- HTTP/1.1 forward proxying with keep-alive and connection reuse
+- `CONNECT` blind tunnelling, and TLS termination with per-host certificates honouring SNI
+- HTTP/2 on both legs (from-scratch HPACK, framing and flow control) — ALPN-negotiated with the
+  browser inside a decrypted tunnel and, independently, with the origin server, so Piper freely
+  translates between h1.1 and h2 on either side and records which protocol each leg actually used
+- HTTP/3 to origin servers (from-scratch QPACK and framing over `System.Net.Quic`), off by
+  default — see below
+- Chunked de-framing; gzip, deflate and brotli decoding for display
+- WebSocket / `101 Switching Protocols` upgrade pass-through
+- Virtual-mode session grid that stays responsive under load
+- Request and response inspectors: headers, decoded body, pretty-printed JSON, hex dump
+- Composer with search, raw-request editing, repeat-N, and verbatim header sending
+- Copy as curl, per-host filtering, dark theme
+
+### HTTP/3
+
+Off by default. Turn it on with **Capture > Attempt HTTP/3 (origin, QUIC)**.
+
+It is deliberately **upstream-only**. A browser pointed at a system HTTP proxy always tunnels
+through `CONNECT` over TCP and disables QUIC for proxied traffic, so there is no such thing as a
+browser speaking HTTP/3 *to* a forward proxy. What this does is let Piper dial the origin over
+QUIC to see what it actually serves there.
+
+An origin is only tried over QUIC after it has advertised `h3` in an `Alt-Svc` header on an
+ordinary TCP response — never on the first, cold request, which is the one you are waiting on.
+Failures are remembered per host with a cool-down, so a network that blocks outbound UDP/443
+(many do) costs one timeout rather than one per request. Any failure falls back to TCP, and only
+safe methods (`GET`, `HEAD`, `OPTIONS`) are attempted, so a fallback can never re-submit a request
+with side effects.
+
+QUIC comes from `System.Net.Quic` — msquic ships inside the .NET runtime, so this still needs no
+NuGet packages and nothing extra installed. The HTTP/3 layer above it (framing, QPACK) is
+from-scratch like the rest. QPACK uses the static table only and advertises a zero-capacity
+dynamic table, which RFC 9204 explicitly permits and which removes the encoder/decoder instruction
+streams entirely.
+
+## Not implemented
+
+- HTTP/2 or HTTP/3 in the Composer (raw/verbatim sending stays HTTP/1.1-only — the mandatory
+  pseudo-headers and forbidden headers are structurally at odds with "what you type is what goes
+  on the wire")
+- HTTP/3 stream reuse (one QUIC connection per request) and server push
+- Breakpoints and request/response tampering
+- Saving and loading session archives
+- Upstream proxy chaining
+- zstd content decoding (bodies are shown as-is, not corrupted)
+
+## License
+
+Piper is licensed under the GNU General Public License v3.0 only. See [LICENSE](LICENSE).

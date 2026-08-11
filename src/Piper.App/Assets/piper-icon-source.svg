@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <defs>
+    <radialGradient id="bg" cx="35%" cy="26%" r="85%">
+      <stop offset="0%" stop-color="#6e2020"/>
+      <stop offset="100%" stop-color="#3a0f0f"/>
+    </radialGradient>
+  </defs>
+
+  <rect x="6" y="6" width="244" height="244" rx="42" fill="url(#bg)"/>
+  <rect x="6" y="6" width="244" height="244" rx="42" fill="none" stroke="#8a3a1f" stroke-width="5"/>
+
+  <!-- the pipe, laid out horizontally then rotated so it runs diagonally across the icon -->
+  <g transform="rotate(-38 128 128)">
+    <!-- foot joint -->
+    <rect x="28" y="110" width="16" height="36" rx="6" fill="#8a5a26"/>
+    <!-- main tube -->
+    <rect x="35" y="112" width="176" height="32" rx="16" fill="#d9a856" stroke="#5c3a1a" stroke-width="3"/>
+    <!-- decorative bands -->
+    <rect x="72" y="110" width="7" height="36" rx="2" fill="#5c3a1a"/>
+    <rect x="150" y="110" width="7" height="36" rx="2" fill="#5c3a1a"/>
+    <!-- finger holes -->
+    <circle cx="95" cy="128" r="5" fill="#2c1c10"/>
+    <circle cx="115" cy="128" r="5" fill="#2c1c10"/>
+    <circle cx="135" cy="128" r="5" fill="#2c1c10"/>
+    <circle cx="165" cy="128" r="5" fill="#2c1c10"/>
+    <!-- mouthpiece -->
+    <rect x="192" y="108" width="26" height="40" rx="10" fill="#8a5a26"/>
+  </g>
+
+  <!-- musical notes drifting from the mouthpiece -->
+  <circle cx="216" cy="52" r="6.5" fill="#e8be82" opacity="0.9"/>
+  <rect x="221.5" y="22" width="3.6" height="30" fill="#e8be82" opacity="0.9"/>
+  <circle cx="232" cy="40" r="5" fill="#e8be82" opacity="0.6"/>
+  <rect x="235.9" y="20" width="3.2" height="20" fill="#e8be82" opacity="0.6"/>
+</svg>

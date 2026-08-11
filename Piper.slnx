@@ -1,0 +1,12 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Piper.App/Piper.App.csproj" />
+    <Project Path="src/Piper.Core/Piper.Core.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Piper.SmokeTests/Piper.SmokeTests.csproj" />
+  </Folder>
+  <Folder Name="/tools/">
+    <Project Path="tools/Piper.TrafficGen/Piper.TrafficGen.csproj" />
+  </Folder>
+</Solution>
