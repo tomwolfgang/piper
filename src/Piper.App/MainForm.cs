@@ -175,6 +175,12 @@ public sealed class MainForm : Form
     private readonly SplitContainer _mainSplit;
     private readonly System.Windows.Forms.Timer _statusTimer;
 
+    protected override void OnHandleCreated(EventArgs e)
+    {
+        base.OnHandleCreated(e);
+        Palette.ApplyWindowChrome(this);
+    }
+
     protected override void OnShown(EventArgs e)
     {
         base.OnShown(e);

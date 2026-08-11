@@ -1,4 +1,5 @@
 using System.Drawing;
+using System.Runtime.InteropServices;
 using System.Windows.Forms;
 using Microsoft.Win32;
 
@@ -9,6 +10,10 @@ namespace Piper.App.Theme;
 public static class Palette
 {
     private const string PersonalizeKey = @"HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize";
+    private const int DwmwaUseImmersiveDarkMode = 20;
+    private const int DwmwaUseImmersiveDarkModeBefore20H1 = 19;
+    private const int DwmwaCaptionColor = 35;
+    private const int DwmwaTextColor = 36;
     private static readonly ThemeColors Dark = new(
         Color.FromArgb(30, 30, 32), Color.FromArgb(37, 37, 40), Color.FromArgb(58, 32, 34),
         Color.FromArgb(45, 45, 48), Color.FromArgb(62, 62, 66), Color.FromArgb(224, 224, 226),
@@ -50,6 +55,27 @@ public static class Palette
 
     public static void ToggleMode() => SetMode(IsLightMode ? ThemeMode.Dark : ThemeMode.Light);
 
+    public static void ApplyWindowChrome(Form form)
+    {
+        if (!form.IsHandleCreated)
+        {
+            form.HandleCreated -= ApplyWindowChromeOnHandleCreated;
+            form.HandleCreated += ApplyWindowChromeOnHandleCreated;
+            return;
+        }
+
+        var darkMode = IsLightMode ? 0 : 1;
+        if (!SetDwmAttribute(form.Handle, DwmwaUseImmersiveDarkMode, darkMode))
+            SetDwmAttribute(form.Handle, DwmwaUseImmersiveDarkModeBefore20H1, darkMode);
+        SetDwmAttribute(form.Handle, DwmwaCaptionColor, ColorTranslator.ToWin32(SurfaceAlt));
+        SetDwmAttribute(form.Handle, DwmwaTextColor, ColorTranslator.ToWin32(Text));
+    }
+
+    private static void ApplyWindowChromeOnHandleCreated(object? sender, EventArgs e)
+    {
+        if (sender is Form form) ApplyWindowChrome(form);
+    }
+
     public static void SetMode(ThemeMode mode)
     {
         if (_mode == mode) return;
@@ -90,6 +116,8 @@ public static class Palette
     /// <summary>Walks a control tree applying the palette. Safe to call again after adding children.</summary>
     public static void Apply(Control control)
     {
+        if (control is Form form) ApplyWindowChrome(form);
+
         // Only the ListViews and DarkTabControl opted into double buffering individually.
         // Everything else in the tree -- SplitContainer's panels, TabPages, every UserControl --
         // repaints the flicker-prone way, so a burst of captures invalidating a ListView visibly
@@ -142,14 +170,7 @@ public static class Palette
                 splitContainer.Panel2.BackColor = Background;
                 break;
             case ToolStrip toolStrip:
-                toolStrip.BackColor = SurfaceAlt;
-                toolStrip.ForeColor = Text;
-                toolStrip.Renderer = new PaletteToolStripRenderer();
-                foreach (ToolStripItem item in toolStrip.Items)
-                {
-                    item.BackColor = SurfaceAlt;
-                    item.ForeColor = Text;
-                }
+                ApplyToolStrip(toolStrip);
                 break;
             default:
                 control.BackColor = Background;
@@ -160,6 +181,27 @@ public static class Palette
         foreach (Control child in control.Controls) Apply(child);
     }
 
+    private static void ApplyToolStrip(ToolStrip toolStrip)
+    {
+        toolStrip.BackColor = SurfaceAlt;
+        toolStrip.ForeColor = Text;
+        toolStrip.Renderer = new PaletteToolStripRenderer();
+        foreach (ToolStripItem item in toolStrip.Items) ApplyToolStripItem(item);
+    }
+
+    private static void ApplyToolStripItem(ToolStripItem item)
+    {
+        item.BackColor = SurfaceAlt;
+        item.ForeColor = item.Enabled ? Text : TextDim;
+
+        if (item is not ToolStripDropDownItem dropDownItem) return;
+
+        dropDownItem.DropDown.BackColor = SurfaceAlt;
+        dropDownItem.DropDown.ForeColor = Text;
+        dropDownItem.DropDown.Renderer = new PaletteToolStripRenderer();
+        foreach (ToolStripItem child in dropDownItem.DropDownItems) ApplyToolStripItem(child);
+    }
+
     private sealed class PaletteToolStripRenderer() : ToolStripProfessionalRenderer(new PaletteColors())
     {
         protected override void OnRenderArrow(ToolStripArrowRenderEventArgs e)
@@ -167,7 +209,26 @@ public static class Palette
             e.ArrowColor = Text;
             base.OnRenderArrow(e);
         }
+
+        protected override void OnRenderItemText(ToolStripItemTextRenderEventArgs e)
+        {
+            e.TextColor = e.Item.Enabled ? Text : TextDim;
+            base.OnRenderItemText(e);
+        }
     }
+
+    private static bool SetDwmAttribute(IntPtr handle, int attribute, int value)
+    {
+        try
+        {
+            return DwmSetWindowAttribute(handle, attribute, ref value, Marshal.SizeOf<int>()) == 0;
+        }
+        catch (DllNotFoundException) { return false; }
+        catch (EntryPointNotFoundException) { return false; }
+    }
+
+    [DllImport("dwmapi.dll")]
+    private static extern int DwmSetWindowAttribute(IntPtr hwnd, int dwAttribute, ref int pvAttribute, int cbAttribute);
 
     private sealed class PaletteColors : ProfessionalColorTable
     {
