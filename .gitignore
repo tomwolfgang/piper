@@ -2,3 +2,6 @@
 **/bin/
 **/obj/
 *.csproj.user
+
+/.build-verify-2/
+/.build-verify/
