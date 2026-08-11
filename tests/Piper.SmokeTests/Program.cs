@@ -368,6 +368,7 @@ await WebFormParserTests.RunAsync(runner);
 await FilterSettingsStoreTests.RunAsync(runner);
 await StatusBarSettingsStoreTests.RunAsync(runner);
 await ProxyConfigurationSettingsStoreTests.RunAsync(runner);
+await ConnectionSettingsBlobTests.RunAsync(runner);
 await HostRemappingTests.RunAsync(runner);
 await SessionStoreAdmissionTests.RunAsync(runner);
 await SazImporterTests.RunAsync(runner);
