@@ -28,12 +28,13 @@ public sealed class MainForm : Form
     private readonly ToolStripStatusLabel _breakpointsLabel;
     private readonly ToolStripStatusLabel _sessionsLabel;
     private readonly ToolStripStatusLabel _selectedSessionDetailsLabel;
+    private ToolStripButton? _themeToggle;
 
-    private static readonly Image CaptureOnIcon = CreateDotIcon(Palette.StatusOk);
-    private static readonly Image CaptureOffIcon = CreateDotIcon(Palette.StatusServerError);
-    private static readonly Image ScopeIcon = CreateScopeIcon();
-    private static readonly Image BreakpointIcon = CreateBreakpointIcon();
-    private static readonly Image SessionsIcon = CreateSessionsIcon();
+    private static Image CaptureOnIcon = CreateDotIcon(Palette.StatusOk);
+    private static Image CaptureOffIcon = CreateDotIcon(Palette.StatusServerError);
+    private static Image ScopeIcon = CreateScopeIcon();
+    private static Image BreakpointIcon = CreateBreakpointIcon();
+    private static Image SessionsIcon = CreateSessionsIcon();
 
     private SystemProxy.Snapshot? _proxySnapshot;
     private CaptureScope _captureScope = CaptureScope.AllProcesses;
@@ -178,6 +179,12 @@ public sealed class MainForm : Form
     {
         base.OnShown(e);
         _mainSplit.SplitterDistance = (int)(_mainSplit.Width * 0.55);
+        if (!EnsureTrustedRootForStartup())
+        {
+            UpdateCaptureStatus();
+            return;
+        }
+
         if (_captureEnabledOnStartup)
         {
             StartCapture();
@@ -190,6 +197,48 @@ public sealed class MainForm : Form
         // Runs after the window is already visible (StartCapture doesn't block), so unlike the
         // constructor this is a safe place for something that could pop a dialog on failure.
         if (_proxy.IsRunning) EnableSystemProxy();
+    }
+
+    /// <summary>
+    /// Gives the user an explicit startup choice before enabling capture. Trust installation
+    /// changes Windows' certificate store, so it must never happen silently.
+    /// </summary>
+    private bool EnsureTrustedRootForStartup()
+    {
+        if (TrustStore.IsTrusted(_ca.RootCertificate)) return true;
+
+        var answer = MessageBox.Show(this,
+            "Piper's HTTPS inspection certificate is not trusted by Windows.\r\n\r\n"
+            + "Click OK to install Piper's root certificate for this Windows user and restart Piper. "
+            + "HTTPS capture will then work immediately.\r\n\r\n"
+            + "This is a security-sensitive change: anything with access to Piper's private key "
+            + "can impersonate HTTPS sites to this Windows account. Only continue on a machine you control.",
+            "Trust Piper certificate",
+            MessageBoxButtons.OKCancel, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2);
+
+        if (answer != DialogResult.OK)
+        {
+            AppendLog("Root certificate is not trusted; startup capture remains off.");
+            return false;
+        }
+
+        try
+        {
+            TrustStore.Install(_ca.RootCertificate);
+            AppendLog($"Root certificate {_ca.RootCertificate.Thumbprint} added to the current user's trusted roots.");
+            _closeAfterShutdown = true;
+            Application.Restart();
+            Close();
+            return false;
+        }
+        catch (Exception ex)
+        {
+            AppendLog($"Could not trust the root certificate: {ex.Message}");
+            MessageBox.Show(this,
+                $"Piper could not install its root certificate, so capture has not started.\r\n\r\n{ex.Message}",
+                "Piper", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            return false;
+        }
     }
 
     private static TabPage NewPage(string title, Control content)
@@ -472,11 +521,69 @@ public sealed class MainForm : Form
             _composer.FocusSearch();
         };
 
+        _themeToggle = new ToolStripButton
+        {
+            Alignment = ToolStripItemAlignment.Right,
+            DisplayStyle = ToolStripItemDisplayStyle.Text,
+        };
+        _themeToggle.Click += (_, _) => ToggleTheme();
+        UpdateThemeToggle();
+
         toolbar.Items.AddRange([
             clear, new ToolStripSeparator(),
             composer,
+            _themeToggle,
         ]);
         return toolbar;
+    }
+
+    private void ToggleTheme()
+    {
+        Palette.ToggleMode();
+        Palette.Apply(this);
+        RefreshStatusIcons();
+        UpdateThemeToggle();
+        InvalidateTheme(this);
+    }
+
+    private void UpdateThemeToggle()
+    {
+        if (_themeToggle is null) return;
+
+        var target = Palette.IsLightMode ? "Dark" : "Light";
+        _themeToggle.Text = target + " mode";
+        _themeToggle.ToolTipText = "Switch to " + target.ToLowerInvariant() + " mode";
+    }
+
+    private void RefreshStatusIcons()
+    {
+        var oldCaptureOn = CaptureOnIcon;
+        var oldCaptureOff = CaptureOffIcon;
+        var oldScope = ScopeIcon;
+        var oldBreakpoints = BreakpointIcon;
+        var oldSessions = SessionsIcon;
+
+        CaptureOnIcon = CreateDotIcon(Palette.StatusOk);
+        CaptureOffIcon = CreateDotIcon(Palette.StatusServerError);
+        ScopeIcon = CreateScopeIcon();
+        BreakpointIcon = CreateBreakpointIcon();
+        SessionsIcon = CreateSessionsIcon();
+        _captureScopeLabel.Image = ScopeIcon;
+        _breakpointsLabel.Image = BreakpointIcon;
+        _sessionsLabel.Image = SessionsIcon;
+        UpdateCaptureStatus();
+
+        oldCaptureOn.Dispose();
+        oldCaptureOff.Dispose();
+        oldScope.Dispose();
+        oldBreakpoints.Dispose();
+        oldSessions.Dispose();
+    }
+
+    private static void InvalidateTheme(Control control)
+    {
+        control.Invalidate(true);
+        foreach (Control child in control.Controls) InvalidateTheme(child);
     }
 
     private static StatusStrip BuildStatusBar(out ToolStripStatusLabel status,

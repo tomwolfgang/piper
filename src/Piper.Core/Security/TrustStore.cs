@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 
 namespace Piper.Core.Security;
@@ -9,18 +10,33 @@ namespace Piper.Core.Security;
 /// <remarks>
 /// Trusting this root means any process holding the matching private key - which sits
 /// unencrypted-by-user-password in the local profile - can impersonate any TLS site to
-/// this account. Nothing in Piper calls <see cref="Install"/> implicitly; it is wired
-/// only to a menu command behind a confirmation prompt, and <see cref="Uninstall"/> is
+/// this account. Piper calls <see cref="Install"/> only after the user confirms either
+/// the startup prompt or the explicit configuration action; <see cref="Uninstall"/> is
 /// offered alongside it so the change is easy to reverse.
 /// </remarks>
 public static class TrustStore
 {
-    /// <summary>True when a certificate with this thumbprint is already trusted by the current user.</summary>
+    /// <summary>True when a certificate with this thumbprint is trusted by the user or machine root store.</summary>
     public static bool IsTrusted(X509Certificate2 certificate)
     {
-        using var store = new X509Store(StoreName.Root, StoreLocation.CurrentUser);
-        store.Open(OpenFlags.ReadOnly);
-        return store.Certificates.Any(c => c.Thumbprint == certificate.Thumbprint);
+        return IsTrusted(certificate, StoreLocation.CurrentUser)
+            || IsTrusted(certificate, StoreLocation.LocalMachine);
+    }
+
+    private static bool IsTrusted(X509Certificate2 certificate, StoreLocation location)
+    {
+        try
+        {
+            using var store = new X509Store(StoreName.Root, location);
+            store.Open(OpenFlags.ReadOnly);
+            return store.Certificates.Any(c => c.Thumbprint == certificate.Thumbprint);
+        }
+        catch (Exception ex) when (ex is CryptographicException or UnauthorizedAccessException)
+        {
+            // Some locked-down environments deny access to the machine store. A trusted
+            // current-user root remains sufficient for Piper, so treat that store as unavailable.
+            return false;
+        }
     }
 
     /// <summary>

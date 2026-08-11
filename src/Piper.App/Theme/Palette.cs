@@ -1,33 +1,75 @@
 using System.Drawing;
 using System.Windows.Forms;
+using Microsoft.Win32;
 
 namespace Piper.App.Theme;
 
-/// <summary>Dark palette applied by hand. WinForms' built-in dark mode is still experimental,
-/// and recursive theming gives us control over the grid and editor colours we care about.</summary>
+/// <summary>Application palette applied by hand. WinForms' built-in dark mode is still
+/// experimental, so recursive theming gives us control over the grid and editor colours we care about.</summary>
 public static class Palette
 {
-    public static readonly Color Background = Color.FromArgb(30, 30, 32);
-    public static readonly Color Surface = Color.FromArgb(37, 37, 40);
-    /// <summary>Same darkness as <see cref="Surface"/>, tinted red -- for editors flagging a
-    /// likely mistake (e.g. an empty POST/PUT body) rather than an active error state.</summary>
-    public static readonly Color SurfaceWarning = Color.FromArgb(58, 32, 34);
-    public static readonly Color SurfaceAlt = Color.FromArgb(45, 45, 48);
-    public static readonly Color Border = Color.FromArgb(62, 62, 66);
-    public static readonly Color Text = Color.FromArgb(224, 224, 226);
-    public static readonly Color TextDim = Color.FromArgb(150, 150, 156);
-    public static readonly Color Accent = Color.FromArgb(0, 122, 204);
-    public static readonly Color Selection = Color.FromArgb(38, 79, 120);
+    private const string PersonalizeKey = @"HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize";
+    private static readonly ThemeColors Dark = new(
+        Color.FromArgb(30, 30, 32), Color.FromArgb(37, 37, 40), Color.FromArgb(58, 32, 34),
+        Color.FromArgb(45, 45, 48), Color.FromArgb(62, 62, 66), Color.FromArgb(224, 224, 226),
+        Color.FromArgb(150, 150, 156), Color.FromArgb(0, 122, 204), Color.FromArgb(38, 79, 120),
+        Color.FromArgb(106, 190, 120), Color.FromArgb(120, 170, 220), Color.FromArgb(230, 180, 100),
+        Color.FromArgb(232, 110, 110), Color.FromArgb(140, 140, 148), Color.FromArgb(190, 150, 230));
+    private static readonly ThemeColors Light = new(
+        Color.FromArgb(250, 250, 250), Color.White, Color.FromArgb(255, 240, 240),
+        Color.FromArgb(242, 242, 242), Color.FromArgb(205, 205, 205), Color.FromArgb(35, 35, 35),
+        Color.FromArgb(100, 100, 100), Color.FromArgb(0, 102, 204), Color.FromArgb(214, 232, 251),
+        Color.FromArgb(35, 130, 65), Color.FromArgb(55, 115, 180), Color.FromArgb(170, 105, 15),
+        Color.FromArgb(190, 55, 55), Color.FromArgb(105, 105, 112), Color.FromArgb(125, 80, 180));
 
-    public static readonly Color StatusOk = Color.FromArgb(106, 190, 120);
-    public static readonly Color StatusRedirect = Color.FromArgb(120, 170, 220);
-    public static readonly Color StatusClientError = Color.FromArgb(230, 180, 100);
-    public static readonly Color StatusServerError = Color.FromArgb(232, 110, 110);
-    public static readonly Color StatusTunnel = Color.FromArgb(140, 140, 148);
-    public static readonly Color Composed = Color.FromArgb(190, 150, 230);
+    private static ThemeMode _mode = DetectWindowsTheme();
+
+    public static ThemeMode Mode => _mode;
+    public static bool IsLightMode => _mode == ThemeMode.Light;
+    private static ThemeColors Current => IsLightMode ? Light : Dark;
+
+    public static Color Background => Current.Background;
+    public static Color Surface => Current.Surface;
+    /// <summary>Tinted editor background for a likely mistake (e.g. an empty POST/PUT body).</summary>
+    public static Color SurfaceWarning => Current.SurfaceWarning;
+    public static Color SurfaceAlt => Current.SurfaceAlt;
+    public static Color Border => Current.Border;
+    public static Color Text => Current.Text;
+    public static Color TextDim => Current.TextDim;
+    public static Color Accent => Current.Accent;
+    public static Color Selection => Current.Selection;
+    public static Color StatusOk => Current.StatusOk;
+    public static Color StatusRedirect => Current.StatusRedirect;
+    public static Color StatusClientError => Current.StatusClientError;
+    public static Color StatusServerError => Current.StatusServerError;
+    public static Color StatusTunnel => Current.StatusTunnel;
+    public static Color Composed => Current.Composed;
 
     public static readonly Font Mono = new("Consolas", 9.5f);
     public static readonly Font UiFont = new("Segoe UI", 9f);
+
+    public static void ToggleMode() => SetMode(IsLightMode ? ThemeMode.Dark : ThemeMode.Light);
+
+    public static void SetMode(ThemeMode mode)
+    {
+        if (_mode == mode) return;
+        _mode = mode;
+    }
+
+    private static ThemeMode DetectWindowsTheme()
+    {
+        try
+        {
+            // AppsUseLightTheme is the choice under Windows Settings > Personalization > Colors.
+            return Registry.GetValue(PersonalizeKey, "AppsUseLightTheme", 0) is int { } value && value != 0
+                ? ThemeMode.Light
+                : ThemeMode.Dark;
+        }
+        catch
+        {
+            return ThemeMode.Dark;
+        }
+    }
 
     /// <summary>Colour used for a session row, by outcome.</summary>
     public static Color ForStatus(int statusCode, bool isTunnel, bool failed, bool composed)
@@ -102,7 +144,7 @@ public static class Palette
             case ToolStrip toolStrip:
                 toolStrip.BackColor = SurfaceAlt;
                 toolStrip.ForeColor = Text;
-                toolStrip.Renderer = new DarkToolStripRenderer();
+                toolStrip.Renderer = new PaletteToolStripRenderer();
                 foreach (ToolStripItem item in toolStrip.Items)
                 {
                     item.BackColor = SurfaceAlt;
@@ -118,7 +160,7 @@ public static class Palette
         foreach (Control child in control.Controls) Apply(child);
     }
 
-    private sealed class DarkToolStripRenderer() : ToolStripProfessionalRenderer(new DarkColors())
+    private sealed class PaletteToolStripRenderer() : ToolStripProfessionalRenderer(new PaletteColors())
     {
         protected override void OnRenderArrow(ToolStripArrowRenderEventArgs e)
         {
@@ -127,7 +169,7 @@ public static class Palette
         }
     }
 
-    private sealed class DarkColors : ProfessionalColorTable
+    private sealed class PaletteColors : ProfessionalColorTable
     {
         public override Color MenuItemSelected => Selection;
         public override Color MenuItemSelectedGradientBegin => Selection;
@@ -150,4 +192,16 @@ public static class Palette
         public override Color ButtonPressedHighlight => Selection;
         public override Color CheckBackground => Selection;
     }
+
+    private sealed record ThemeColors(
+        Color Background, Color Surface, Color SurfaceWarning, Color SurfaceAlt, Color Border,
+        Color Text, Color TextDim, Color Accent, Color Selection, Color StatusOk,
+        Color StatusRedirect, Color StatusClientError, Color StatusServerError, Color StatusTunnel,
+        Color Composed);
+}
+
+public enum ThemeMode
+{
+    Dark,
+    Light,
 }
