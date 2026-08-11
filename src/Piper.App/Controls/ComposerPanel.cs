@@ -36,6 +36,12 @@ public sealed class ComposerPanel : UserControl
     private readonly TabControl _editorTabs;
     private readonly Button _execute;
     private readonly Label _status;
+    private readonly ToolTip _historyToolTip = new();
+    private string? _historyToolTipText;
+    // Persisted Composer history belongs in this panel, not in SessionStore. The latter drives
+    // the capture list, so restoring history there made an old composed request appear as the
+    // first "captured" session every time Piper started.
+    private readonly List<Session> _history = [];
 
     private CancellationTokenSource? _inFlight;
 
@@ -44,7 +50,7 @@ public sealed class ComposerPanel : UserControl
         _store = store;
         _executor = executor;
 
-        foreach (var restored in ComposerHistoryStore.Load()) _store.Add(restored);
+        _history.AddRange(ComposerHistoryStore.Load());
 
         // ---------------------------------------------------------- search pane
 
@@ -83,6 +89,7 @@ public sealed class ComposerPanel : UserControl
             VirtualMode = true,
             OwnerDraw = true,
             HideSelection = false,
+            MultiSelect = true,
             HeaderStyle = ColumnHeaderStyle.Nonclickable,
             Font = Palette.Mono,
         };
@@ -96,9 +103,26 @@ public sealed class ComposerPanel : UserControl
         _results.RetrieveVirtualItem += OnRetrieveResult;
         _results.DrawColumnHeader += OnDrawResultHeader;
         _results.DrawSubItem += OnDrawResultSubItem;
+        _results.MouseMove += OnResultsMouseMove;
+        _results.MouseLeave += (_, _) => SetHistoryToolTip(null);
         _results.DoubleClick += (_, _) => LoadSelectedResult();
+        _results.MouseDown += OnResultsMouseDown;
+        _results.ContextMenuStrip = BuildHistoryMenu();
         _results.KeyDown += (_, e) =>
         {
+            if (e.Control && e.KeyCode == Keys.F)
+            {
+                FocusSearch();
+                e.SuppressKeyPress = true;
+                e.Handled = true;
+                return;
+            }
+            if (e.KeyCode == Keys.Delete)
+            {
+                RemoveSelectedHistory();
+                e.Handled = true;
+                return;
+            }
             if (e.KeyCode != Keys.Enter) return;
             LoadSelectedResult();
             e.Handled = true;
@@ -113,11 +137,11 @@ public sealed class ComposerPanel : UserControl
         var searchHeader = new Label
         {
             Dock = DockStyle.Top,
-            Height = 22,
-            Text = "  Composer history",
+            Height = 28,
+            Text = "  Composer History",
             ForeColor = Palette.Text,
             Font = new Font("Segoe UI", 9f, FontStyle.Bold),
-            Padding = new Padding(0, 4, 0, 0),
+            Padding = new Padding(0, 5, 0, 0),
         };
 
         var searchContainer = new Panel { Dock = DockStyle.Fill };
@@ -299,7 +323,10 @@ public sealed class ComposerPanel : UserControl
         // Only requests are useful here, so drop undecrypted tunnels. This pane is the
         // Composer's own history, not a window into all captured traffic, so only sessions
         // actually sent from the Composer belong here.
-        _matches = _store.Search(query).Where(s => !s.IsTunnel && s.Request is not null && s.IsComposed).Reverse().ToArray();
+        _matches = _history
+            .Where(s => !s.IsTunnel && s.Request is not null && query.Matches(s))
+            .OrderByDescending(s => s.Completed ?? s.Started)
+            .ToArray();
 
         _results.BeginUpdate();
         _results.VirtualListSize = _matches.Length;
@@ -328,6 +355,62 @@ public sealed class ComposerPanel : UserControl
         item.SubItems.Add(string.Empty); // filler column
         item.Tag = session;
         e.Item = item;
+    }
+
+    private void OnResultsMouseDown(object? sender, MouseEventArgs e)
+    {
+        if (e.Button != MouseButtons.Right || _results.GetItemAt(e.X, e.Y) is not { } item) return;
+        _results.SelectedIndices.Clear();
+        item.Selected = true;
+        item.Focused = true;
+    }
+
+    private void OnResultsMouseMove(object? sender, MouseEventArgs e)
+    {
+        var hit = _results.HitTest(e.Location);
+        if (hit.Item is null || hit.SubItem is null)
+        {
+            SetHistoryToolTip(null);
+            return;
+        }
+
+        var columnIndex = hit.Item.SubItems.IndexOf(hit.SubItem);
+        var text = hit.SubItem.Text;
+        var availableWidth = _results.Columns[columnIndex].Width - 8;
+        var textWidth = TextRenderer.MeasureText(text, Palette.Mono, Size.Empty,
+            TextFormatFlags.SingleLine | TextFormatFlags.NoPadding).Width;
+
+        SetHistoryToolTip(textWidth > availableWidth ? text : null);
+    }
+
+    private void SetHistoryToolTip(string? text)
+    {
+        if (_historyToolTipText == text) return;
+        _historyToolTipText = text;
+        _historyToolTip.SetToolTip(_results, text);
+    }
+
+    private ContextMenuStrip BuildHistoryMenu()
+    {
+        var menu = new ContextMenuStrip { Font = Palette.UiFont };
+        var remove = new ToolStripMenuItem("&Remove from history\tDel", null, (_, _) => RemoveSelectedHistory());
+        menu.Items.Add(remove);
+        menu.Opening += (_, _) => remove.Enabled = _results.SelectedIndices.Cast<int>()
+            .Any(index => index >= 0 && index < _matches.Length);
+        return menu;
+    }
+
+    private void RemoveSelectedHistory()
+    {
+        var selected = _results.SelectedIndices.Cast<int>()
+            .Where(index => index >= 0 && index < _matches.Length)
+            .Select(index => _matches[index])
+            .ToHashSet();
+        if (selected.Count == 0) return;
+
+        _history.RemoveAll(selected.Contains);
+        ComposerHistoryStore.Save(_history);
+        RunSearch();
     }
 
     private static void OnDrawResultHeader(object? sender, DrawListViewColumnHeaderEventArgs e)
@@ -488,6 +571,30 @@ public sealed class ComposerPanel : UserControl
             return;
         }
 
+        await ExecuteRequestAsync(template, addToHistory: true);
+    }
+
+    /// <summary>Replays a captured request without changing the Composer editor fields.</summary>
+    public Task ResendAsync(Session session)
+    {
+        if (session.Request is null) return Task.CompletedTask;
+
+        var replay = session.Request.Clone();
+        // The Composer deliberately writes an HTTP/1.1 request over its upstream TCP
+        // connection. Reusing an HTTP/2 or HTTP/3 capture's request-line version here makes
+        // an h1 origin correctly reject it with 505 HTTP Version Not Supported.
+        replay.HttpVersion = "HTTP/1.1";
+        return ExecuteRequestAsync(replay, addToHistory: false);
+    }
+
+    private async Task ExecuteRequestAsync(HttpRequestData template, bool addToHistory)
+    {
+        if (_inFlight is not null)
+        {
+            await _inFlight.CancelAsync();
+            return;
+        }
+
         _inFlight = new CancellationTokenSource();
         _execute.Text = "Cancel";
         _status.ForeColor = Palette.TextDim;
@@ -496,7 +603,14 @@ public sealed class ComposerPanel : UserControl
         try
         {
             var session = await _executor.ExecuteAsync(template, _inFlight.Token);
-            ComposerHistoryStore.Save(_store.Snapshot().Where(s => s.IsComposed).ToArray());
+            if (addToHistory)
+            {
+                // The explicit Composer Send action owns this history. Ctrl+R replays are
+                // captured in the session list, but intentionally do not become history.
+                _history.Add(session);
+                ComposerHistoryStore.Save(_history);
+                _searchDirty = true;
+            }
 
             if (session.State == SessionState.Failed)
             {
@@ -539,6 +653,7 @@ public sealed class ComposerPanel : UserControl
         {
             _searchTimer.Dispose();
             _inFlight?.Dispose();
+            _historyToolTip.Dispose();
         }
         base.Dispose(disposing);
     }

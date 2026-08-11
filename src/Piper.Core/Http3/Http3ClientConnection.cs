@@ -48,16 +48,20 @@ public sealed class Http3ClientConnection : IAsyncDisposable
     public static async Task<Http3ClientConnection> ConnectAsync(
         string host, int port, ProxyOptions options, CancellationToken ct)
     {
+        var remapping = options.HostRemapping.ResolveTarget(host);
+        EndPoint remoteEndPoint = IPAddress.TryParse(remapping.Host, out var address)
+            ? new IPEndPoint(address, port)
+            : new DnsEndPoint(remapping.Host, port);
         var connection = await QuicConnection.ConnectAsync(new QuicClientConnectionOptions
         {
-            RemoteEndPoint = new DnsEndPoint(host, port),
+            RemoteEndPoint = remoteEndPoint,
             DefaultStreamErrorCode = (long)Http3ErrorCode.RequestCancelled,
             DefaultCloseErrorCode = (long)Http3ErrorCode.NoError,
             MaxInboundUnidirectionalStreams = 8, // control + QPACK encoder/decoder, plus slack
             MaxInboundBidirectionalStreams = 0,  // we never accept origin-initiated requests
             ClientAuthenticationOptions = new SslClientAuthenticationOptions
             {
-                TargetHost = host,
+                TargetHost = remapping.RewritesAuthority ? remapping.Host : host,
                 ApplicationProtocols = [new SslApplicationProtocol("h3")],
                 RemoteCertificateValidationCallback = (_, _, _, errors) =>
                     !options.ValidateUpstreamCertificates || errors == SslPolicyErrors.None,

@@ -10,19 +10,15 @@ public sealed class InspectorPanel : UserControl
 {
     private readonly MessageInspector _request = new("Request") { Dock = DockStyle.Fill };
     private readonly MessageInspector _response = new("Response", showImageViewer: true) { Dock = DockStyle.Fill };
-    private readonly Label _timings;
+
+    /// <summary>Raised when the selected session's timing/transfer summary changes.</summary>
+    public event EventHandler? TimingChanged;
+
+    /// <summary>The selected session's timing/transfer summary, for the main status bar.</summary>
+    public string TimingText { get; private set; } = string.Empty;
 
     public InspectorPanel()
     {
-        _timings = new Label
-        {
-            Dock = DockStyle.Bottom,
-            Height = 22,
-            ForeColor = Palette.TextDim,
-            Font = Palette.Mono,
-            Padding = new Padding(6, 4, 0, 0),
-        };
-
         _split = new SplitContainer
         {
             Dock = DockStyle.Fill,
@@ -33,7 +29,6 @@ public sealed class InspectorPanel : UserControl
         _split.Panel2.Controls.Add(_response);
 
         Controls.Add(_split);
-        Controls.Add(_timings);
     }
 
     private readonly SplitContainer _split;
@@ -57,7 +52,7 @@ public sealed class InspectorPanel : UserControl
         {
             _request.SetMessage(null, "Request");
             _response.SetMessage(null, "Response");
-            _timings.Text = string.Empty;
+            SetTimingText(string.Empty);
             return;
         }
 
@@ -79,7 +74,14 @@ public sealed class InspectorPanel : UserControl
             }, session.Host);
         }
 
-        _timings.Text = BuildTimingLine(session);
+        SetTimingText(BuildTimingLine(session));
+    }
+
+    private void SetTimingText(string value)
+    {
+        if (TimingText == value) return;
+        TimingText = value;
+        TimingChanged?.Invoke(this, EventArgs.Empty);
     }
 
     private static string BuildTimingLine(Session session)

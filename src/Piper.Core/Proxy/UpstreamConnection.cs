@@ -11,7 +11,7 @@ namespace Piper.Core.Proxy;
 /// </summary>
 internal sealed class UpstreamConnection : IDisposable
 {
-    private UpstreamConnection(TcpClient client, Stream stream, string host, int port, bool isTls, bool isHttp2)
+    private UpstreamConnection(TcpClient client, Stream stream, string host, int port, bool isTls, bool isHttp2, long remappingRevision)
     {
         Client = client;
         Stream = stream;
@@ -20,6 +20,7 @@ internal sealed class UpstreamConnection : IDisposable
         Port = port;
         IsTls = isTls;
         IsHttp2 = isHttp2;
+        RemappingRevision = remappingRevision;
     }
 
     public TcpClient Client { get; }
@@ -32,11 +33,13 @@ internal sealed class UpstreamConnection : IDisposable
     /// <summary>True when the origin negotiated h2 via ALPN. Always false for plain (non-TLS)
     /// connections -- HTTP/2 without TLS (h2c) is not something Piper ever offers upstream.</summary>
     public bool IsHttp2 { get; }
+    public long RemappingRevision { get; }
 
     public string? RemoteEndpoint => Client.Client?.RemoteEndPoint?.ToString();
 
-    public bool Matches(string host, int port, bool isTls) =>
-        IsTls == isTls && Port == port && string.Equals(Host, host, StringComparison.OrdinalIgnoreCase);
+    public bool Matches(string host, int port, bool isTls, long remappingRevision) =>
+        IsTls == isTls && Port == port && RemappingRevision == remappingRevision
+        && string.Equals(Host, host, StringComparison.OrdinalIgnoreCase);
 
     public bool IsUsable
     {
@@ -61,11 +64,13 @@ internal sealed class UpstreamConnection : IDisposable
         string host, int port, bool isTls, ProxyOptions options, CancellationToken ct, bool allowHttp2 = true)
     {
         var client = new TcpClient { NoDelay = true };
+        var remapping = options.HostRemapping.ResolveTarget(host);
+        var tlsHost = remapping.RewritesAuthority ? remapping.Host : host;
         try
         {
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
             timeout.CancelAfter(options.ConnectTimeout);
-            await client.ConnectAsync(host, port, timeout.Token).ConfigureAwait(false);
+            await client.ConnectAsync(remapping.Host, port, timeout.Token).ConfigureAwait(false);
         }
         catch
         {
@@ -85,7 +90,7 @@ internal sealed class UpstreamConnection : IDisposable
             {
                 await ssl.AuthenticateAsClientAsync(new SslClientAuthenticationOptions
                 {
-                    TargetHost = host,
+                    TargetHost = tlsHost,
                     EnabledSslProtocols = SslProtocols.None, // negotiate the best the OS offers
                     CertificateRevocationCheckMode = System.Security.Cryptography.X509Certificates.X509RevocationMode.NoCheck,
                     // Omitted entirely (rather than set to just http/1.1) when the toggle is off,
@@ -106,7 +111,7 @@ internal sealed class UpstreamConnection : IDisposable
             stream = ssl;
         }
 
-        return new UpstreamConnection(client, stream, host, port, isTls, isHttp2);
+        return new UpstreamConnection(client, stream, host, port, isTls, isHttp2, remapping.Revision);
     }
 
     public void Dispose()

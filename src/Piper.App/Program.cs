@@ -6,7 +6,7 @@ namespace Piper.App;
 internal static class Program
 {
     [STAThread]
-    private static void Main()
+    private static void Main(string[] args)
     {
         // Legacy charsets (windows-1252, shift_jis, ...) still show up in real traffic and
         // are not in the default .NET provider.
@@ -17,7 +17,26 @@ internal static class Program
         Application.ThreadException += (_, e) => ReportCrash(e.Exception);
         AppDomain.CurrentDomain.UnhandledException += (_, e) => ReportCrash(e.ExceptionObject as Exception);
 
-        Application.Run(new MainForm());
+        var startupFiles = args.Where(SazFileRelay.IsSazFile).ToArray();
+        using var mutex = new Mutex(initiallyOwned: true, SazFileRelay.MutexName, out var firstInstance);
+        if (!firstInstance)
+        {
+            // File association launches and command-line opens both come through here. A short
+            // retry handles the race where the first instance has created its mutex but has not
+            // begun listening on its pipe yet.
+            SazFileRelay.TryForward(startupFiles);
+            return;
+        }
+
+        using var form = new MainForm();
+        using var relay = new SazFileRelay(files =>
+        {
+            if (form.IsDisposed || files.Count == 0) return;
+            try { form.BeginInvoke(() => form.ImportSazFiles(files)); }
+            catch (InvalidOperationException) { }
+        });
+        form.Shown += (_, _) => form.ImportSazFiles(startupFiles);
+        Application.Run(form);
     }
 
     /// <summary>Path of the crash log, also used by the smoke harness to diagnose startup failures.</summary>

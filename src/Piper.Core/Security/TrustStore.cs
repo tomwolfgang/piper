@@ -31,6 +31,16 @@ public static class TrustStore
     {
         using var store = new X509Store(StoreName.Root, StoreLocation.CurrentUser);
         store.Open(OpenFlags.ReadWrite);
+
+        // A root's displayed subject cannot be changed in place. When the user
+        // explicitly trusts Piper's replacement root, retire legacy Piper roots at
+        // the same time so the Windows Certificates list has one clear entry.
+        var legacyRoots = store.Certificates
+            .Where(c => c.Thumbprint != certificate.Thumbprint
+                && c.Subject.Contains("Piper Root CA", StringComparison.OrdinalIgnoreCase))
+            .ToList();
+        foreach (var legacy in legacyRoots) store.Remove(legacy);
+
         // Store only the public certificate - the private key stays in the profile PFX.
         using var publicOnly = X509CertificateLoader.LoadCertificate(certificate.RawData);
         store.Add(publicOnly);
@@ -43,7 +53,10 @@ public static class TrustStore
         store.Open(OpenFlags.ReadWrite);
 
         var stale = store.Certificates
-            .Where(c => c.Subject.Contains("Piper Root CA", StringComparison.OrdinalIgnoreCase))
+            // Include the old name so upgrading Piper does not leave an obsolete
+            // interception root trusted in the user's store.
+            .Where(c => c.Subject.Contains(CertificateAuthority.RootCommonName, StringComparison.OrdinalIgnoreCase)
+                || c.Subject.Contains("Piper Root CA", StringComparison.OrdinalIgnoreCase))
             .ToList();
 
         foreach (var cert in stale) store.Remove(cert);

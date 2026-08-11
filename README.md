@@ -1,5 +1,11 @@
 # Piper
 
+[![CI](https://github.com/tomwolfgang/piper/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/tomwolfgang/piper/actions/workflows/ci.yml)
+[![Latest release](https://img.shields.io/github/v/release/tomwolfgang/piper?display_name=tag&sort=semver)](https://github.com/tomwolfgang/piper/releases)
+[![License](https://img.shields.io/github/license/tomwolfgang/piper)](LICENSE)
+[![.NET 10](https://img.shields.io/badge/.NET-10-512BD4?logo=dotnet&logoColor=white)](https://dotnet.microsoft.com/)
+[![Windows](https://img.shields.io/badge/platform-Windows-0078D6?logo=windows&logoColor=white)](https://www.microsoft.com/windows/)
+
 An HTTP(S) debugging proxy for Windows, written from scratch in C# on .NET 10 / WinForms.
 
 ## Why this exists
@@ -163,3 +169,34 @@ streams entirely.
 ## License
 
 Piper is licensed under the GNU General Public License v3.0 only. See [LICENSE](LICENSE).
+
+## Releasing
+
+Set the `<Version>` in `src/Piper.App/Piper.App.csproj`, commit it, then create and push a
+matching tag (for example, `v0.2.0`). The GitHub release workflow verifies the tag matches the
+project version, runs the smoke tests, and publishes an NSIS installer, a portable Windows x64
+ZIP, a source ZIP, and SHA-256 checksums.
+
+To build an installer from Visual Studio, open `Piper.slnx`, choose the `Release` configuration,
+then right-click `installer/Piper.Installer` and select **Build**. The installer is written to
+`installer/bin/Release/Piper-<version>-setup.exe`. Install NSIS first; if it is installed somewhere
+other than its default location, set the `NsisExecutable` MSBuild property to its `makensis.exe` path.
+The Modern UI installer lets people choose a current-user installation or an all-users installation;
+the all-users option requests administrator approval and installs to Program Files.
+Its displayed and registered version is read from the published `Piper.exe` file metadata.
+The Components page also offers an optional desktop shortcut.
+
+To build the installer locally, publish the app first and pass the generated paths to NSIS:
+
+```powershell
+$version = "0.1.0"
+dotnet publish src/Piper.App/Piper.App.csproj -c Release -r win-x64 --self-contained true `
+  -p:PublishSingleFile=true -o publish
+New-Item artifacts -ItemType Directory -Force
+$output = Join-Path (Resolve-Path artifacts).Path "Piper-$version-setup.exe"
+& "${env:ProgramFiles(x86)}\NSIS\makensis.exe" `
+  "/DPRODUCT_VERSION=$version" `
+  "/DPUBLISH_DIR=$((Resolve-Path publish).Path)" `
+  "/DOUTPUT_FILE=$output" `
+  installer/Piper.nsi
+```

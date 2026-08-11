@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    runs-on: windows-2022
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Restore
+        run: dotnet restore Piper.slnx
+
+      - name: Build
+        run: dotnet build Piper.slnx --configuration Release --no-restore
+
+      - name: Run smoke tests
+        run: dotnet run --project tests/Piper.SmokeTests/Piper.SmokeTests.csproj --configuration Release --no-build

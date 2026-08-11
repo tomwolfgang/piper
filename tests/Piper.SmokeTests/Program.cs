@@ -11,6 +11,53 @@ using Piper.Core.Sessions;
 
 var runner = new TestRunner();
 
+await runner.RunAsync("generated root has an unmistakable Windows certificate name", () =>
+{
+    var directory = Path.Combine(Path.GetTempPath(), $"Piper-SmokeTest-RootName-{Guid.NewGuid():N}");
+    try
+    {
+        using var testCa = CertificateAuthority.LoadOrCreate(directory);
+        runner.AreEqual(CertificateAuthority.RootCommonName,
+            testCa.RootCertificate.GetNameInfo(System.Security.Cryptography.X509Certificates.X509NameType.SimpleName, false),
+            "Issued To name identifies Piper's local interception root");
+    }
+    finally
+    {
+        if (Directory.Exists(directory)) Directory.Delete(directory, recursive: true);
+    }
+
+    return Task.CompletedTask;
+});
+
+await runner.RunAsync("legacy root is rotated to the clear certificate name", () =>
+{
+    var directory = Path.Combine(Path.GetTempPath(), $"Piper-SmokeTest-LegacyRoot-{Guid.NewGuid():N}");
+    try
+    {
+        Directory.CreateDirectory(directory);
+        using (var rsa = System.Security.Cryptography.RSA.Create(2048))
+        {
+            var request = new System.Security.Cryptography.X509Certificates.CertificateRequest(
+                "CN=Piper Root CA, O=Piper", rsa, System.Security.Cryptography.HashAlgorithmName.SHA256,
+                System.Security.Cryptography.RSASignaturePadding.Pkcs1);
+            using var legacy = request.CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddYears(1));
+            File.WriteAllBytes(Path.Combine(directory, "Piper-Root.pfx"),
+                legacy.Export(System.Security.Cryptography.X509Certificates.X509ContentType.Pfx, "Piper"));
+        }
+
+        using var testCa = CertificateAuthority.LoadOrCreate(directory);
+        runner.AreEqual(CertificateAuthority.RootCommonName,
+            testCa.RootCertificate.GetNameInfo(System.Security.Cryptography.X509Certificates.X509NameType.SimpleName, false),
+            "legacy root was reissued with the new name");
+    }
+    finally
+    {
+        if (Directory.Exists(directory)) Directory.Delete(directory, recursive: true);
+    }
+
+    return Task.CompletedTask;
+});
+
 const int OriginPort = 19099;
 const int ProxyPort = 19088;
 var originBase = $"http://127.0.0.1:{OriginPort}";
@@ -192,6 +239,76 @@ await runner.RunAsync("search query grammar", () =>
     return Task.CompletedTask;
 });
 
+await runner.RunAsync("host remapping redirects the origin connection without changing Host", async () =>
+{
+    const string requestedHost = "remapped.piper.test";
+    options.HostRemapping.Apply(new HostRemappingSettings
+    {
+        Enabled = true,
+        Mappings = $"127.0.0.1 {requestedHost}",
+    });
+    try
+    {
+        var response = await client.GetAsync($"http://{requestedHost}:{OriginPort}/api/orders?id=remapped");
+        runner.AreEqual(HttpStatusCode.OK, response.StatusCode, "mapped request reaches the local origin");
+        runner.IsTrue(origin.LastRequestHeaders.Contains($"Host: {requestedHost}:{OriginPort}", StringComparison.OrdinalIgnoreCase),
+            "original Host header reaches the remapped origin");
+
+        var session = await WaitForAsync(store, s => s.Host == requestedHost && s.Query == "?id=remapped");
+        runner.AreEqual(requestedHost, session.Host, "captured request retains the original URL host");
+    }
+    finally
+    {
+        options.HostRemapping.Apply(new HostRemappingSettings());
+    }
+});
+
+await runner.RunAsync("hostname remapping rewrites the outbound Host authority", async () =>
+{
+    const string requestedHost = "remapped-authority.piper.test";
+    options.HostRemapping.Apply(new HostRemappingSettings
+    {
+        Enabled = true,
+        Mappings = $"localhost {requestedHost}",
+    });
+    try
+    {
+        var response = await client.GetAsync($"http://{requestedHost}:{OriginPort}/api/orders?id=authority-rewrite");
+        runner.AreEqual(HttpStatusCode.OK, response.StatusCode, "hostname target reaches the local origin");
+        runner.IsTrue(origin.LastRequestHeaders.Contains($"Host: localhost:{OriginPort}", StringComparison.OrdinalIgnoreCase),
+            "hostname target replaces the outbound Host header");
+
+        var session = await WaitForAsync(store, s => s.Host == requestedHost && s.Query == "?id=authority-rewrite");
+        runner.AreEqual(requestedHost, session.Host, "captured request still identifies the browser URL host");
+    }
+    finally
+    {
+        options.HostRemapping.Apply(new HostRemappingSettings());
+    }
+});
+
+await runner.RunAsync("global User-Agent rule overrides proxied requests", async () =>
+{
+    const string userAgent = "PiperSmokeTest/1.0";
+    options.GlobalUserAgent = userAgent;
+    try
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Get, $"{originBase}/api/orders");
+        request.Headers.TryAddWithoutValidation("User-Agent", "OriginalClient/1.0");
+        using var response = await client.SendAsync(request);
+
+        runner.AreEqual(HttpStatusCode.OK, response.StatusCode, "request completed");
+        runner.IsTrue(origin.LastRequestHeaders.Contains($"User-Agent: {userAgent}", StringComparison.Ordinal),
+            "origin receives the configured User-Agent");
+        runner.IsTrue(!origin.LastRequestHeaders.Contains("OriginalClient/1.0", StringComparison.Ordinal),
+            "original User-Agent is replaced");
+    }
+    finally
+    {
+        options.GlobalUserAgent = null;
+    }
+});
+
 await runner.RunAsync("header collection semantics", () =>
 {
     var headers = new HeaderCollection();
@@ -248,6 +365,11 @@ origin.Stop();
 
 await HostFilterTests.RunAsync(runner);
 await FilterSettingsStoreTests.RunAsync(runner);
+await StatusBarSettingsStoreTests.RunAsync(runner);
+await ProxyConfigurationSettingsStoreTests.RunAsync(runner);
+await HostRemappingTests.RunAsync(runner);
+await SessionStoreAdmissionTests.RunAsync(runner);
+await SazImporterTests.RunAsync(runner);
 await HpackTests.RunAsync(runner);
 await Http2FrameTests.RunAsync(runner);
 await Http2MessageAdapterTests.RunAsync(runner);

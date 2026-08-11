@@ -27,6 +27,9 @@ public sealed class ProxyOptions
     /// <summary>Advertise only encodings we can decode, so captured bodies stay readable.</summary>
     public bool NormalizeAcceptEncoding { get; set; } = true;
 
+    /// <summary>When set, replaces the User-Agent of every request forwarded by the running proxy.</summary>
+    public string? GlobalUserAgent { get; set; }
+
     /// <summary>Offer HTTP/2 via ALPN on the browser-facing side of a decrypted tunnel. Defaults
     /// on: browsers already negotiate h2 with virtually every real site today, so silently
     /// forcing HTTP/1.1 through the proxy is itself the anomaly for a tool whose purpose is
@@ -51,6 +54,9 @@ public sealed class ProxyOptions
     /// not carry; turn it on deliberately when you want to see what an origin serves over h3.
     /// </remarks>
     public bool EnableHttp3Upstream { get; set; }
+
+    /// <summary>Optional per-host origin overrides, applied without changing the requested host identity.</summary>
+    public HostRemapping HostRemapping { get; } = new();
 
     /// <summary>How long to wait for a QUIC handshake before abandoning h3 and falling back to
     /// TCP. Deliberately short -- this is speculative work in front of a request that has a

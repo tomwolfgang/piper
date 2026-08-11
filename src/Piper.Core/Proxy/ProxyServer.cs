@@ -302,7 +302,7 @@ public sealed class ProxyServer : IAsyncDisposable
             using (var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct))
             {
                 timeout.CancelAfter(_options.ConnectTimeout);
-                await server.ConnectAsync(host, port, timeout.Token).ConfigureAwait(false);
+                await server.ConnectAsync(_options.HostRemapping.Resolve(host), port, timeout.Token).ConfigureAwait(false);
             }
 
             await WriteAsciiAsync(clientStream, "HTTP/1.1 200 Connection Established\r\n\r\n", ct).ConfigureAwait(false);
@@ -427,7 +427,7 @@ public sealed class ProxyServer : IAsyncDisposable
             if (response is null)
             {
                 var upstream = slot.Connection;
-                if (upstream is not null && (!upstream.Matches(host, port, targetIsTls) || !upstream.IsUsable))
+                if (upstream is not null && (!upstream.Matches(host, port, targetIsTls, _options.HostRemapping.Revision) || !upstream.IsUsable))
                 {
                     slot.Reset();
                     upstream = null;
@@ -540,6 +540,23 @@ public sealed class ProxyServer : IAsyncDisposable
 
         if (options.NormalizeAcceptEncoding && outbound.Headers.Contains("Accept-Encoding"))
             outbound.Headers.Set("Accept-Encoding", "gzip, deflate, br");
+
+        // Mapping to an IP is a conventional hosts-file override: the connection moves, but the
+        // requested authority remains intact. Mapping to another hostname is a full authority
+        // rewrite, which is what lets a virtual host such as a CDN select the replacement site.
+        if (outbound.Url is { } url)
+        {
+            var remapping = options.HostRemapping.ResolveTarget(url.Host);
+            if (remapping.RewritesAuthority)
+            {
+                var target = new UriBuilder(url) { Host = remapping.Host }.Uri;
+                outbound.Url = target;
+                outbound.Headers.Set("Host", target.IsDefaultPort ? target.Host : $"{target.Host}:{target.Port}");
+            }
+        }
+
+        if (!string.IsNullOrWhiteSpace(options.GlobalUserAgent))
+            outbound.Headers.Set("User-Agent", options.GlobalUserAgent);
 
         // The parser already de-chunked, so length framing is now authoritative.
         if (outbound.Body.Length > 0 || outbound.Headers.Contains("Content-Length"))

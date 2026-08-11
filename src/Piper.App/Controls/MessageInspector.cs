@@ -5,6 +5,7 @@ using Be.Windows.Forms;
 using Microsoft.Web.WebView2.WinForms;
 using Piper.App.Theme;
 using Piper.Core.Http;
+using Piper.Core.Sessions;
 using ShimmyMySherbet.WinForms.ZoomableImgBox;
 using SixLabors.ImageSharp;
 using ImageSharpImage = SixLabors.ImageSharp.Image;
@@ -45,6 +46,8 @@ public sealed class MessageInspector : UserControl
     private HttpMessage? _renderedJson;
     private HttpMessage? _renderedImage;
     private HttpMessage? _renderedVideo;
+    private HttpMessage? _droppedImage;
+    private HttpMessage? _droppedVideo;
     private string? _videoFilePath;
     private readonly List<TreeNode> _jsonMatches = [];
     private readonly List<(string Name, string Value)> _headers = [];
@@ -244,9 +247,13 @@ public sealed class MessageInspector : UserControl
             _imageStatus = new Label
             {
                 Dock = DockStyle.Top,
-                Height = 42,
+                // Keep both the dimensions and the (sometimes long) MIME type fully visible.
+                // A fixed height is intentional here: AutoSize lets the docked image viewer
+                // claim the remaining layout space before a second line is measured.
+                Height = 64,
                 ForeColor = Palette.TextDim,
-                Padding = new Padding(6, 4, 0, 0),
+                TextAlign = ContentAlignment.MiddleLeft,
+                Padding = new Padding(6, 4, 6, 4),
             };
             _imageView = new ZoomableImageBox
             {
@@ -278,6 +285,8 @@ public sealed class MessageInspector : UserControl
             var imagePanel = new Panel { Dock = DockStyle.Fill };
             imagePanel.Controls.Add(_imageView);
             imagePanel.Controls.Add(_imageStatus);
+            imagePanel.Controls.Add(BuildImageToolbar());
+            EnableMediaDrop(imagePanel, imageTabIndex: 5);
             _tabs.TabPages.Add(NewPage("Image", imagePanel));
         }
         if (_videoView is not null && _videoStatus is not null)
@@ -285,9 +294,17 @@ public sealed class MessageInspector : UserControl
             var videoPanel = new Panel { Dock = DockStyle.Fill };
             videoPanel.Controls.Add(_videoView);
             videoPanel.Controls.Add(_videoStatus);
+            EnableMediaDrop(videoPanel, imageTabIndex: 6);
             _tabs.TabPages.Add(NewPage("Video", videoPanel));
         }
         _tabs.SelectedIndexChanged += (_, _) => RenderSelectedTab();
+        if (_showImageViewer)
+        {
+            _tabs.AllowDrop = true;
+            _tabs.DragEnter += OnMediaTabDragEnter;
+            _tabs.DragOver += OnMediaTabDragEnter;
+            _tabs.DragDrop += OnMediaTabDragDrop;
+        }
 
         Controls.Add(_tabs);
         Controls.Add(summaryBar);
@@ -316,12 +333,16 @@ public sealed class MessageInspector : UserControl
         var menu = new ContextMenuStrip { Font = Palette.UiFont };
         var copyHeader = new ToolStripMenuItem("Copy entire header", null, (_, _) => CopySelectedHeader(valueOnly: false));
         var copyValue = new ToolStripMenuItem("Copy value only", null, (_, _) => CopySelectedHeader(valueOnly: true));
-        menu.Items.AddRange([copyHeader, copyValue]);
+        var openInBrowser = new ToolStripMenuItem("Open with default browser", null,
+            (_, _) => OpenInDefaultBrowser(SelectedHeader?.Value));
+        menu.Items.AddRange([copyHeader, copyValue, new ToolStripSeparator(), openInBrowser]);
         menu.Opening += (_, _) =>
         {
-            var enabled = SelectedHeader is not null;
+            var header = SelectedHeader;
+            var enabled = header is not null;
             copyHeader.Enabled = enabled;
             copyValue.Enabled = enabled;
+            openInBrowser.Enabled = header is { } selected && TryGetBrowserUrl(selected.Value, out _);
         };
         return menu;
     }
@@ -331,12 +352,16 @@ public sealed class MessageInspector : UserControl
         var menu = new ContextMenuStrip { Font = Palette.UiFont };
         var copyPair = new ToolStripMenuItem("Copy key-value", null, (_, _) => CopySelectedJson(valueOnly: false));
         var copyValue = new ToolStripMenuItem("Copy value only", null, (_, _) => CopySelectedJson(valueOnly: true));
-        menu.Items.AddRange([copyPair, copyValue]);
+        var openInBrowser = new ToolStripMenuItem("Open with default browser", null,
+            (_, _) => OpenInDefaultBrowser(SelectedJsonValue?.StringValue));
+        menu.Items.AddRange([copyPair, copyValue, new ToolStripSeparator(), openInBrowser]);
         menu.Opening += (_, _) =>
         {
-            var enabled = _jsonTree.SelectedNode?.Tag is JsonNodeValue;
+            var value = SelectedJsonValue;
+            var enabled = value is not null;
             copyPair.Enabled = enabled;
             copyValue.Enabled = enabled;
+            openInBrowser.Enabled = value is { StringValue: { } stringValue } && TryGetBrowserUrl(stringValue, out _);
         };
         return menu;
     }
@@ -371,6 +396,105 @@ public sealed class MessageInspector : UserControl
         menu.Items.Add("Save as WebP...", null, (_, _) => SaveCurrentImage("webp"));
         menu.Items.Add("Save image as...", null, (_, _) => SaveCurrentImage(null));
         return menu;
+    }
+
+    private void EnableMediaDrop(Control control, int imageTabIndex)
+    {
+        control.AllowDrop = true;
+        control.DragEnter += (_, e) => SetMediaDropEffect(e, imageTabIndex);
+        control.DragOver += (_, e) => SetMediaDropEffect(e, imageTabIndex);
+        control.DragDrop += (_, e) => LoadDroppedMedia(e, imageTabIndex);
+        foreach (Control child in control.Controls) EnableMediaDrop(child, imageTabIndex);
+    }
+
+    private void OnMediaTabDragEnter(object? sender, DragEventArgs e)
+    {
+        var point = _tabs.PointToClient(new System.Drawing.Point(e.X, e.Y));
+        var target = Enumerable.Range(5, Math.Min(2, _tabs.TabCount - 5))
+            .FirstOrDefault(index => _tabs.GetTabRect(index).Contains(point), -1);
+        SetMediaDropEffect(e, target);
+        if (e.Effect == DragDropEffects.Copy) _tabs.SelectedIndex = target;
+    }
+
+    private void OnMediaTabDragDrop(object? sender, DragEventArgs e)
+    {
+        var point = _tabs.PointToClient(new System.Drawing.Point(e.X, e.Y));
+        var target = Enumerable.Range(5, Math.Min(2, _tabs.TabCount - 5))
+            .FirstOrDefault(index => _tabs.GetTabRect(index).Contains(point), -1);
+        LoadDroppedMedia(e, target);
+    }
+
+    private static HttpMessage? DroppedResponse(IDataObject? data) =>
+        data?.GetData(typeof(Session)) is Session { Response: { } response } ? response : null;
+
+    private void SetMediaDropEffect(DragEventArgs e, int targetTabIndex)
+    {
+        e.Effect = targetTabIndex is 5 or 6 && DroppedResponse(e.Data) is not null
+            ? DragDropEffects.Copy
+            : DragDropEffects.None;
+    }
+
+    private void LoadDroppedMedia(DragEventArgs e, int targetTabIndex)
+    {
+        if (targetTabIndex is not (5 or 6) || DroppedResponse(e.Data) is not { } response) return;
+
+        if (targetTabIndex == 5)
+        {
+            _droppedImage = response;
+            _renderedImage = null;
+        }
+        else
+        {
+            _droppedVideo = response;
+            _renderedVideo = null;
+        }
+
+        _tabs.SelectedIndex = targetTabIndex;
+        RenderSelectedTab();
+    }
+
+    /// <summary>Creates the visible counterpart to the image view's right-click actions.</summary>
+    private ToolStrip BuildImageToolbar()
+    {
+        var zoomIn = new ToolStripButton("Zoom +")
+        {
+            DisplayStyle = ToolStripItemDisplayStyle.Text,
+            ToolTipText = "Zoom in",
+        };
+        zoomIn.Click += (_, _) => ChangeImageZoom(1.25f);
+
+        var zoomOut = new ToolStripButton("Zoom -")
+        {
+            DisplayStyle = ToolStripItemDisplayStyle.Text,
+            ToolTipText = "Zoom out",
+        };
+        zoomOut.Click += (_, _) => ChangeImageZoom(0.8f);
+
+        var actualSize = new ToolStripButton("100%")
+        {
+            DisplayStyle = ToolStripItemDisplayStyle.Text,
+            ToolTipText = "Actual size and reset pan",
+        };
+        actualSize.Click += (_, _) => ResetImageView();
+
+        var save = new ToolStripDropDownButton("Save")
+        {
+            DisplayStyle = ToolStripItemDisplayStyle.Text,
+            ToolTipText = "Save or convert this image",
+        };
+        save.DropDownItems.Add("Save as PNG...", null, (_, _) => SaveCurrentImage("png"));
+        save.DropDownItems.Add("Save as JPEG...", null, (_, _) => SaveCurrentImage("jpg"));
+        save.DropDownItems.Add("Save as WebP...", null, (_, _) => SaveCurrentImage("webp"));
+        save.DropDownItems.Add("Save image as...", null, (_, _) => SaveCurrentImage(null));
+
+        var toolbar = new ToolStrip
+        {
+            Dock = DockStyle.Top,
+            GripStyle = ToolStripGripStyle.Hidden,
+            Font = Palette.UiFont,
+        };
+        toolbar.Items.AddRange([zoomIn, zoomOut, actualSize, new ToolStripSeparator(), save]);
+        return toolbar;
     }
 
     private void ChangeImageZoom(float multiplier)
@@ -443,6 +567,24 @@ public sealed class MessageInspector : UserControl
         Clipboard.SetText(valueOnly ? header.Value : $"{header.Name}: {header.Value}");
     }
 
+    private static void OpenInDefaultBrowser(string? value)
+    {
+        if (!TryGetBrowserUrl(value, out var url)) return;
+        System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(url) { UseShellExecute = true });
+    }
+
+    private static bool TryGetBrowserUrl(string? value, out string url)
+    {
+        url = string.Empty;
+        if (string.IsNullOrWhiteSpace(value)) return false;
+
+        if (!Uri.TryCreate(value.Trim(), UriKind.Absolute, out var uri)
+            || (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps)) return false;
+
+        url = uri.AbsoluteUri;
+        return true;
+    }
+
     private void RenderHeaders()
     {
         var query = _headersSearch.Text.Trim();
@@ -471,10 +613,12 @@ public sealed class MessageInspector : UserControl
         if (e.Button == MouseButtons.Right) _jsonTree.SelectedNode = e.Node;
     }
 
+    private JsonNodeValue? SelectedJsonValue => _jsonTree.SelectedNode?.Tag as JsonNodeValue;
+
     private void CopySelectedJson(bool valueOnly)
     {
-        if (_jsonTree.SelectedNode?.Tag is not JsonNodeValue value) return;
-        Clipboard.SetText(valueOnly ? value.RawValue : _jsonTree.SelectedNode.Text);
+        if (SelectedJsonValue is not { } value) return;
+        Clipboard.SetText(valueOnly ? value.RawValue : _jsonTree.SelectedNode?.Text ?? string.Empty);
     }
 
     public void SetMessage(HttpMessage? message, string summary, string host = "")
@@ -501,6 +645,7 @@ public sealed class MessageInspector : UserControl
         {
             RenderHeaders();
             ClearDeferredViews();
+            if (_showImageViewer) _tabs.SelectedIndex = 0;
             return;
         }
 
@@ -510,12 +655,37 @@ public sealed class MessageInspector : UserControl
 
         // Bodies can be large and decoding/formatting them used to happen four times for each
         // selection, whether or not their tabs were ever viewed. Clear stale content now and
-        // render only the tab the user opens.
-        ClearDeferredViews();
+        // render only the most useful tab for a newly selected response.
+        var preserveJsonView = CanPreserveJsonView(message);
+        ClearDeferredViews(preserveJsonView);
+        // Carry the rendered marker forward to the newly selected message. This prevents the
+        // normal lazy renderer from rebuilding the identical tree (and collapsing it again).
+        if (preserveJsonView) _renderedJson = message;
+        if (_showImageViewer) SelectBestTab();
         RenderSelectedTab();
     }
 
-    private void ClearDeferredViews()
+    /// <summary>True when the currently rendered JSON tree already represents <paramref name="message"/>.</summary>
+    private bool CanPreserveJsonView(HttpMessage message)
+    {
+        if (_renderedJson is null
+            || !IsJsonContentType(message.ContentType)
+            || !IsJsonContentType(_renderedJson.ContentType)) return false;
+
+        try
+        {
+            // Compare decoded bytes rather than wire bytes: gzip/br compression differences do
+            // not change the JSON the user is inspecting.
+            return message.DecodedBody.AsSpan().SequenceEqual(_renderedJson.DecodedBody);
+        }
+        catch
+        {
+            // A malformed encoded body should fall back to the normal safe re-render path.
+            return false;
+        }
+    }
+
+    private void ClearDeferredViews(bool preserveJsonView = false)
     {
         _rawView.Clear();
         _bodyView.Clear();
@@ -525,9 +695,13 @@ public sealed class MessageInspector : UserControl
         if (_imageView is not null) _imageView.Image = null;
         if (_imageStatus is not null) _imageStatus.Text = string.Empty;
         ClearVideo();
+        _droppedImage = _droppedVideo = null;
+        _renderedBody = _renderedRaw = _renderedHex = _renderedImage = _renderedVideo = null;
+        if (preserveJsonView) return;
+
         _jsonTree.Nodes.Clear();
         _jsonMatchCount.Text = string.Empty;
-        _renderedBody = _renderedRaw = _renderedHex = _renderedJson = _renderedImage = _renderedVideo = null;
+        _renderedJson = null;
         _jsonMatches.Clear();
         _jsonMatchIndex = -1;
     }
@@ -555,12 +729,20 @@ public sealed class MessageInspector : UserControl
                 _renderedJson = _message;
                 break;
             case 5 when _showImageViewer && !ReferenceEquals(_renderedImage, _message):
-                RenderImage(_message);
-                _renderedImage = _message;
+                var image = _droppedImage ?? _message;
+                if (!ReferenceEquals(_renderedImage, image))
+                {
+                    RenderImage(image, force: _droppedImage is not null);
+                    _renderedImage = image;
+                }
                 break;
             case 6 when _showImageViewer && !ReferenceEquals(_renderedVideo, _message):
-                RenderVideo(_message);
-                _renderedVideo = _message;
+                var video = _droppedVideo ?? _message;
+                if (!ReferenceEquals(_renderedVideo, video))
+                {
+                    RenderVideo(video, force: _droppedVideo is not null);
+                    _renderedVideo = video;
+                }
                 break;
         }
     }
@@ -587,12 +769,12 @@ public sealed class MessageInspector : UserControl
         _ => $"{size / (1024.0 * 1024):N2} MB",
     };
 
-    private void RenderImage(HttpMessage message)
+    private void RenderImage(HttpMessage message, bool force = false)
     {
         if (_imageView is null || _imageStatus is null) return;
 
-        if (message.ContentType is not { } contentType
-            || !contentType.StartsWith("image/", StringComparison.OrdinalIgnoreCase))
+        if (!force && (message.ContentType is not { } contentType
+            || !contentType.StartsWith("image/", StringComparison.OrdinalIgnoreCase)))
         {
             _imageStatus.Text = "Response does not have an image content type.";
             return;
@@ -607,27 +789,35 @@ public sealed class MessageInspector : UserControl
             using var source = System.Drawing.Image.FromStream(png);
             if (_imageView.Image is { } oldImage) oldImage.Dispose();
             _imageView.Image = new System.Drawing.Bitmap(source);
-            _imageStatus.Text = $"{_imageView.Image.Width:N0} x {_imageView.Image.Height:N0} px\r\n{message.ContentType}";
+            var label = message.ContentType ?? "Detected image (no Content-Type)";
+            _imageStatus.Text = $"{_imageView.Image.Width:N0} x {_imageView.Image.Height:N0} px\r\n{label}";
         }
-        catch (Exception ex) when (ex is ArgumentException or OutOfMemoryException or NotSupportedException or InvalidImageContentException)
+        catch (UnknownImageFormatException)
         {
-            _imageStatus.Text = $"Could not display image: {ex.Message}";
+            // Servers sometimes label a response as image/* while returning an error page or
+            // other non-image bytes. This is an inspection failure, not an application error.
+            _imageStatus.Text = "Could not display this response as an image: unsupported or invalid image data.";
+        }
+        catch (Exception ex)
+        {
+            _imageStatus.Text = $"Could not display this response as an image: {ex.Message}";
         }
     }
 
-    private async void RenderVideo(HttpMessage message)
+    private async void RenderVideo(HttpMessage message, bool force = false)
     {
         if (_videoView is null || _videoStatus is null) return;
 
-        if (message.ContentType is not { } contentType
-            || !contentType.StartsWith("video/", StringComparison.OrdinalIgnoreCase))
+        var contentType = message.ContentType;
+        if (!force && (contentType is null
+            || !contentType.StartsWith("video/", StringComparison.OrdinalIgnoreCase)))
         {
             _videoStatus.Text = "Response does not have a video content type.";
             return;
         }
 
         ClearVideo();
-        var extension = VideoExtensionFor(contentType);
+        var extension = VideoExtensionFor(contentType, message.DecodedBody);
         var folder = Path.Combine(Path.GetTempPath(), "Piper", "video-inspector");
         var path = Path.Combine(folder, $"{Guid.NewGuid():N}{extension}");
         try
@@ -635,13 +825,14 @@ public sealed class MessageInspector : UserControl
             Directory.CreateDirectory(folder);
             File.WriteAllBytes(path, message.DecodedBody);
             _videoFilePath = path;
-            _videoStatus.Text = $"{contentType}\r\nLoading the embedded media player...";
+            _videoStatus.Text = $"{contentType ?? "Detected video (no Content-Type)"}\r\nLoading the embedded media player...";
 
             await _videoView.EnsureCoreWebView2Async();
-            if (!ReferenceEquals(_message, message) || _videoFilePath != path) return;
+            if (_videoFilePath != path
+                || (!ReferenceEquals(_message, message) && !ReferenceEquals(_droppedVideo, message))) return;
 
             _videoView.Source = new Uri(path);
-            _videoStatus.Text = contentType;
+            _videoStatus.Text = contentType ?? "Video loaded from response bytes (no Content-Type)";
         }
         catch (Exception ex)
         {
@@ -666,15 +857,25 @@ public sealed class MessageInspector : UserControl
         catch (UnauthorizedAccessException) { }
     }
 
-    private static string VideoExtensionFor(string contentType) => contentType.Split(';')[0].Trim().ToLowerInvariant() switch
+    private static string VideoExtensionFor(string? contentType, byte[] bytes)
     {
-        "video/mp4" => ".mp4",
-        "video/webm" => ".webm",
-        "video/ogg" => ".ogv",
-        "video/quicktime" => ".mov",
-        "video/x-msvideo" => ".avi",
-        _ => ".video",
-    };
+        var declared = contentType?.Split(';')[0].Trim().ToLowerInvariant() switch
+        {
+            "video/mp4" => ".mp4",
+            "video/webm" => ".webm",
+            "video/ogg" => ".ogv",
+            "video/quicktime" => ".mov",
+            "video/x-msvideo" => ".avi",
+            _ => null,
+        };
+        if (declared is not null) return declared;
+        if (bytes.Length >= 12 && bytes.AsSpan(4, 4).SequenceEqual("ftyp"u8)) return ".mp4";
+        if (bytes.Length >= 4 && bytes.AsSpan(0, 4).SequenceEqual("OggS"u8)) return ".ogv";
+        if (bytes.Length >= 4 && bytes.AsSpan(0, 4).SequenceEqual(new byte[] { 0x1A, 0x45, 0xDF, 0xA3 })) return ".webm";
+        if (bytes.Length >= 12 && bytes.AsSpan(0, 4).SequenceEqual("RIFF"u8)
+            && bytes.AsSpan(8, 4).SequenceEqual("AVI "u8)) return ".avi";
+        return ".video";
+    }
 
     private static string RenderRaw(HttpMessage message)
     {
@@ -779,7 +980,8 @@ public sealed class MessageInspector : UserControl
     {
         var node = new TreeNode(FormatJsonValue(name, value))
         {
-            Tag = new JsonNodeValue(name, value.GetRawText()),
+            Tag = new JsonNodeValue(name, value.GetRawText(),
+                value.ValueKind == JsonValueKind.String ? value.GetString() : null),
         };
 
         switch (value.ValueKind)
@@ -911,7 +1113,31 @@ public sealed class MessageInspector : UserControl
         _jsonMatchCount.Text = $"{_jsonMatchIndex + 1}/{_jsonMatches.Count}";
     }
 
-    private sealed record JsonNodeValue(string Key, string RawValue);
+    private sealed record JsonNodeValue(string Key, string RawValue, string? StringValue);
+
+    /// <summary>Routes the standard Find shortcut to the search field for the active inspector tab.</summary>
+    protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
+    {
+        if (keyData == (Keys.Control | Keys.F))
+        {
+            var searchBox = _tabs.SelectedIndex switch
+            {
+                0 => _headersSearch,
+                3 => _hexSearch,
+                4 => _jsonSearch,
+                _ => null,
+            };
+
+            if (searchBox is not null)
+            {
+                searchBox.Focus();
+                searchBox.SelectAll();
+                return true;
+            }
+        }
+
+        return base.ProcessCmdKey(ref msg, keyData);
+    }
 
     /// <summary>Jumps to the tab most useful for this payload.</summary>
     public void SelectBestTab()
@@ -921,6 +1147,30 @@ public sealed class MessageInspector : UserControl
             _tabs.SelectedIndex = 0;
             return;
         }
-        _tabs.SelectedIndex = ContentCodec.LooksTextual(_message.ContentType, _message.DecodedBody) ? 1 : 3;
+
+        var contentType = _message.ContentType ?? string.Empty;
+        if (_showImageViewer && contentType.StartsWith("image/", StringComparison.OrdinalIgnoreCase))
+        {
+            _tabs.SelectedIndex = 5;
+            return;
+        }
+
+        if (_showImageViewer && contentType.StartsWith("video/", StringComparison.OrdinalIgnoreCase))
+        {
+            _tabs.SelectedIndex = 6;
+            return;
+        }
+
+        if (IsJsonContentType(contentType))
+        {
+            _tabs.SelectedIndex = 4;
+            return;
+        }
+
+        // Response inspection should start at headers unless its content advertises one of
+        // the specialised viewers above. The body/raw/hex views remain available explicitly.
+        _tabs.SelectedIndex = 0;
     }
+
+    private static bool IsJsonContentType(string? contentType) => contentType?.Contains("json", StringComparison.OrdinalIgnoreCase) == true;
 }

@@ -1,0 +1,139 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  package-and-publish:
+    runs-on: windows-2022
+    env:
+      PROJECT: src/Piper.App/Piper.App.csproj
+      RUNTIME: win-x64
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Verify release version
+        id: version
+        shell: pwsh
+        run: |
+          git merge-base --is-ancestor $env:GITHUB_SHA origin/main
+          if ($LASTEXITCODE -ne 0) {
+            throw "Release tags must point to a commit already on main."
+          }
+
+          $tag = $env:GITHUB_REF_NAME
+          if ($tag -notmatch '^v(?<version>\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)$') {
+            throw "Release tags must use vMAJOR.MINOR.PATCH, for example v0.2.0. Got '$tag'."
+          }
+
+          [xml]$project = Get-Content $env:PROJECT
+          $projectVersion = @($project.Project.PropertyGroup | ForEach-Object { $_.Version } |
+              Where-Object { $_ } | Select-Object -First 1)
+          if ($projectVersion.Count -ne 1) {
+            throw "Could not find exactly one Version element in $env:PROJECT."
+          }
+          if ($projectVersion[0] -ne $Matches.version) {
+            throw "Tag version '$($Matches.version)' does not match project version '$($projectVersion[0])'."
+          }
+
+          "version=$($Matches.version)" | Add-Content -Path $env:GITHUB_OUTPUT
+
+      - name: Restore
+        run: dotnet restore Piper.slnx --runtime ${{ env.RUNTIME }}
+
+      - name: Build
+        run: dotnet build Piper.slnx --configuration Release --no-restore
+
+      - name: Run smoke tests
+        run: dotnet run --project tests/Piper.SmokeTests/Piper.SmokeTests.csproj --configuration Release --no-build
+
+      - name: Publish portable application
+        shell: pwsh
+        run: |
+          dotnet publish $env:PROJECT --configuration Release --runtime $env:RUNTIME --self-contained true `
+            -p:PublishSingleFile=true --no-restore --output publish
+          if ($LASTEXITCODE -ne 0) { throw "dotnet publish failed." }
+
+      - name: Package portable archive and source
+        id: package
+        shell: pwsh
+        run: |
+          $version = '${{ steps.version.outputs.version }}'
+          $artifacts = Join-Path $env:GITHUB_WORKSPACE 'artifacts'
+          $portableDirectory = Join-Path $artifacts "Piper-$version-$env:RUNTIME"
+          New-Item -ItemType Directory -Path $portableDirectory -Force | Out-Null
+          Copy-Item -Path (Join-Path $env:GITHUB_WORKSPACE 'publish\*') -Destination $portableDirectory -Recurse -Force
+
+          $portableZip = Join-Path $artifacts "Piper-$version-$env:RUNTIME-portable.zip"
+          Compress-Archive -Path $portableDirectory -DestinationPath $portableZip -CompressionLevel Optimal
+
+          $sourceZip = Join-Path $artifacts "Piper-$version-source.zip"
+          git archive --format=zip --prefix="Piper-$version/" --output=$sourceZip $env:GITHUB_SHA
+          if ($LASTEXITCODE -ne 0) { throw "Could not create the source archive." }
+
+          $fileVersion = [System.Diagnostics.FileVersionInfo]::GetVersionInfo(
+            (Join-Path $env:GITHUB_WORKSPACE 'publish\Piper.exe')).FileVersion
+          if ([string]::IsNullOrWhiteSpace($fileVersion)) {
+            throw "Could not read the file version from the published Piper executable."
+          }
+
+          "artifacts=$artifacts" | Add-Content -Path $env:GITHUB_OUTPUT
+          "file_version=$fileVersion" | Add-Content -Path $env:GITHUB_OUTPUT
+
+      - name: Install NSIS
+        shell: pwsh
+        run: choco install nsis --yes --no-progress
+
+      - name: Build installer
+        shell: pwsh
+        run: |
+          $version = '${{ steps.version.outputs.version }}'
+          $fileVersion = '${{ steps.package.outputs.file_version }}'
+          $artifacts = '${{ steps.package.outputs.artifacts }}'
+          $installer = Join-Path $artifacts "Piper-$version-setup.exe"
+          $publishDirectory = Join-Path $env:GITHUB_WORKSPACE 'publish'
+
+          & makensis.exe "/DPRODUCT_VERSION=$fileVersion" "/DPUBLISH_DIR=$publishDirectory" `
+            "/DOUTPUT_FILE=$installer" 'installer\Piper.nsi'
+          if ($LASTEXITCODE -ne 0) { throw "NSIS packaging failed." }
+
+      - name: Create checksums
+        shell: pwsh
+        run: |
+          $artifacts = '${{ steps.package.outputs.artifacts }}'
+          $checksums = Join-Path $artifacts 'SHA256SUMS.txt'
+          Get-ChildItem -Path $artifacts -File |
+            Get-FileHash -Algorithm SHA256 |
+            ForEach-Object { "$($_.Hash.ToLowerInvariant())  $($_.Path | Split-Path -Leaf)" } |
+            Set-Content -Path $checksums -NoNewline
+
+      - name: Create GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          $version = '${{ steps.version.outputs.version }}'
+          $artifacts = '${{ steps.package.outputs.artifacts }}'
+          $assets = Get-ChildItem -Path $artifacts -File | ForEach-Object { $_.FullName }
+
+          gh release view $tag 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $tag $assets --clobber
+          }
+          else {
+            gh release create $tag $assets --title "Piper $version" --generate-notes --verify-tag
+          }
+          if ($LASTEXITCODE -ne 0) { throw "GitHub release publishing failed." }

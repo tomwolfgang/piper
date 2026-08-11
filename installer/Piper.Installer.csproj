@@ -1,0 +1,47 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <IsPackable>false</IsPackable>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <PiperProject>$(MSBuildThisFileDirectory)..\src\Piper.App\Piper.App.csproj</PiperProject>
+    <NsisScript>$(MSBuildThisFileDirectory)Piper.nsi</NsisScript>
+    <NsisExecutable Condition="'$(NsisExecutable)' == ''">C:\Program Files (x86)\NSIS\makensis.exe</NsisExecutable>
+  </PropertyGroup>
+
+  <Target Name="BuildInstaller" BeforeTargets="Build">
+    <Error Condition="!Exists('$(PiperProject)')" Text="Piper application project was not found at $(PiperProject)." />
+    <Error Condition="!Exists('$(NsisScript)')" Text="NSIS script was not found at $(NsisScript)." />
+    <Error Condition="!Exists('$(NsisExecutable)')"
+           Text="NSIS was not found at $(NsisExecutable). Install NSIS or set the NsisExecutable MSBuild property." />
+
+    <PropertyGroup>
+      <InstallerDirectory>$(MSBuildProjectDirectory)\bin\$(Configuration)</InstallerDirectory>
+      <PublishDirectory>$(InstallerDirectory)\publish</PublishDirectory>
+    </PropertyGroup>
+
+    <ItemGroup>
+      <ExistingInstallers Include="$(InstallerDirectory)\Piper-*-setup.exe" />
+    </ItemGroup>
+    <Delete Files="@(ExistingInstallers)" />
+    <RemoveDir Directories="$(PublishDirectory)" />
+    <MakeDir Directories="$(PublishDirectory)" />
+
+    <Exec Command='dotnet publish &quot;$(PiperProject)&quot; --configuration $(Configuration) --runtime $(RuntimeIdentifier) --self-contained true -p:PublishSingleFile=true --output &quot;$(PublishDirectory)&quot;' />
+    <Error Condition="!Exists('$(PublishDirectory)\Piper.exe')" Text="Published Piper executable was not found at $(PublishDirectory)\Piper.exe." />
+    <Exec Command='powershell -NoProfile -Command &quot;(Get-Item -LiteralPath &apos;$(PublishDirectory)\Piper.exe&apos;).VersionInfo.FileVersion&quot;'
+          ConsoleToMSBuild="true">
+      <Output TaskParameter="ConsoleOutput" PropertyName="PiperFileVersion" />
+    </Exec>
+
+    <PropertyGroup>
+      <PiperFileVersion>$([System.String]::Copy('$(PiperFileVersion)').Trim())</PiperFileVersion>
+      <InstallerOutput>$(InstallerDirectory)\Piper-$(PiperFileVersion)-setup.exe</InstallerOutput>
+    </PropertyGroup>
+    <Error Condition="'$(PiperFileVersion)' == ''" Text="Could not read the file version from the published Piper executable." />
+
+    <Exec Command='&quot;$(NsisExecutable)&quot; &quot;/DPRODUCT_VERSION=$(PiperFileVersion)&quot; &quot;/DPUBLISH_DIR=$(PublishDirectory)&quot; &quot;/DOUTPUT_FILE=$(InstallerOutput)&quot; &quot;$(NsisScript)&quot;' />
+  </Target>
+
+</Project>

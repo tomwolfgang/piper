@@ -19,6 +19,13 @@ public sealed class CertificateAuthority : IDisposable
     private const string PfxPassword = "Piper";
     private const int LeafCacheLimit = 512;
 
+    /// <summary>
+    /// The name shown in the Windows Certificates list for Piper's interception root.
+    /// It deliberately makes clear that this is a locally generated trust anchor, not
+    /// a certificate issued by a public CA.
+    /// </summary>
+    public const string RootCommonName = "Piper Root CA - DO NOT TRUST";
+
     private readonly ConcurrentDictionary<string, X509Certificate2> _leafCache = new(StringComparer.OrdinalIgnoreCase);
     private readonly object _mintLock = new();
     private bool _disposed;
@@ -66,9 +73,14 @@ public sealed class CertificateAuthority : IDisposable
                     File.ReadAllBytes(pfxPath), PfxPassword,
                     X509KeyStorageFlags.Exportable | X509KeyStorageFlags.EphemeralKeySet);
 
-                if (existing.NotAfter > DateTime.Now.AddDays(30) && existing.HasPrivateKey)
+                if (existing.NotAfter > DateTime.Now.AddDays(30)
+                    && existing.HasPrivateKey
+                    && existing.GetNameInfo(X509NameType.SimpleName, forIssuer: false) == RootCommonName)
                     return new CertificateAuthority(existing, pfxPath);
 
+                // Root subjects are immutable. Replace roots made by earlier Piper
+                // versions so the trusted-root list identifies this local MITM CA
+                // unambiguously. The new root still requires an explicit Trust action.
                 existing.Dispose();
             }
             catch (CryptographicException)
@@ -89,7 +101,7 @@ public sealed class CertificateAuthority : IDisposable
     {
         using var rsa = RSA.Create(2048);
         var request = new CertificateRequest(
-            "CN=Piper Root CA, O=Piper, OU=Generated locally - do not trust elsewhere",
+            $"CN={RootCommonName}, O=Piper, OU=Generated locally",
             rsa, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
 
         request.CertificateExtensions.Add(new X509BasicConstraintsExtension(true, false, 0, true));

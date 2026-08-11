@@ -22,17 +22,20 @@ public sealed class SessionListView : UserControl
 
     private readonly ListView _list;
     private readonly TextBox _filterBox;
-    private readonly Label _countLabel;
     private readonly SessionStore _store;
 
     private Session[] _visible = [];
     private SearchQuery _query = SearchQuery.Empty;
+    private Func<Session, bool>? _visibilityFilter;
     private bool _autoScroll = true;
 
     public event EventHandler<Session?>? SelectionChanged;
 
     /// <summary>Raised when the user asks to send a session to the Composer.</summary>
     public event EventHandler<Session>? SendToComposerRequested;
+
+    /// <summary>Raised when the user asks to replay a captured request immediately.</summary>
+    public event EventHandler<Session>? ResendRequested;
 
     /// <summary>Raised when the user double-clicks a row, asking to look at it in the inspector.</summary>
     public event EventHandler<Session>? SessionActivated;
@@ -49,18 +52,8 @@ public sealed class SessionListView : UserControl
         };
         _filterBox.TextChanged += (_, _) => ApplyFilter();
 
-        _countLabel = new Label
-        {
-            Dock = DockStyle.Right,
-            AutoSize = false,
-            Width = 150,
-            TextAlign = System.Drawing.ContentAlignment.MiddleRight,
-            ForeColor = Palette.TextDim,
-        };
-
         var filterRow = new Panel { Dock = DockStyle.Top, Height = 26, Padding = new Padding(2) };
         filterRow.Controls.Add(_filterBox);
-        filterRow.Controls.Add(_countLabel);
 
         _list = new ListView
         {
@@ -96,6 +89,8 @@ public sealed class SessionListView : UserControl
             if (!_suppressSelectionChanged) SelectionChanged?.Invoke(this, SelectedSession);
         };
         _list.MouseDown += OnListMouseDown;
+        _list.MouseMove += OnListMouseMove;
+        _list.MouseUp += (_, _) => _dragSession = null;
         _list.KeyDown += OnListKeyDown;
         _list.DoubleClick += (_, _) =>
         {
@@ -129,6 +124,8 @@ public sealed class SessionListView : UserControl
     private volatile bool _refreshPending;
     private bool _suppressSelectionChanged;
     private bool _expandingColumns;
+    private Session? _dragSession;
+    private Point _dragStart;
 
     public Session? SelectedSession =>
         _list.SelectedIndices.Count > 0 && _list.SelectedIndices[0] < _visible.Length
@@ -163,6 +160,29 @@ public sealed class SessionListView : UserControl
     {
         get => _filterBox.Text;
         set => _filterBox.Text = value;
+    }
+
+    /// <summary>Replays the selected non-tunnel request, if it is safe to do so.</summary>
+    public bool ResendSelected()
+    {
+        if (SelectedSession is not { IsTunnel: false, Request: not null } session) return false;
+        ResendRequested?.Invoke(this, session);
+        return true;
+    }
+
+    /// <summary>
+    /// An optional UI-level visibility filter applied in addition to the search box. The status
+    /// bar's process scope uses this so switching scopes never discards captured sessions.
+    /// </summary>
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    public Func<Session, bool>? VisibilityFilter
+    {
+        get => _visibilityFilter;
+        set
+        {
+            _visibilityFilter = value;
+            Rebuild();
+        }
     }
 
     private void RequestRefresh() => _refreshPending = true;
@@ -214,6 +234,8 @@ public sealed class SessionListView : UserControl
         // rows are about to arrive.
         var wasAtBottom = IsScrolledToBottom();
         _visible = _store.Search(_query);
+        if (_visibilityFilter is not null)
+            _visible = _visible.Where(_visibilityFilter).ToArray();
 
         _list.BeginUpdate();
         try
@@ -251,10 +273,6 @@ public sealed class SessionListView : UserControl
         if (!ReferenceEquals(previousSession, SelectedSession))
             SelectionChanged?.Invoke(this, SelectedSession);
 
-        var total = _store.Count;
-        _countLabel.Text = _query.IsEmpty
-            ? $"{total:N0} sessions"
-            : $"{_visible.Length:N0} of {total:N0}";
         _list.Invalidate();
     }
 
@@ -336,6 +354,14 @@ public sealed class SessionListView : UserControl
 
     private void OnListMouseDown(object? sender, MouseEventArgs e)
     {
+        if (e.Button == MouseButtons.Left)
+        {
+            var leftHit = _list.HitTest(e.Location);
+            _dragSession = leftHit.Item?.Tag as Session;
+            _dragStart = e.Location;
+            return;
+        }
+
         if (e.Button == MouseButtons.Right)
         {
             var rightHit = _list.HitTest(e.Location);
@@ -353,6 +379,23 @@ public sealed class SessionListView : UserControl
         var hit = _list.HitTest(e.Location);
         if (hit.Item is not null && hit.Item.Tag is Session session)
             SendToComposerRequested?.Invoke(this, session);
+    }
+
+    private void OnListMouseMove(object? sender, MouseEventArgs e)
+    {
+        if (e.Button != MouseButtons.Left || _dragSession?.Request is null) return;
+
+        var dragSize = SystemInformation.DragSize;
+        var dragBounds = new Rectangle(
+            _dragStart.X - dragSize.Width / 2,
+            _dragStart.Y - dragSize.Height / 2,
+            dragSize.Width,
+            dragSize.Height);
+        if (dragBounds.Contains(e.Location)) return;
+
+        var session = _dragSession;
+        _dragSession = null;
+        _list.DoDragDrop(session, DragDropEffects.Copy);
     }
 
     private void OnListKeyDown(object? sender, KeyEventArgs e)
@@ -378,6 +421,8 @@ public sealed class SessionListView : UserControl
     {
         var menu = new ContextMenuStrip { Font = Palette.UiFont };
 
+        var resend = new ToolStripMenuItem("&Resend request\tCtrl+R", null, (_, _) => ResendSelected());
+        menu.Items.Add(resend);
         menu.Items.Add("Send to &Composer\tCtrl+E", null, (_, _) =>
         {
             if (SelectedSession is { } session) SendToComposerRequested?.Invoke(this, session);
@@ -403,7 +448,11 @@ public sealed class SessionListView : UserControl
         });
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("&Remove selected\tDel", null, (_, _) => RemoveSelected());
-        menu.Opening += (_, _) => save.Enabled = SelectedSession?.Response is not null;
+        menu.Opening += (_, _) =>
+        {
+            save.Enabled = SelectedSession?.Response is not null;
+            resend.Enabled = SelectedSession is { IsTunnel: false, Request: not null };
+        };
 
         _list.ContextMenuStrip = menu;
     }

@@ -9,4 +9,7 @@
   <Folder Name="/tools/">
     <Project Path="tools/Piper.TrafficGen/Piper.TrafficGen.csproj" />
   </Folder>
+  <Folder Name="/installer/">
+    <Project Path="installer/Piper.Installer.csproj" />
+  </Folder>
 </Solution>
