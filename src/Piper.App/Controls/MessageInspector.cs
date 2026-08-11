@@ -34,6 +34,9 @@ public sealed class MessageInspector : UserControl
     private readonly Label _size;
     private readonly Label _host;
     private readonly bool _showImageViewer;
+    private readonly bool _showWebForms;
+    private readonly ListView? _webFormsView;
+    private readonly Label? _webFormsStatus;
     private readonly ZoomableImageBox? _imageView;
     private readonly Label? _imageStatus;
     private readonly WebView2? _videoView;
@@ -44,6 +47,7 @@ public sealed class MessageInspector : UserControl
     private HttpMessage? _renderedRaw;
     private HttpMessage? _renderedHex;
     private HttpMessage? _renderedJson;
+    private HttpRequestData? _renderedWebForms;
     private HttpMessage? _renderedImage;
     private HttpMessage? _renderedVideo;
     private HttpMessage? _droppedImage;
@@ -52,10 +56,12 @@ public sealed class MessageInspector : UserControl
     private readonly List<TreeNode> _jsonMatches = [];
     private readonly List<(string Name, string Value)> _headers = [];
     private int _jsonMatchIndex = -1;
+    private int _webFormsTabIndex = -1;
 
-    public MessageInspector(string caption, bool showImageViewer = false)
+    public MessageInspector(string caption, bool showImageViewer = false, bool showWebForms = false)
     {
         _showImageViewer = showImageViewer;
+        _showWebForms = showWebForms;
         _summary = new TextBox
         {
             Dock = DockStyle.Fill,
@@ -242,6 +248,43 @@ public sealed class MessageInspector : UserControl
         jsonPanel.Controls.Add(_jsonTree);
         jsonPanel.Controls.Add(jsonSearchRow);
 
+        if (_showWebForms)
+        {
+            _webFormsView = new ListView
+            {
+                Dock = DockStyle.Fill,
+                View = View.Details,
+                FullRowSelect = true,
+                GridLines = false,
+                HeaderStyle = ColumnHeaderStyle.Nonclickable,
+                Font = Palette.Mono,
+            };
+            _webFormsView.Columns.Add("Source", 70);
+            _webFormsView.Columns.Add("Name", 180);
+            _webFormsView.Columns.Add("Value", 420);
+            _webFormsView.Columns.Add("Content-Type", 160);
+            DarkListView.Attach(_webFormsView);
+            DarkListView.AddFillerColumn(_webFormsView);
+            _webFormsView.ContextMenuStrip = BuildWebFormsMenu();
+            _webFormsView.MouseDown += OnWebFormsMouseDown;
+            _webFormsView.KeyDown += (_, e) =>
+            {
+                if (!e.Control || e.KeyCode != Keys.C) return;
+                var lines = _webFormsView.SelectedItems.Cast<ListViewItem>()
+                    .Select(item => $"{item.SubItems[1].Text}={item.SubItems[2].Text}");
+                Clipboard.SetText(string.Join(Environment.NewLine, lines));
+                e.Handled = true;
+            };
+
+            _webFormsStatus = new Label
+            {
+                Dock = DockStyle.Bottom,
+                Height = 26,
+                ForeColor = Palette.TextDim,
+                Padding = new Padding(6, 4, 6, 0),
+            };
+        }
+
         if (_showImageViewer)
         {
             _imageStatus = new Label
@@ -280,6 +323,14 @@ public sealed class MessageInspector : UserControl
         _tabs.TabPages.Add(NewPage("Raw", _rawView));
         _tabs.TabPages.Add(NewPage("Hex", hexPanel));
         _tabs.TabPages.Add(NewPage("JSON", jsonPanel));
+        if (_webFormsView is not null && _webFormsStatus is not null)
+        {
+            var webFormsPanel = new Panel { Dock = DockStyle.Fill };
+            webFormsPanel.Controls.Add(_webFormsView);
+            webFormsPanel.Controls.Add(_webFormsStatus);
+            _webFormsTabIndex = _tabs.TabPages.Count;
+            _tabs.TabPages.Add(NewPage("WebForms", webFormsPanel));
+        }
         if (_imageView is not null && _imageStatus is not null)
         {
             var imagePanel = new Panel { Dock = DockStyle.Fill };
@@ -362,6 +413,25 @@ public sealed class MessageInspector : UserControl
             copyPair.Enabled = enabled;
             copyValue.Enabled = enabled;
             openInBrowser.Enabled = value is { StringValue: { } stringValue } && TryGetBrowserUrl(stringValue, out _);
+        };
+        return menu;
+    }
+
+    private ContextMenuStrip BuildWebFormsMenu()
+    {
+        var menu = new ContextMenuStrip { Font = Palette.UiFont };
+        var copyNameValue = new ToolStripMenuItem("Copy Name-Value", null, (_, _) => CopySelectedWebForm(valueOnly: false));
+        var copyValue = new ToolStripMenuItem("Copy Value", null, (_, _) => CopySelectedWebForm(valueOnly: true));
+        var save = new ToolStripMenuItem("Save binary data...", null, (_, _) => SaveSelectedWebFormBinary());
+        var viewHex = new ToolStripMenuItem("View in Hex...", null, (_, _) => ViewSelectedWebFormBinaryAsHex());
+        menu.Items.AddRange([copyNameValue, copyValue, new ToolStripSeparator(), save, viewHex]);
+        menu.Opening += (_, _) =>
+        {
+            var field = SelectedWebFormField;
+            copyNameValue.Enabled = field is not null;
+            copyValue.Enabled = field is not null;
+            save.Enabled = field?.HasBinaryData == true;
+            viewHex.Enabled = field?.HasBinaryData == true;
         };
         return menu;
     }
@@ -691,12 +761,15 @@ public sealed class MessageInspector : UserControl
         _bodyView.Clear();
         _hexView.ByteProvider = new DynamicByteProvider(Array.Empty<byte>());
         _hexSearchStatus.Text = string.Empty;
+        if (_webFormsView is not null) _webFormsView.Items.Clear();
+        if (_webFormsStatus is not null) _webFormsStatus.Text = string.Empty;
         if (_imageView?.Image is { } image) image.Dispose();
         if (_imageView is not null) _imageView.Image = null;
         if (_imageStatus is not null) _imageStatus.Text = string.Empty;
         ClearVideo();
         _droppedImage = _droppedVideo = null;
         _renderedBody = _renderedRaw = _renderedHex = _renderedImage = _renderedVideo = null;
+        _renderedWebForms = null;
         if (preserveJsonView) return;
 
         _jsonTree.Nodes.Clear();
@@ -728,6 +801,12 @@ public sealed class MessageInspector : UserControl
                 RenderJson(_message);
                 _renderedJson = _message;
                 break;
+            case var index when index == _webFormsTabIndex
+                                && _message is HttpRequestData request
+                                && !ReferenceEquals(_renderedWebForms, request):
+                RenderWebForms(request);
+                _renderedWebForms = request;
+                break;
             case 5 when _showImageViewer && !ReferenceEquals(_renderedImage, _message):
                 var image = _droppedImage ?? _message;
                 if (!ReferenceEquals(_renderedImage, image))
@@ -744,6 +823,125 @@ public sealed class MessageInspector : UserControl
                     _renderedVideo = video;
                 }
                 break;
+        }
+    }
+
+    private WebFormParser.Field? SelectedWebFormField =>
+        _webFormsView?.SelectedItems.Count > 0
+            ? _webFormsView.SelectedItems[0].Tag as WebFormParser.Field
+            : null;
+
+    private void CopySelectedWebForm(bool valueOnly)
+    {
+        if (SelectedWebFormField is not { } field) return;
+        Clipboard.SetText(valueOnly ? field.Value : $"{field.Name}={field.Value}");
+    }
+
+    private void OnWebFormsMouseDown(object? sender, MouseEventArgs e)
+    {
+        if (e.Button != MouseButtons.Right || _webFormsView?.GetItemAt(e.X, e.Y) is not { } item) return;
+        _webFormsView.SelectedIndices.Clear();
+        item.Selected = true;
+        item.Focused = true;
+    }
+
+    private void SaveSelectedWebFormBinary()
+    {
+        var field = SelectedWebFormField;
+        if (field?.BinaryData is not { } data) return;
+
+        using var dialog = new SaveFileDialog
+        {
+            Title = "Save form field contents",
+            FileName = FileNameFor(field),
+            Filter = "All files (*.*)|*.*",
+        };
+        if (dialog.ShowDialog(this) != DialogResult.OK) return;
+
+        try
+        {
+            File.WriteAllBytes(dialog.FileName, data);
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, ex.Message, "Could not save form field", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+    }
+
+    private void ViewSelectedWebFormBinaryAsHex()
+    {
+        var field = SelectedWebFormField;
+        if (field?.BinaryData is not { } data) return;
+
+        using var dialog = new Form
+        {
+            Text = $"Hex - {field.Name}",
+            StartPosition = FormStartPosition.CenterParent,
+            ClientSize = new System.Drawing.Size(900, 600),
+            MinimumSize = new System.Drawing.Size(500, 350),
+        };
+        var hex = new HexBox
+        {
+            Dock = DockStyle.Fill,
+            Font = Palette.Mono,
+            ReadOnly = true,
+            BytesPerLine = 16,
+            UseFixedBytesPerLine = true,
+            GroupSize = 8,
+            GroupSeparatorVisible = true,
+            LineInfoVisible = true,
+            ColumnInfoVisible = true,
+            StringViewVisible = true,
+            VScrollBarVisible = true,
+            BorderStyle = BorderStyle.None,
+            InfoForeColor = Palette.TextDim,
+            SelectionBackColor = Palette.Selection,
+            SelectionForeColor = Palette.Text,
+            ByteProvider = new DynamicByteProvider(data),
+        };
+        dialog.Controls.Add(hex);
+        Palette.Apply(dialog);
+        hex.BackColor = Palette.Surface;
+        hex.ForeColor = Palette.Text;
+        dialog.ShowDialog(this);
+    }
+
+    private static string FileNameFor(WebFormParser.Field field)
+    {
+        var name = field.FileName ?? field.Name;
+        foreach (var character in Path.GetInvalidFileNameChars()) name = name.Replace(character, '_');
+        return string.IsNullOrWhiteSpace(name) ? "form-field.bin" : name;
+    }
+
+    private void RenderWebForms(HttpRequestData request)
+    {
+        if (_webFormsView is null || _webFormsStatus is null) return;
+
+        _webFormsView.BeginUpdate();
+        try
+        {
+            _webFormsView.Items.Clear();
+            var fields = WebFormParser.Parse(request);
+            foreach (var field in fields)
+            {
+                var item = new ListViewItem([field.Source, field.Name, field.Value, field.ContentType ?? string.Empty])
+                {
+                    Tag = field,
+                };
+                _webFormsView.Items.Add(item);
+            }
+
+            _webFormsStatus.Text = fields.Count == 0
+                ? "No query-string or supported HTML form fields in this request."
+                : $"{fields.Count:N0} request parameter(s)  ·  Query string, URL-encoded forms, and multipart forms are shown.";
+        }
+        catch (Exception ex)
+        {
+            _webFormsStatus.Text = $"Could not parse request parameters: {ex.Message}";
+        }
+        finally
+        {
+            _webFormsView.EndUpdate();
         }
     }
 

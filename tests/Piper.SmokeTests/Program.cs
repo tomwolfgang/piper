@@ -364,6 +364,7 @@ origin.Stop();
 // --------------------------------------------------------------------- HPACK
 
 await HostFilterTests.RunAsync(runner);
+await WebFormParserTests.RunAsync(runner);
 await FilterSettingsStoreTests.RunAsync(runner);
 await StatusBarSettingsStoreTests.RunAsync(runner);
 await ProxyConfigurationSettingsStoreTests.RunAsync(runner);

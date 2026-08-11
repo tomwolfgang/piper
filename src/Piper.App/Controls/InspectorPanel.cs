@@ -8,7 +8,7 @@ namespace Piper.App.Controls;
 /// <summary>Request above, response below, for the currently selected session.</summary>
 public sealed class InspectorPanel : UserControl
 {
-    private readonly MessageInspector _request = new("Request") { Dock = DockStyle.Fill };
+    private readonly MessageInspector _request = new("Request", showWebForms: true) { Dock = DockStyle.Fill };
     private readonly MessageInspector _response = new("Response", showImageViewer: true) { Dock = DockStyle.Fill };
 
     /// <summary>Raised when the selected session's timing/transfer summary changes.</summary>
