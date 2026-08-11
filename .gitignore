@@ -3,5 +3,7 @@
 **/obj/
 *.csproj.user
 
-/.build-verify-2/
-/.build-verify/
+/.build-verify*/
+/.release-verify/
+/publish/
+/artifacts/
