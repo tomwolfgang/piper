@@ -185,6 +185,13 @@ public sealed class MainForm : Form
     {
         base.OnShown(e);
         _mainSplit.SplitterDistance = (int)(_mainSplit.Width * 0.55);
+
+        // A run that was killed, crashed, or was still open when Windows shut down leaves the
+        // machine pointed at a Piper that is no longer listening, which the user sees as having
+        // lost their connection. Undo it before anything else touches the settings.
+        if (SystemProxy.RestoreLeftovers() is { } leftover)
+            AppendLog($"Restored the system proxy that a previous session left pointing at {leftover}.");
+
         if (!EnsureTrustedRootForStartup())
         {
             UpdateCaptureStatus();
@@ -747,12 +754,8 @@ public sealed class MainForm : Form
             if (_proxy.IsRunning)
             {
                 await _proxy.StopAsync();
-                if (_proxySnapshot is { } snapshot)
-                {
-                    SystemProxy.Restore(snapshot);
-                    _proxySnapshot = null;
+                if (RestoreSystemProxy())
                     AppendLog("Capture stopped and the previous system proxy settings were restored.");
-                }
             }
             else
             {
@@ -854,16 +857,38 @@ public sealed class MainForm : Form
         var endpoint = $"127.0.0.1:{_proxy.Endpoint!.Port}";
         try
         {
-            _proxySnapshot = SystemProxy.Capture();
+            // Captured against our own endpoint so settings a previous Piper left behind are never
+            // mistaken for the user's own, and written to disk before the registry changes so an
+            // abrupt exit still leaves something to undo.
+            _proxySnapshot = SystemProxy.Capture(endpoint);
+            SystemProxyBackupStore.Save(SystemProxyBackup.From(endpoint, _proxySnapshot));
             SystemProxy.Enable(endpoint);
             AppendLog($"System proxy set to {endpoint}.");
         }
         catch (Exception ex)
         {
-            _proxySnapshot = null;
+            // Enable writes several values, so put back whatever was captured rather than leaving
+            // the machine half-pointed at a proxy that is not running.
+            try { RestoreSystemProxy(); }
+            catch (Exception restoreFailure) { AppendLog($"Could not undo the partial change: {restoreFailure.Message}"); }
+
             AppendLog($"Could not set the system proxy: {ex.Message}");
             MessageBox.Show(this, ex.Message, "Piper", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
+    }
+
+    /// <summary>
+    /// Puts the system proxy back to what it was before Piper took it over and drops the on-disk
+    /// undo record. Returns false when Piper was not holding it. Safe to call more than once.
+    /// </summary>
+    private bool RestoreSystemProxy()
+    {
+        if (_proxySnapshot is not { } snapshot) return false;
+
+        SystemProxy.Restore(snapshot);
+        _proxySnapshot = null;
+        SystemProxyBackupStore.Clear();
+        return true;
     }
 
     private void TrustRootCertificate()
@@ -1054,6 +1079,22 @@ public sealed class MainForm : Form
 
         SaveWindowBounds();
 
+        // Windows shutdown, Task Manager and Application.Exit do not honour a cancelled close:
+        // deferring the cleanup to a continuation there would let the process go away with the
+        // system proxy still pointed at Piper. Take the blocking path instead.
+        if (e.CloseReason is CloseReason.WindowsShutDown or CloseReason.TaskManagerClosing
+            or CloseReason.ApplicationExitCall)
+        {
+            _closeAfterShutdown = true;
+            FilterSettingsStore.Save(_filterPanel.Settings);
+            SaveStatusBarSettings();
+            try { RestoreSystemProxy(); }
+            catch (Exception ex) { AppendLog($"Could not restore the system proxy: {ex.Message}"); }
+
+            base.OnFormClosing(e);
+            return;
+        }
+
         // Restoring a system proxy can make WinINET notify several applications, which may
         // briefly block. Keep the window responsive and make the required cleanup explicit
         // instead of making the close gesture look like the application has frozen.
@@ -1087,6 +1128,7 @@ public sealed class MainForm : Form
 
                 await Task.Run(() => SystemProxy.Restore(snapshot));
                 _proxySnapshot = null;
+                SystemProxyBackupStore.Clear();
             }
 
             if (_proxy.IsRunning)

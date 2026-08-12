@@ -17,8 +17,15 @@ internal static class Program
         Application.ThreadException += (_, e) => ReportCrash(e.Exception);
         AppDomain.CurrentDomain.UnhandledException += (_, e) => ReportCrash(e.ExceptionObject as Exception);
 
+        // Last line of defence for the system proxy. The window's own shutdown path clears the
+        // undo record once it has put the settings back, so by the time this runs there is
+        // normally nothing left to do - but an exit that never reaches that path must not leave
+        // the machine routing traffic to a Piper that has gone away.
+        AppDomain.CurrentDomain.ProcessExit += (_, _) => RestoreSystemProxyLeftovers();
+
         var startupFiles = args.Where(SazFileRelay.IsSazFile).ToArray();
         using var mutex = new Mutex(initiallyOwned: true, SazFileRelay.MutexName, out var firstInstance);
+        _ownsSystemProxy = firstInstance;
         if (!firstInstance)
         {
             // File association launches and command-line opens both come through here. A short
@@ -39,6 +46,18 @@ internal static class Program
         Application.Run(form);
     }
 
+    private static bool _ownsSystemProxy;
+
+    /// <summary>
+    /// Undoes a system proxy this process left behind, but only if it is the instance that could
+    /// have set one. A launch that just forwards .saz files to the running Piper and exits must
+    /// not pull the proxy out from under it.
+    /// </summary>
+    private static void RestoreSystemProxyLeftovers()
+    {
+        if (_ownsSystemProxy) SystemProxy.RestoreLeftovers();
+    }
+
     /// <summary>Path of the crash log, also used by the smoke harness to diagnose startup failures.</summary>
     public static string CrashLogPath => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Piper", "crash.log");
@@ -46,6 +65,10 @@ internal static class Program
     private static void ReportCrash(Exception? exception)
     {
         if (exception is null) return;
+
+        // Before the dialog, which blocks until the user dismisses it: the crash must not cost
+        // them their connection while they read it.
+        RestoreSystemProxyLeftovers();
 
         // Write to disk first: a modal dialog during startup blocks the message loop, so
         // the log is the only reliable record when the window never appears.
