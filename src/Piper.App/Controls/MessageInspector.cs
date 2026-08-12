@@ -30,6 +30,10 @@ public sealed class MessageInspector : UserControl
     private readonly TextBox _jsonSearch;
     private readonly Label _jsonMatchCount;
     private readonly TreeView _jsonTree;
+    private readonly Panel _jsonTypeNotice;
+    private readonly Label _jsonTypeStatus;
+    private readonly Button _jsonTryAnyway;
+    private readonly Panel _jsonForcePanel;
     private readonly TextBox _summary;
     private readonly Label _size;
     private readonly Label _host;
@@ -39,8 +43,12 @@ public sealed class MessageInspector : UserControl
     private readonly Label? _webFormsStatus;
     private readonly ZoomableImageBox? _imageView;
     private readonly Label? _imageStatus;
+    private readonly Button? _imageTryAnyway;
+    private readonly Panel? _imageForcePanel;
     private readonly WebView2? _videoView;
     private readonly Label? _videoStatus;
+    private readonly Button? _videoTryAnyway;
+    private readonly Panel? _videoForcePanel;
 
     private HttpMessage? _message;
     private HttpMessage? _renderedBody;
@@ -244,9 +252,26 @@ public sealed class MessageInspector : UserControl
         _jsonTree.NodeMouseClick += OnJsonNodeMouseClick;
         _jsonTree.ContextMenuStrip = BuildJsonMenu();
 
+        _jsonTypeStatus = new Label
+        {
+            Dock = DockStyle.Fill,
+            ForeColor = Palette.TextDim,
+            Padding = new Padding(6, 4, 0, 0),
+        };
+        _jsonTryAnyway = new Button
+        {
+            Text = "Force",
+        };
+        _jsonTryAnyway.Click += (_, _) => TryRenderJson();
+        _jsonForcePanel = BuildForcePanel(_jsonTryAnyway);
+        _jsonTypeNotice = new Panel { Dock = DockStyle.Top, Height = 34, Visible = false };
+        _jsonTypeNotice.Controls.Add(_jsonTypeStatus);
+        _jsonTypeNotice.Controls.Add(_jsonForcePanel);
+
         var jsonPanel = new Panel { Dock = DockStyle.Fill };
         jsonPanel.Controls.Add(_jsonTree);
         jsonPanel.Controls.Add(jsonSearchRow);
+        jsonPanel.Controls.Add(_jsonTypeNotice);
 
         if (_showWebForms)
         {
@@ -289,7 +314,7 @@ public sealed class MessageInspector : UserControl
         {
             _imageStatus = new Label
             {
-                Dock = DockStyle.Top,
+                Dock = DockStyle.Fill,
                 // Keep both the dimensions and the (sometimes long) MIME type fully visible.
                 // A fixed height is intentional here: AutoSize lets the docked image viewer
                 // claim the remaining layout space before a second line is measured.
@@ -298,6 +323,12 @@ public sealed class MessageInspector : UserControl
                 TextAlign = ContentAlignment.MiddleLeft,
                 Padding = new Padding(6, 4, 6, 4),
             };
+            _imageTryAnyway = new Button
+            {
+                Text = "Force",
+            };
+            _imageTryAnyway.Click += (_, _) => TryRenderImage();
+            _imageForcePanel = BuildForcePanel(_imageTryAnyway);
             _imageView = new ZoomableImageBox
             {
                 Dock = DockStyle.Fill,
@@ -309,11 +340,17 @@ public sealed class MessageInspector : UserControl
 
             _videoStatus = new Label
             {
-                Dock = DockStyle.Top,
+                Dock = DockStyle.Fill,
                 Height = 42,
                 ForeColor = Palette.TextDim,
                 Padding = new Padding(6, 4, 0, 0),
             };
+            _videoTryAnyway = new Button
+            {
+                Text = "Force",
+            };
+            _videoTryAnyway.Click += (_, _) => TryRenderVideo();
+            _videoForcePanel = BuildForcePanel(_videoTryAnyway);
             _videoView = new WebView2 { Dock = DockStyle.Fill, DefaultBackgroundColor = Palette.Surface };
         }
 
@@ -334,8 +371,11 @@ public sealed class MessageInspector : UserControl
         if (_imageView is not null && _imageStatus is not null)
         {
             var imagePanel = new Panel { Dock = DockStyle.Fill };
+            var imageStatusPanel = new Panel { Dock = DockStyle.Top, Height = 64 };
+            imageStatusPanel.Controls.Add(_imageStatus);
+            imageStatusPanel.Controls.Add(_imageForcePanel!);
             imagePanel.Controls.Add(_imageView);
-            imagePanel.Controls.Add(_imageStatus);
+            imagePanel.Controls.Add(imageStatusPanel);
             imagePanel.Controls.Add(BuildImageToolbar());
             EnableMediaDrop(imagePanel, imageTabIndex: 5);
             _tabs.TabPages.Add(NewPage("Image", imagePanel));
@@ -343,8 +383,11 @@ public sealed class MessageInspector : UserControl
         if (_videoView is not null && _videoStatus is not null)
         {
             var videoPanel = new Panel { Dock = DockStyle.Fill };
+            var videoStatusPanel = new Panel { Dock = DockStyle.Top, Height = 42 };
+            videoStatusPanel.Controls.Add(_videoStatus);
+            videoStatusPanel.Controls.Add(_videoForcePanel!);
             videoPanel.Controls.Add(_videoView);
-            videoPanel.Controls.Add(_videoStatus);
+            videoPanel.Controls.Add(videoStatusPanel);
             EnableMediaDrop(videoPanel, imageTabIndex: 6);
             _tabs.TabPages.Add(NewPage("Video", videoPanel));
         }
@@ -377,6 +420,22 @@ public sealed class MessageInspector : UserControl
         var page = new TabPage(title);
         page.Controls.Add(content);
         return page;
+    }
+
+    private static Panel BuildForcePanel(Button button)
+    {
+        button.Dock = DockStyle.Top;
+        button.Height = 30;
+
+        var panel = new Panel
+        {
+            Dock = DockStyle.Right,
+            Width = 82,
+            Padding = new Padding(0, 2, 4, 2),
+            Visible = false,
+        };
+        panel.Controls.Add(button);
+        return panel;
     }
 
     private ContextMenuStrip BuildHeadersMenu()
@@ -766,6 +825,7 @@ public sealed class MessageInspector : UserControl
         if (_imageView?.Image is { } image) image.Dispose();
         if (_imageView is not null) _imageView.Image = null;
         if (_imageStatus is not null) _imageStatus.Text = string.Empty;
+        if (_imageForcePanel is not null) _imageForcePanel.Visible = false;
         ClearVideo();
         _droppedImage = _droppedVideo = null;
         _renderedBody = _renderedRaw = _renderedHex = _renderedImage = _renderedVideo = null;
@@ -774,6 +834,9 @@ public sealed class MessageInspector : UserControl
 
         _jsonTree.Nodes.Clear();
         _jsonMatchCount.Text = string.Empty;
+        _jsonTypeNotice.Visible = false;
+        _jsonForcePanel.Visible = false;
+        _jsonTypeStatus.Text = string.Empty;
         _renderedJson = null;
         _jsonMatches.Clear();
         _jsonMatchIndex = -1;
@@ -975,9 +1038,11 @@ public sealed class MessageInspector : UserControl
             || !contentType.StartsWith("image/", StringComparison.OrdinalIgnoreCase)))
         {
             _imageStatus.Text = "Response does not have an image content type.";
+            if (_imageForcePanel is not null) _imageForcePanel.Visible = true;
             return;
         }
 
+        if (_imageForcePanel is not null) _imageForcePanel.Visible = false;
         try
         {
             using var decoded = ImageSharpImage.Load(message.DecodedBody);
@@ -1011,9 +1076,11 @@ public sealed class MessageInspector : UserControl
             || !contentType.StartsWith("video/", StringComparison.OrdinalIgnoreCase)))
         {
             _videoStatus.Text = "Response does not have a video content type.";
+            if (_videoForcePanel is not null) _videoForcePanel.Visible = true;
             return;
         }
 
+        if (_videoForcePanel is not null) _videoForcePanel.Visible = false;
         ClearVideo();
         var extension = VideoExtensionFor(contentType, message.DecodedBody);
         var folder = Path.Combine(Path.GetTempPath(), "Piper", "video-inspector");
@@ -1046,6 +1113,7 @@ public sealed class MessageInspector : UserControl
         if (_videoFilePath is { } path) TryDeleteFile(path);
         _videoFilePath = null;
         if (_videoStatus is not null) _videoStatus.Text = string.Empty;
+        if (_videoForcePanel is not null) _videoForcePanel.Visible = false;
     }
 
     private static void TryDeleteFile(string path)
@@ -1133,12 +1201,15 @@ public sealed class MessageInspector : UserControl
         }
     }
 
-    private void RenderJson(HttpMessage message)
+    private void RenderJson(HttpMessage message, bool force = false)
     {
         _jsonTree.BeginUpdate();
         try
         {
             _jsonTree.Nodes.Clear();
+            _jsonTypeNotice.Visible = false;
+            _jsonForcePanel.Visible = false;
+            _jsonTypeStatus.Text = string.Empty;
 
             if (message.Body.Length == 0)
             {
@@ -1146,7 +1217,16 @@ public sealed class MessageInspector : UserControl
                 return;
             }
 
-            if (!ContentCodec.LooksTextual(message.ContentType, message.DecodedBody))
+            if (!force && !IsJsonContentType(message.ContentType))
+            {
+                _jsonTypeStatus.Text = "Response does not have a JSON content type.";
+                _jsonForcePanel.Visible = true;
+                _jsonTypeNotice.Visible = true;
+                _jsonTree.Nodes.Add("[JSON parsing skipped because the content type does not match]");
+                return;
+            }
+
+            if (!force && !ContentCodec.LooksTextual(message.ContentType, message.DecodedBody))
             {
                 _jsonTree.Nodes.Add($"[{message.Body.Length:N0} bytes of {message.ContentType ?? "binary"} content]");
                 return;
@@ -1172,6 +1252,27 @@ public sealed class MessageInspector : UserControl
         }
 
         FindJsonMatches();
+    }
+
+    private void TryRenderJson()
+    {
+        if (_message is null) return;
+        RenderJson(_message, force: true);
+        _renderedJson = _message;
+    }
+
+    private void TryRenderImage()
+    {
+        if (_message is null) return;
+        RenderImage(_message, force: true);
+        _renderedImage = _message;
+    }
+
+    private void TryRenderVideo()
+    {
+        if (_message is null) return;
+        RenderVideo(_message, force: true);
+        _renderedVideo = _message;
     }
 
     private static TreeNode CreateJsonNode(string name, JsonElement value)
