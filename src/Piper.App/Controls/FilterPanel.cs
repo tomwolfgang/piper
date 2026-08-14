@@ -6,22 +6,15 @@ using Piper.Core.Sessions;
 namespace Piper.App.Controls;
 
 /// <summary>
-/// A focused filter panel with a Hosts allow/deny list and Response Status Code toggles,
-/// composed into the same query grammar the session grid's own filter box understands
-/// (see <see cref="Piper.Core.Sessions.SearchQuery"/>). Other filter categories are out of
-/// scope and not implemented here.
+/// A staged filter editor with a Hosts allow/deny list and Response Status Code toggles.
+/// Changes remain in the panel until the user explicitly runs the filterset from Actions.
 /// </summary>
-/// <remarks>
-/// Every control re-composes and re-applies the query immediately while "Use Filters" is
-/// checked -- editing the Hosts box or a status checkbox takes effect right away, no separate
-/// "Run Filterset now" click required. "Run Filterset now" and loading a filterset still force
-/// an apply (and turn "Use Filters" on) as an explicit affordance.
-/// </remarks>
 public sealed class FilterPanel : UserControl
 {
     private readonly CheckBox _useFilters;
     private readonly ComboBox _hostsMode;
-    private readonly TextBox _hostsText;
+    private readonly TextBox _hostEntry;
+    private readonly CheckedListBox _hostsList;
     private readonly CheckBox _hideSuccess;
     private readonly CheckBox _hideNonSuccess;
     private readonly CheckBox _hideRedirects;
@@ -29,33 +22,46 @@ public sealed class FilterPanel : UserControl
     private readonly CheckBox _hideNotModified;
     private bool _applyingSettings;
 
+    /// <summary>Raised only when an Actions command applies or clears the current filterset.</summary>
     public event EventHandler<string>? FilterChanged;
 
+    /// <summary>Raised after the staged controls change, so their settings can be persisted.</summary>
+    public event EventHandler? SettingsChanged;
+
     /// <summary>Captures the current controls in the same format used by filterset files.</summary>
-    public FilterSettings Settings => new()
+    public FilterSettings Settings
     {
-        UseFilters = _useFilters.Checked,
-        HostsMode = _hostsMode.SelectedIndex,
-        HostsText = _hostsText.Text,
-        HideSuccess = _hideSuccess.Checked,
-        HideNonSuccess = _hideNonSuccess.Checked,
-        HideRedirects = _hideRedirects.Checked,
-        HideAuthDemands = _hideAuthDemands.Checked,
-        HideNotModified = _hideNotModified.Checked,
-    };
+        get
+        {
+            var hosts = HostEntries().ToArray();
+            return new FilterSettings
+            {
+                UseFilters = _useFilters.Checked,
+                HostsMode = _hostsMode.SelectedIndex,
+                // Keep the legacy text form populated so filtersets still work in earlier Piper
+                // versions. The Hosts collection below preserves each checkbox state.
+                HostsText = string.Join("; ", hosts.Select(host => host.Pattern)),
+                Hosts = hosts.ToList(),
+                HideSuccess = _hideSuccess.Checked,
+                HideNonSuccess = _hideNonSuccess.Checked,
+                HideRedirects = _hideRedirects.Checked,
+                HideAuthDemands = _hideAuthDemands.Checked,
+                HideNotModified = _hideNotModified.Checked,
+            };
+        }
+    }
 
     public FilterPanel()
     {
         _useFilters = new CheckBox
         {
-            Dock = DockStyle.Top,
-            Text = "Use Filters",
+            Dock = DockStyle.Fill,
+            Text = "Use Filters when run",
             AutoSize = false,
-            Height = 38,
             Padding = new Padding(6, 10, 0, 0),
             Font = new Font(Palette.UiFont, FontStyle.Bold),
         };
-        _useFilters.CheckedChanged += (_, _) => ApplyIfEnabled();
+        _useFilters.CheckedChanged += (_, _) => OnCriteriaChanged();
 
         // ---------------------------------------------------------------- Hosts
 
@@ -69,28 +75,63 @@ public sealed class FilterPanel : UserControl
         _hostsMode.SelectedIndex = 0;
         _hostsMode.SelectedIndexChanged += (_, _) => OnCriteriaChanged();
 
-        _hostsText = new TextBox
+        _hostEntry = new TextBox
         {
             Dock = DockStyle.Fill,
-            Multiline = true,
-            ScrollBars = ScrollBars.Vertical,
             Font = Palette.Mono,
-            PlaceholderText = "localhost; *.curseforge.com; *.example.net",
+            PlaceholderText = "Host pattern, e.g. *.curseforge.com",
         };
-        _hostsText.TextChanged += (_, _) => OnCriteriaChanged();
+        _hostEntry.KeyDown += (_, e) =>
+        {
+            if (e.KeyCode != Keys.Enter) return;
+            AddHosts();
+            e.Handled = true;
+            e.SuppressKeyPress = true;
+        };
+
+        var addHost = new Button { Dock = DockStyle.Right, Text = "Add", Width = 70 };
+        addHost.Click += (_, _) => AddHosts();
+        var addHostRow = new Panel { Dock = DockStyle.Top, Height = 36, Padding = new Padding(0, 2, 0, 2) };
+        addHostRow.Controls.Add(_hostEntry);
+        addHostRow.Controls.Add(addHost);
+
+        _hostsList = new CheckedListBox
+        {
+            Dock = DockStyle.Fill,
+            CheckOnClick = true,
+            BorderStyle = BorderStyle.FixedSingle,
+            Font = Palette.Mono,
+            IntegralHeight = false,
+        };
+        // ItemCheck is raised before the checked state changes. Schedule persistence for after
+        // the native control commits the new state, without applying the filterset.
+        _hostsList.ItemCheck += (_, _) =>
+        {
+            if (!_applyingSettings && IsHandleCreated)
+                BeginInvoke((MethodInvoker)OnCriteriaChanged);
+        };
+        _hostsList.KeyDown += (_, e) =>
+        {
+            if (e.KeyCode != Keys.Delete) return;
+            RemoveSelectedHost();
+            e.Handled = true;
+        };
+
+        var removeHost = new Button { Dock = DockStyle.Right, Text = "Remove selected", Width = 130 };
+        removeHost.Click += (_, _) => RemoveSelectedHost();
+        var removeHostRow = new Panel { Dock = DockStyle.Bottom, Height = 36, Padding = new Padding(0, 2, 0, 2) };
+        removeHostRow.Controls.Add(removeHost);
 
         var hostsGroup = new GroupBox
         {
-            Dock = DockStyle.Top,
+            Dock = DockStyle.Fill,
             Text = "Hosts",
-            Height = 180,
             Padding = new Padding(8, 4, 8, 8),
             Font = Palette.UiFont,
         };
-        // Fill added before Top so the combo ends up above the textbox (same stacking trick
-        // used throughout this app: Dock=Fill children are added first, then the Dock=Top
-        // children that should sit above them).
-        hostsGroup.Controls.Add(_hostsText);
+        hostsGroup.Controls.Add(_hostsList);
+        hostsGroup.Controls.Add(removeHostRow);
+        hostsGroup.Controls.Add(addHostRow);
         hostsGroup.Controls.Add(_hostsMode);
 
         // ------------------------------------------------------ Response Status Code
@@ -104,9 +145,6 @@ public sealed class FilterPanel : UserControl
             check.CheckedChanged += (_, _) => OnCriteriaChanged();
 
         var statusStack = new Panel { Dock = DockStyle.Fill };
-        // Added in reverse so the visual, top-to-bottom order is: success, non-2xx, redirects,
-        // auth demands, not-modified (same trick as above -- last add ends up on top for
-        // same-Dock siblings).
         statusStack.Controls.Add(_hideNotModified);
         statusStack.Controls.Add(_hideAuthDemands);
         statusStack.Controls.Add(_hideRedirects);
@@ -127,6 +165,7 @@ public sealed class FilterPanel : UserControl
 
         var actions = new ToolStripDropDownButton("Actions") { DisplayStyle = ToolStripItemDisplayStyle.Text };
         actions.DropDownItems.Add("Run Filterset now", null, (_, _) => RunFiltersetNow());
+        actions.DropDownItems.Add("Show all sessions", null, (_, _) => ShowAllSessions());
         actions.DropDownItems.Add(new ToolStripSeparator());
         actions.DropDownItems.Add("Load Filterset...", null, (_, _) => LoadFilterset());
         actions.DropDownItems.Add("Save Filterset...", null, (_, _) => SaveFilterset());
@@ -135,21 +174,22 @@ public sealed class FilterPanel : UserControl
 
         var actionsBar = new ToolStrip
         {
-            Dock = DockStyle.Top,
+            Dock = DockStyle.Right,
+            AutoSize = false,
+            Width = 86,
             GripStyle = ToolStripGripStyle.Hidden,
             Font = Palette.UiFont,
         };
         actionsBar.Items.Add(actions);
 
-        // ------------------------------------------------------------- assembly
+        var filterHeader = new Panel { Dock = DockStyle.Top, Height = 38 };
+        filterHeader.Controls.Add(_useFilters);
+        filterHeader.Controls.Add(actionsBar);
 
-        // Reverse order again: the last control added ends up visually topmost among the
-        // Dock=Top siblings, giving (top to bottom) Use Filters, Hosts, Response Status Code,
-        // Actions.
-        Controls.Add(actionsBar);
-        Controls.Add(statusGroup);
+        // Hosts fills all available space so its checkbox list grows with the Filters tab.
         Controls.Add(hostsGroup);
-        Controls.Add(_useFilters);
+        Controls.Add(statusGroup);
+        Controls.Add(filterHeader);
     }
 
     private static CheckBox NewCheck(string text) => new()
@@ -165,11 +205,18 @@ public sealed class FilterPanel : UserControl
 
     private void RunFiltersetNow()
     {
-        // Always recomposes and applies, regardless of the checkbox -- but flipping it on too
-        // is more intuitive than leaving it unchecked while a filter is visibly active on the grid.
-        var wasChecked = _useFilters.Checked;
+        // Adding hosts should make the expected path simple: Actions > Run activates the staged
+        // filterset even when the user has not separately ticked the global checkbox.
         _useFilters.Checked = true;
-        if (wasChecked) ApplyIfEnabled(); // CheckedChanged only fires on an actual change
+        ApplyFilterset();
+    }
+
+    private void ShowAllSessions()
+    {
+        // Preserve every host and status choice for a later run; only the applied query is
+        // cleared. This makes it safe to temporarily inspect the full capture list.
+        _useFilters.Checked = false;
+        ApplyFilterset();
     }
 
     private void LoadFilterset()
@@ -216,22 +263,22 @@ public sealed class FilterPanel : UserControl
     }
 
     private void ShowHelp() => MessageBox.Show(this,
-        "Filters compose into the same query grammar as the session grid's own filter box, "
-        + "and apply by writing into that same filter -- so applying a filterset overwrites "
-        + "anything typed there by hand.\r\n\r\n"
+        "Add one or more host patterns, then use their checkboxes to choose which ones apply. "
+        + "Changes stay staged until Actions > Run Filterset now. Actions > Show all sessions "
+        + "removes the applied filter without discarding the filterset.\r\n\r\n"
+        + "Filters compose into the same query grammar as the session grid's own filter box, "
+        + "so running a filterset overwrites anything typed there by hand.\r\n\r\n"
         + "Only Hosts and Response Status Code filters are implemented.",
         "Filters", MessageBoxButtons.OK, MessageBoxIcon.Information);
 
-    /// <summary>Re-composes from current control state and applies it, but only while "Use
-    /// Filters" is checked -- this is what makes every control (Hosts text, mode, status
-    /// checkboxes) apply live instead of requiring a separate "Run Filterset now".</summary>
-    private void ApplyIfEnabled()
-    {
-        if (_applyingSettings) return;
+    /// <summary>Applies the currently staged filterset; this is intentionally Actions-only.</summary>
+    private void ApplyFilterset() =>
         FilterChanged?.Invoke(this, _useFilters.Checked ? ComposeQuery() : string.Empty);
-    }
 
-    /// <summary>Updates every filter control and applies the resulting enabled/disabled state once.</summary>
+    /// <summary>Applies restored settings at startup without changing their enabled state.</summary>
+    public void ApplyCurrentFilterset() => ApplyFilterset();
+
+    /// <summary>Updates every filter control without applying it to the session grid.</summary>
     public void ApplySettings(FilterSettings settings)
     {
         ArgumentNullException.ThrowIfNull(settings);
@@ -240,7 +287,14 @@ public sealed class FilterPanel : UserControl
         try
         {
             _hostsMode.SelectedIndex = settings.HostsMode is 0 or 1 ? settings.HostsMode : 0;
-            _hostsText.Text = settings.HostsText ?? string.Empty;
+            _hostsList.Items.Clear();
+            var savedHosts = settings.Hosts ?? [];
+            var hosts = savedHosts.Count > 0
+                ? savedHosts
+                : HostFilterTerm.Split(settings.HostsText).Select(pattern => new HostFilterEntry { Pattern = pattern }).ToList();
+            foreach (var host in hosts.Where(host => !string.IsNullOrWhiteSpace(host.Pattern)))
+                _hostsList.Items.Add(host.Pattern.Trim(), host.Enabled);
+
             _hideSuccess.Checked = settings.HideSuccess;
             _hideNonSuccess.Checked = settings.HideNonSuccess;
             _hideRedirects.Checked = settings.HideRedirects;
@@ -253,26 +307,50 @@ public sealed class FilterPanel : UserControl
             _applyingSettings = false;
         }
 
-        ApplyIfEnabled();
+        SettingsChanged?.Invoke(this, EventArgs.Empty);
     }
 
-    /// <summary>Handles an edit to the Hosts box/mode or a status checkbox. If "Use Filters"
-    /// isn't checked yet, editing these controls would otherwise do nothing visible at all --
-    /// <see cref="ApplyIfEnabled"/> only ever applies while it's checked, so typing a host
-    /// pattern before ticking that box silently had no effect. Turning it on the moment there's
-    /// real criteria to apply removes that trap; unchecking it by hand still fully disables
-    /// filtering without losing what was typed.</summary>
+    /// <summary>Records an edit without changing the capture-list filter.</summary>
     private void OnCriteriaChanged()
     {
-        if (!_useFilters.Checked && ComposeQuery().Length > 0)
+        if (!_applyingSettings) SettingsChanged?.Invoke(this, EventArgs.Empty);
+    }
+
+    private void AddHosts()
+    {
+        var patterns = HostFilterTerm.Split(_hostEntry.Text);
+        if (patterns.Count == 0) return;
+
+        var existing = HostEntries().Select(host => host.Pattern).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        foreach (var pattern in patterns)
         {
-            _useFilters.Checked = true; // CheckedChanged applies it
-            return;
+            if (existing.Add(pattern)) _hostsList.Items.Add(pattern, isChecked: true);
         }
-        ApplyIfEnabled();
+        _hostEntry.Clear();
+        OnCriteriaChanged();
+    }
+
+    private void RemoveSelectedHost()
+    {
+        if (_hostsList.SelectedIndex < 0) return;
+        _hostsList.Items.RemoveAt(_hostsList.SelectedIndex);
+        OnCriteriaChanged();
     }
 
     // --------------------------------------------------------------- composition
+
+    private IEnumerable<HostFilterEntry> HostEntries()
+    {
+        for (var index = 0; index < _hostsList.Items.Count; index++)
+        {
+            if (_hostsList.Items[index] is not string pattern) continue;
+            yield return new HostFilterEntry
+            {
+                Pattern = pattern,
+                Enabled = _hostsList.GetItemChecked(index),
+            };
+        }
+    }
 
     private string ComposeQuery()
     {
@@ -290,6 +368,7 @@ public sealed class FilterPanel : UserControl
         return string.Join(' ', terms);
     }
 
-    private string ComposeHostsTerm() => HostFilterTerm.Compose(_hostsText.Text, hide: _hostsMode.SelectedIndex == 1);
-
+    private string ComposeHostsTerm() => HostFilterTerm.Compose(
+        string.Join(';', HostEntries().Where(host => host.Enabled).Select(host => host.Pattern)),
+        hide: _hostsMode.SelectedIndex == 1);
 }

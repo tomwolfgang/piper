@@ -137,6 +137,10 @@ public static class Palette
                 listView.BackColor = Surface;
                 listView.ForeColor = Text;
                 break;
+            case ListBox listBox:
+                listBox.BackColor = Surface;
+                listBox.ForeColor = Text;
+                break;
             case ComboBox combo:
                 combo.BackColor = Surface;
                 combo.ForeColor = Text;

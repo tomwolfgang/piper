@@ -45,6 +45,30 @@ internal static class SessionStoreAdmissionTests
         responseFiltered.Add(composedWithFilteredResponse);
         runner.AreEqual(2, responseFiltered.Count, "composer sends appear before a response filter can exclude them");
 
+        var capped = new SessionStore { Capacity = 3 };
+        var added = new List<Session>();
+        for (var i = 0; i < 5_000; i++)
+        {
+            var session = new Session();
+            added.Add(session);
+            capped.Add(session);
+        }
+
+        var snapshot = capped.Snapshot();
+        runner.AreEqual(3, capped.Count, "capacity keeps the logical retained count after repeated rollover");
+        runner.AreEqual(added[^3].Id, snapshot[0].Id, "capacity preserves oldest-to-newest order");
+        runner.AreEqual(added[^1].Id, snapshot[^1].Id, "capacity retains the newest session");
+        runner.IsTrue(capped.FindById(added[0].Id) is null, "discarded sessions are no longer addressable");
+
+        var reusable = new List<Session>();
+        capped.CopyTo(reusable);
+        runner.AreEqual(3, reusable.Count, "caller-owned snapshot receives all retained sessions");
+        runner.AreEqual(snapshot[0].Id, reusable[0].Id, "caller-owned snapshot retains ordering");
+
+        capped.RemoveAll(session => session.Id == added[^2].Id);
+        runner.AreEqual(2, capped.Count, "removal works after the store has compacted discarded prefixes");
+        runner.AreEqual(added[^1].Id, capped.Snapshot()[^1].Id, "removal keeps remaining session order");
+
         return Task.CompletedTask;
     });
 }

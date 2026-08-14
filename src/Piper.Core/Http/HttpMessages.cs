@@ -20,10 +20,13 @@ public abstract class HttpMessage
     /// <summary>Best-effort text rendering of <see cref="DecodedBody"/> using the charset from Content-Type.</summary>
     public string BodyAsText()
     {
-        var bytes = DecodedBody;
-        if (bytes.Length == 0) return string.Empty;
-        return ContentCodec.CharsetFor(ContentType).GetString(bytes);
+        return BodyAsText(DecodedBody);
     }
+
+    /// <summary>Renders an already decoded body without repeating content decompression.</summary>
+    public string BodyAsText(byte[] decodedBody) => decodedBody.Length == 0
+        ? string.Empty
+        : ContentCodec.CharsetFor(ContentType).GetString(decodedBody);
 
     public abstract string StartLine { get; }
 

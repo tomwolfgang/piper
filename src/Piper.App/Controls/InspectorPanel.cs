@@ -57,12 +57,11 @@ public sealed class InspectorPanel : UserControl
         }
 
         _request.SetMessage(session.Request,
-            session.Request is null ? "Request" : $"Request   {session.Request.StartLine}",
-            session.Host);
+            session.Request is null ? "Request" : $"Request   {session.Request.StartLine}");
 
         if (session.Response is not null)
         {
-            _response.SetMessage(session.Response, $"Response   {session.Response.StartLine}", session.Host);
+            _response.SetMessage(session.Response, $"Response   {session.Response.StartLine}");
         }
         else
         {
@@ -71,7 +70,7 @@ public sealed class InspectorPanel : UserControl
                 SessionState.Failed => $"Response   FAILED - {session.Error}",
                 SessionState.Tunnel => "Response   (encrypted tunnel - not decrypted)",
                 _ => "Response   (waiting)",
-            }, session.Host);
+            });
         }
 
         SetTimingText(BuildTimingLine(session));

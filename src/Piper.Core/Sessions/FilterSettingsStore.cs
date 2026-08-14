@@ -11,11 +11,24 @@ public sealed class FilterSettings
     public bool UseFilters { get; set; }
     public int HostsMode { get; set; }
     public string HostsText { get; set; } = string.Empty;
+    /// <summary>
+    /// Per-host enabled state used by the Filters tab. <see cref="HostsText"/> is retained for
+    /// compatibility with existing filterset files; when this list is empty, callers should
+    /// populate it from that legacy text field.
+    /// </summary>
+    public List<HostFilterEntry> Hosts { get; set; } = [];
     public bool HideSuccess { get; set; }
     public bool HideNonSuccess { get; set; }
     public bool HideRedirects { get; set; }
     public bool HideAuthDemands { get; set; }
     public bool HideNotModified { get; set; }
+}
+
+/// <summary>A host pattern in a filterset and whether it participates when the filter is run.</summary>
+public sealed class HostFilterEntry
+{
+    public string Pattern { get; set; } = string.Empty;
+    public bool Enabled { get; set; } = true;
 }
 
 /// <summary>

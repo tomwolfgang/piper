@@ -36,7 +36,6 @@ public sealed class MessageInspector : UserControl
     private readonly Panel _jsonForcePanel;
     private readonly TextBox _summary;
     private readonly Label _size;
-    private readonly Label _host;
     private readonly bool _showImageViewer;
     private readonly bool _showWebForms;
     private readonly ListView? _webFormsView;
@@ -80,15 +79,6 @@ public sealed class MessageInspector : UserControl
             BorderStyle = BorderStyle.None,
         };
 
-        _host = new Label
-        {
-            Dock = DockStyle.Right,
-            Width = 170,
-            TextAlign = ContentAlignment.MiddleRight,
-            ForeColor = Palette.TextDim,
-            Padding = new Padding(0, 0, 6, 0),
-        };
-
         _size = new Label
         {
             Dock = DockStyle.Bottom,
@@ -101,7 +91,6 @@ public sealed class MessageInspector : UserControl
 
         var summaryLine = new Panel { Dock = DockStyle.Top, Height = 28, Padding = new Padding(6, 5, 0, 3) };
         summaryLine.Controls.Add(_summary);
-        summaryLine.Controls.Add(_host);
 
         var summaryBar = new Panel { Dock = DockStyle.Top, Height = 52, Padding = new Padding(0, 0, 6, 0) };
         summaryBar.Controls.Add(_size);
@@ -750,7 +739,7 @@ public sealed class MessageInspector : UserControl
         Clipboard.SetText(valueOnly ? value.RawValue : _jsonTree.SelectedNode?.Text ?? string.Empty);
     }
 
-    public void SetMessage(HttpMessage? message, string summary, string host = "")
+    public void SetMessage(HttpMessage? message, string summary)
     {
         // Session-list refreshes deliberately preserve their selection, but WinForms still
         // raises SelectedIndexChanged while doing so. Re-rendering a multi-MB body on every
@@ -758,14 +747,12 @@ public sealed class MessageInspector : UserControl
         if (ReferenceEquals(_message, message))
         {
             _summary.Text = summary;
-            _host.Text = host;
             UpdateSummaryMetadata(message);
             return;
         }
 
         _message = message;
         _summary.Text = summary;
-        _host.Text = host;
         UpdateSummaryMetadata(message);
 
         _headers.Clear();
@@ -1082,13 +1069,14 @@ public sealed class MessageInspector : UserControl
 
         if (_videoForcePanel is not null) _videoForcePanel.Visible = false;
         ClearVideo();
-        var extension = VideoExtensionFor(contentType, message.DecodedBody);
+        var decodedBody = message.DecodedBody;
+        var extension = VideoExtensionFor(contentType, decodedBody);
         var folder = Path.Combine(Path.GetTempPath(), "Piper", "video-inspector");
         var path = Path.Combine(folder, $"{Guid.NewGuid():N}{extension}");
         try
         {
             Directory.CreateDirectory(folder);
-            File.WriteAllBytes(path, message.DecodedBody);
+            File.WriteAllBytes(path, decodedBody);
             _videoFilePath = path;
             _videoStatus.Text = $"{contentType ?? "Detected video (no Content-Type)"}\r\nLoading the embedded media player...";
 
@@ -1150,9 +1138,10 @@ public sealed class MessageInspector : UserControl
 
         if (message.Body.Length == 0) return sb.ToString();
 
-        if (ContentCodec.LooksTextual(message.ContentType, message.DecodedBody))
+        var decodedBody = message.DecodedBody;
+        if (ContentCodec.LooksTextual(message.ContentType, decodedBody))
         {
-            var text = message.BodyAsText();
+            var text = message.BodyAsText(decodedBody);
             sb.Append(text.Length > MaxRenderBytes ? text[..MaxRenderBytes] + "\r\n\r\n[truncated]" : text);
         }
         else
@@ -1172,7 +1161,7 @@ public sealed class MessageInspector : UserControl
             return $"[{message.Body.Length:N0} bytes of {message.ContentType ?? "binary"} content]\r\n\r\nSee the Hex tab.";
 
         string text;
-        try { text = message.BodyAsText(); }
+        try { text = message.BodyAsText(decoded); }
         catch (Exception ex) { return $"[could not decode body: {ex.Message}]"; }
 
         var contentType = message.ContentType ?? string.Empty;
@@ -1226,7 +1215,8 @@ public sealed class MessageInspector : UserControl
                 return;
             }
 
-            if (!force && !ContentCodec.LooksTextual(message.ContentType, message.DecodedBody))
+            var decodedBody = message.DecodedBody;
+            if (!force && !ContentCodec.LooksTextual(message.ContentType, decodedBody))
             {
                 _jsonTree.Nodes.Add($"[{message.Body.Length:N0} bytes of {message.ContentType ?? "binary"} content]");
                 return;
@@ -1234,7 +1224,7 @@ public sealed class MessageInspector : UserControl
 
             try
             {
-                using var document = JsonDocument.Parse(message.BodyAsText());
+                using var document = JsonDocument.Parse(message.BodyAsText(decodedBody));
                 var root = CreateJsonNode("root", document.RootElement);
                 _jsonTree.Nodes.Add(root);
                 // Keep the top-level shape visible, while avoiding an overwhelming expansion

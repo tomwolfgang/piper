@@ -43,6 +43,7 @@ public sealed class MainForm : Form
     private bool _restoreMaximized;
     private bool _shutdownInProgress;
     private bool _closeAfterShutdown;
+    private bool _sessionsStatusUpdateQueued;
 
     public MainForm()
     {
@@ -123,6 +124,7 @@ public sealed class MainForm : Form
         EnableSazFileDrop(this);
 
         _sessionList.SelectionChanged += (_, session) => _inspector.Show(session);
+        _sessionList.SelectedSessionsChanged += (_, _) => QueueSessionsStatusUpdate();
         _inspector.TimingChanged += (_, _) =>
         {
             _selectedSessionDetailsLabel.Text = _inspector.TimingText;
@@ -136,21 +138,24 @@ public sealed class MainForm : Form
         _sessionList.ResendRequested += (_, session) => _ = _composer.ResendAsync(session);
         _sessionList.SessionActivated += (_, _) => _rightTabs.SelectedIndex = 0;
 
-        // Known simplification: the Filters tab writes straight into the same FilterText the
-        // grid's own ad-hoc filter box uses, so applying a filterset overwrites anything typed
-        // there by hand, and the two are never combined. Accepted scope reduction, not a bug.
+        // Known simplification: applying a Filterset writes straight into the same FilterText
+        // the grid's own ad-hoc filter box uses, so it overwrites anything typed there by hand,
+        // and the two are never combined. FilterPanel stages edits until Actions applies them.
         _filterPanel.FilterChanged += (_, query) =>
         {
             _sessionList.FilterText = query;
             var admissionQuery = SearchQuery.Parse(query);
             _store.CompletedSessionFilter = admissionQuery.IsEmpty ? null : admissionQuery.Matches;
             FilterSettingsStore.Save(_filterPanel.Settings);
-            _rightTabs.SetTabChecked(filtersPage, _filterPanel.Settings.UseFilters);
+            _rightTabs.SetTabChecked(filtersPage, !admissionQuery.IsEmpty);
         };
+        _filterPanel.SettingsChanged += (_, _) => FilterSettingsStore.Save(_filterPanel.Settings);
 
-        // Restore after subscribing so the stored query is applied to the session grid too.
+        // Restore the editable settings and then apply their saved enabled state so a restart
+        // returns to the same filtered capture view.
         if (FilterSettingsStore.Load() is { } filterSettings)
             _filterPanel.ApplySettings(filterSettings);
+        _filterPanel.ApplyCurrentFilterset();
 
         _proxy.Log += (_, message) => BeginInvoke(() => AppendLog(message));
 
@@ -338,10 +343,18 @@ public sealed class MainForm : Form
             ShortcutKeys = Keys.Control | Keys.O,
         };
         file.DropDownItems.Add(openSaz);
+        var saveSaz = new ToolStripMenuItem("&Save selected sessions as SAZ...", null,
+            (_, _) => _sessionList.SaveSelectedSessionsAsSaz())
+        {
+            ShortcutKeys = Keys.Control | Keys.S,
+        };
+        file.DropDownItems.Add(saveSaz);
         file.DropDownItems.Add(new ToolStripSeparator());
         file.DropDownItems.Add("&Clear sessions\tCtrl+X", null, (_, _) => _store.Clear());
         file.DropDownItems.Add(new ToolStripSeparator());
         file.DropDownItems.Add("E&xit", null, (_, _) => Close());
+        file.DropDownOpening += (_, _) =>
+            saveSaz.Enabled = _sessionList.SelectedSessions.Any(session => session.Request is not null);
 
         var tools = new ToolStripMenuItem("&Tools");
         tools.DropDownItems.Add("&Configurations...", null, (_, _) => ShowConfigurations());
@@ -1066,7 +1079,33 @@ public sealed class MainForm : Form
             ? $"Listening on {_proxy.Endpoint}   -   HTTPS decryption {(_options.DecryptHttps ? "on" : "off")}"
             : "Not capturing";
         UpdateCaptureStatus();
-        _sessionsLabel.Text = $"{_store.Count:N0} sessions";
+        UpdateSessionsStatus();
+    }
+
+    private void UpdateSessionsStatus()
+    {
+        var total = _store.Count;
+        var selected = _sessionList.SelectedSessionCount;
+        _sessionsLabel.Text = selected == 0
+            ? $"{total:N0} sessions"
+            : $"{selected:N0} / {total:N0} sessions";
+    }
+
+    private void QueueSessionsStatusUpdate()
+    {
+        if (_sessionsStatusUpdateQueued) return;
+        if (!IsHandleCreated)
+        {
+            UpdateSessionsStatus();
+            return;
+        }
+
+        _sessionsStatusUpdateQueued = true;
+        BeginInvoke(() =>
+        {
+            _sessionsStatusUpdateQueued = false;
+            if (!IsDisposed) UpdateSessionsStatus();
+        });
     }
 
     protected override void OnFormClosing(FormClosingEventArgs e)

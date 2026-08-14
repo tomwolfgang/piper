@@ -269,8 +269,18 @@ public sealed class SearchQuery
 
             foreach (var header in headers)
             {
-                var line = header.Name + ": " + header.Value;
-                if (re is not null ? re.IsMatch(line) : line.Contains(needle, StringComparison.OrdinalIgnoreCase))
+                if (re is not null)
+                {
+                    if (re.IsMatch(header.Name + ": " + header.Value)) return true;
+                    continue;
+                }
+
+                // Most header searches target either a name or a value. Avoid building a
+                // temporary combined line for every header in every visible session.
+                if (header.Name.Contains(needle, StringComparison.OrdinalIgnoreCase)
+                    || header.Value.Contains(needle, StringComparison.OrdinalIgnoreCase)) return true;
+                if (needle.Contains(':')
+                    && (header.Name + ": " + header.Value).Contains(needle, StringComparison.OrdinalIgnoreCase))
                     return true;
             }
             return false;

@@ -12,6 +12,11 @@ internal static class FilterSettingsStoreTests
                 UseFilters = true,
                 HostsMode = 1,
                 HostsText = "localhost; *.example.test",
+                Hosts =
+                [
+                    new HostFilterEntry { Pattern = "localhost", Enabled = true },
+                    new HostFilterEntry { Pattern = "*.example.test", Enabled = false },
+                ],
                 HideSuccess = true,
                 HideNonSuccess = true,
                 HideRedirects = true,
@@ -26,6 +31,10 @@ internal static class FilterSettingsStoreTests
             runner.AreEqual(saved.UseFilters, restored!.UseFilters, "use filters");
             runner.AreEqual(saved.HostsMode, restored.HostsMode, "host mode");
             runner.AreEqual(saved.HostsText, restored.HostsText, "host text");
+            runner.AreEqual(2, restored.Hosts.Count, "host checkbox entries");
+            runner.AreEqual("localhost", restored.Hosts[0].Pattern, "first host pattern");
+            runner.IsTrue(restored.Hosts[0].Enabled, "checked host is retained");
+            runner.IsTrue(!restored.Hosts[1].Enabled, "unchecked host is retained");
             runner.AreEqual(saved.HideSuccess, restored.HideSuccess, "hide successes");
             runner.AreEqual(saved.HideNonSuccess, restored.HideNonSuccess, "hide non-successes");
             runner.AreEqual(saved.HideRedirects, restored.HideRedirects, "hide redirects");

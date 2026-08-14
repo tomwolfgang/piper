@@ -16,10 +16,7 @@ public static class HostFilterTerm
     /// </summary>
     public static string Compose(string? hostsText, bool hide)
     {
-        if (string.IsNullOrWhiteSpace(hostsText)) return string.Empty;
-
-        var patterns = hostsText
-            .Split([';', ',', '\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+        var patterns = Split(hostsText)
             .Select(StripWildcard)
             .Where(p => p.Length > 0)
             .ToArray();
@@ -29,6 +26,12 @@ public static class HostFilterTerm
         var joined = string.Join('|', patterns);
         return hide ? $"-host:{joined}" : $"host:{joined}";
     }
+
+    /// <summary>Splits user-entered host patterns without changing their display text.</summary>
+    public static IReadOnlyList<string> Split(string? hostsText) =>
+        string.IsNullOrWhiteSpace(hostsText)
+            ? []
+            : hostsText.Split([';', ',', '\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
 
     /// <summary>
     /// Strips a leading "*." subdomain wildcard from a pattern.

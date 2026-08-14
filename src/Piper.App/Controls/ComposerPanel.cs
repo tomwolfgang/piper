@@ -25,6 +25,9 @@ public sealed class ComposerPanel : UserControl
     private readonly ListView _results;
     private readonly Label _resultCount;
     private readonly Label _searchHint;
+    private readonly SolidBrush _resultSurfaceBrush = new(Palette.Surface);
+    private readonly SolidBrush _resultSelectionBrush = new(Palette.Selection);
+    private readonly SolidBrush _resultHeaderBrush = new(Palette.SurfaceAlt);
     private Session[] _matches = [];
 
     // Editor pane
@@ -413,23 +416,24 @@ public sealed class ComposerPanel : UserControl
         RunSearch();
     }
 
-    private static void OnDrawResultHeader(object? sender, DrawListViewColumnHeaderEventArgs e)
+    private void OnDrawResultHeader(object? sender, DrawListViewColumnHeaderEventArgs e)
     {
-        using var background = new SolidBrush(Palette.SurfaceAlt);
-        e.Graphics.FillRectangle(background, e.Bounds);
+        if (_resultHeaderBrush.Color != Palette.SurfaceAlt) _resultHeaderBrush.Color = Palette.SurfaceAlt;
+        e.Graphics.FillRectangle(_resultHeaderBrush, e.Bounds);
         TextRenderer.DrawText(e.Graphics, e.Header?.Text ?? string.Empty, Palette.UiFont,
             Rectangle.Inflate(e.Bounds, -5, 0), Palette.TextDim,
             TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
     }
 
-    private static void OnDrawResultSubItem(object? sender, DrawListViewSubItemEventArgs e)
+    private void OnDrawResultSubItem(object? sender, DrawListViewSubItemEventArgs e)
     {
         if (e.Item is null) return;
         var session = e.Item.Tag as Session;
         var selected = e.Item.Selected;
 
-        using var background = new SolidBrush(selected ? Palette.Selection : Palette.Surface);
-        e.Graphics.FillRectangle(background, e.Bounds);
+        if (_resultSurfaceBrush.Color != Palette.Surface) _resultSurfaceBrush.Color = Palette.Surface;
+        if (_resultSelectionBrush.Color != Palette.Selection) _resultSelectionBrush.Color = Palette.Selection;
+        e.Graphics.FillRectangle(selected ? _resultSelectionBrush : _resultSurfaceBrush, e.Bounds);
 
         var colour = session is null || selected
             ? Palette.Text
@@ -654,6 +658,9 @@ public sealed class ComposerPanel : UserControl
             _searchTimer.Dispose();
             _inFlight?.Dispose();
             _historyToolTip.Dispose();
+            _resultSurfaceBrush.Dispose();
+            _resultSelectionBrush.Dispose();
+            _resultHeaderBrush.Dispose();
         }
         base.Dispose(disposing);
     }

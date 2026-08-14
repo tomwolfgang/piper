@@ -1,11 +1,9 @@
 using Piper.Core.Http;
 using Piper.Core.Sessions;
 
-// Regression coverage for the Filters tab's Hosts box. It was reported broken twice: first
-// because typing a pattern before checking "Use Filters" silently applied nothing (fixed in
-// FilterPanel.OnCriteriaChanged), and then again -- this is that second bug. HostFilterTerm is
-// the pure, UI-free extraction of the query-composition logic FilterPanel.ComposeHostsTerm used
-// to do inline, specifically so this path can be exercised without a running WinForms control.
+// Regression coverage for the Filters tab's Hosts list. HostFilterTerm is the pure, UI-free
+// extraction of the query-composition logic FilterPanel uses, specifically so this path can be
+// exercised without a running WinForms control.
 internal static class HostFilterTests
 {
     public static async Task RunAsync(TestRunner runner)
@@ -42,6 +40,9 @@ internal static class HostFilterTests
             runner.AreEqual("host:a.com|b.com",
                 HostFilterTerm.Compose("  a.com  ;  b.com  ", hide: false),
                 "surrounding whitespace on each pattern is trimmed");
+
+            runner.AreEqual(2, HostFilterTerm.Split("  a.com;\r\nb.com ").Count,
+                "host-list input splits into entries");
 
             return Task.CompletedTask;
         });

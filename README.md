@@ -87,6 +87,7 @@ method:POST host:api status:>=400 -is:image body:"order"
 | `F12` | start / stop capturing |
 | `Ctrl+K` | jump to the Composer search |
 | `Ctrl+E` | send the selected session to the Composer |
+| `Ctrl+S` | save selected sessions as a Fiddler SAZ archive |
 | `Ctrl+X` | clear sessions |
 | `Ctrl+C` | copy selected URLs |
 | `Del` | remove selected sessions |
@@ -132,6 +133,7 @@ targets, so `Invoke-WebRequest -Proxy` would never reach Piper.
 - Request and response inspectors: headers, decoded body, pretty-printed JSON, hex dump
 - Composer with search, raw-request editing, repeat-N, and verbatim header sending
 - Copy as curl, per-host filtering, dark theme
+- Importing and exporting Fiddler SAZ session archives
 
 ### HTTP/3
 
@@ -162,7 +164,6 @@ streams entirely.
   on the wire")
 - HTTP/3 stream reuse (one QUIC connection per request) and server push
 - Breakpoints and request/response tampering
-- Saving and loading session archives
 - Upstream proxy chaining
 - zstd content decoding (bodies are shown as-is, not corrupted)
 

@@ -11,7 +11,7 @@ namespace Piper.App.Controls;
 /// <remarks>
 /// Virtual mode matters here: a busy browser produces thousands of sessions a minute, and
 /// materialising a ListViewItem per session would stall the UI thread. Rows are rendered
-/// on demand from a filtered snapshot array.
+/// on demand from a filtered snapshot.
 /// </remarks>
 public sealed class SessionListView : UserControl
 {
@@ -23,13 +23,20 @@ public sealed class SessionListView : UserControl
     private readonly ListView _list;
     private readonly TextBox _filterBox;
     private readonly SessionStore _store;
+    private readonly SolidBrush _surfaceBrush = new(Palette.Surface);
+    private readonly SolidBrush _selectionBrush = new(Palette.Selection);
+    private readonly SolidBrush _headerBrush = new(Palette.SurfaceAlt);
+    private readonly Pen _headerBorderPen = new(Palette.Border);
 
-    private Session[] _visible = [];
+    private readonly List<Session> _visible = new(1024);
     private SearchQuery _query = SearchQuery.Empty;
     private Func<Session, bool>? _visibilityFilter;
     private bool _autoScroll = true;
 
     public event EventHandler<Session?>? SelectionChanged;
+
+    /// <summary>Raised whenever the capture-list selection set changes.</summary>
+    public event EventHandler? SelectedSessionsChanged;
 
     /// <summary>Raised when the user asks to send a session to the Composer.</summary>
     public event EventHandler<Session>? SendToComposerRequested;
@@ -84,10 +91,7 @@ public sealed class SessionListView : UserControl
         _list.RetrieveVirtualItem += OnRetrieveVirtualItem;
         _list.DrawColumnHeader += OnDrawColumnHeader;
         _list.DrawSubItem += OnDrawSubItem;
-        _list.SelectedIndexChanged += (_, _) =>
-        {
-            if (!_suppressSelectionChanged) SelectionChanged?.Invoke(this, SelectedSession);
-        };
+        _list.SelectedIndexChanged += (_, _) => OnSelectionChanged();
         _list.MouseDown += OnListMouseDown;
         _list.MouseMove += OnListMouseMove;
         _list.MouseUp += (_, _) => _dragSession = null;
@@ -126,11 +130,15 @@ public sealed class SessionListView : UserControl
     private bool _expandingColumns;
     private Session? _dragSession;
     private Point _dragStart;
+    private Session? _primarySelectedSession;
 
-    public Session? SelectedSession =>
-        _list.SelectedIndices.Count > 0 && _list.SelectedIndices[0] < _visible.Length
-            ? _visible[_list.SelectedIndices[0]]
-            : null;
+    /// <summary>
+    /// The first session selected by the user. It remains in the inspectors while the user adds
+    /// more rows to the capture selection.
+    /// </summary>
+    public Session? SelectedSession => _primarySelectedSession;
+
+    public int SelectedSessionCount => _list.SelectedIndices.Count;
 
     public IReadOnlyList<Session> SelectedSessions
     {
@@ -138,7 +146,7 @@ public sealed class SessionListView : UserControl
         {
             var result = new List<Session>(_list.SelectedIndices.Count);
             foreach (int index in _list.SelectedIndices)
-                if (index < _visible.Length) result.Add(_visible[index]);
+                if (index < _visible.Count) result.Add(_visible[index]);
             return result;
         }
     }
@@ -228,37 +236,36 @@ public sealed class SessionListView : UserControl
     private void Rebuild()
     {
         var previousSession = SelectedSession;
-        var previousId = previousSession?.Id;
+        var previousSelectionCount = _list.SelectedIndices.Count;
+        HashSet<int>? previousIds = null;
+        if (previousSelectionCount > 0)
+        {
+            previousIds = new HashSet<int>(previousSelectionCount);
+            foreach (int index in _list.SelectedIndices)
+                if (index >= 0 && index < _visible.Count) previousIds.Add(_visible[index].Id);
+        }
         // Captured against the *old* _visible/VirtualListSize, before either changes below --
         // this is "was the user already looking at the bottom", independent of how many new
         // rows are about to arrive.
         var wasAtBottom = IsScrolledToBottom();
-        _visible = _store.Search(_query);
-        if (_visibilityFilter is not null)
-            _visible = _visible.Where(_visibilityFilter).ToArray();
+        _store.CopyTo(_visible);
+        ApplyVisibilityFiltersInPlace();
 
         _list.BeginUpdate();
         try
         {
             _suppressSelectionChanged = true;
-            _list.VirtualListSize = _visible.Length;
+            _list.VirtualListSize = _visible.Count;
 
-            if (previousId is { } id)
+            if (previousIds is { Count: > 0 })
             {
-                var index = Array.FindIndex(_visible, s => s.Id == id);
-                if (index >= 0)
-                {
-                    _list.SelectedIndices.Clear();
-                    _list.SelectedIndices.Add(index);
-                }
-                else
-                {
-                    _list.SelectedIndices.Clear();
-                }
+                _list.SelectedIndices.Clear();
+                for (var index = 0; index < _visible.Count; index++)
+                    if (previousIds.Contains(_visible[index].Id)) _list.SelectedIndices.Add(index);
             }
-            else if (_autoScroll && wasAtBottom && _visible.Length > 0)
+            else if (_autoScroll && wasAtBottom && _visible.Count > 0)
             {
-                _list.EnsureVisible(_visible.Length - 1);
+                _list.EnsureVisible(_visible.Count - 1);
             }
         }
         finally
@@ -267,13 +274,37 @@ public sealed class SessionListView : UserControl
             _suppressSelectionChanged = false;
         }
 
-        // Reassigning SelectedIndices to keep a virtual row selected causes WinForms to raise
-        // a transient "no selection" event. Do not blank and immediately rebuild the inspector
-        // for that bookkeeping operation; notify only if the selected session truly changed.
+        if (previousSession is not null && IsSelected(previousSession))
+            _primarySelectedSession = previousSession;
+        else
+            _primarySelectedSession = FirstSelectedSession();
+
+        // Reassigning SelectedIndices to keep virtual rows selected causes WinForms to raise
+        // transient selection events. Do not blank and immediately rebuild the inspector for
+        // that bookkeeping operation; notify only if its primary session truly changed.
         if (!ReferenceEquals(previousSession, SelectedSession))
             SelectionChanged?.Invoke(this, SelectedSession);
+        if (previousSelectionCount != _list.SelectedIndices.Count)
+            SelectedSessionsChanged?.Invoke(this, EventArgs.Empty);
 
         _list.Invalidate();
+    }
+
+    private void ApplyVisibilityFiltersInPlace()
+    {
+        if (_query.IsEmpty && _visibilityFilter is null) return;
+
+        var writeIndex = 0;
+        for (var readIndex = 0; readIndex < _visible.Count; readIndex++)
+        {
+            var session = _visible[readIndex];
+            if (!_query.IsEmpty && !_query.Matches(session)) continue;
+            if (_visibilityFilter is not null && !_visibilityFilter(session)) continue;
+            _visible[writeIndex++] = session;
+        }
+
+        if (writeIndex < _visible.Count)
+            _visible.RemoveRange(writeIndex, _visible.Count - writeIndex);
     }
 
     /// <summary>True when the last row is already fully visible (or there's nothing to show
@@ -282,14 +313,14 @@ public sealed class SessionListView : UserControl
     /// gets yanked back down, and scrolling back to the last row on your own resumes following.</summary>
     private bool IsScrolledToBottom()
     {
-        if (_visible.Length == 0 || !_list.IsHandleCreated) return true;
-        var lastRowBottom = _list.GetItemRect(_visible.Length - 1).Bottom;
+        if (_visible.Count == 0 || !_list.IsHandleCreated) return true;
+        var lastRowBottom = _list.GetItemRect(_visible.Count - 1).Bottom;
         return lastRowBottom <= _list.ClientSize.Height;
     }
 
     private void OnRetrieveVirtualItem(object? sender, RetrieveVirtualItemEventArgs e)
     {
-        if (e.ItemIndex < 0 || e.ItemIndex >= _visible.Length)
+        if (e.ItemIndex < 0 || e.ItemIndex >= _visible.Count)
         {
             e.Item = new ListViewItem(string.Empty);
             return;
@@ -310,12 +341,12 @@ public sealed class SessionListView : UserControl
         e.Item = item;
     }
 
-    private static void OnDrawColumnHeader(object? sender, DrawListViewColumnHeaderEventArgs e)
+    private void OnDrawColumnHeader(object? sender, DrawListViewColumnHeaderEventArgs e)
     {
-        using var background = new SolidBrush(Palette.SurfaceAlt);
-        e.Graphics.FillRectangle(background, e.Bounds);
-        using var border = new Pen(Palette.Border);
-        e.Graphics.DrawLine(border, e.Bounds.Right - 1, e.Bounds.Top, e.Bounds.Right - 1, e.Bounds.Bottom);
+        if (_headerBrush.Color != Palette.SurfaceAlt) _headerBrush.Color = Palette.SurfaceAlt;
+        if (_headerBorderPen.Color != Palette.Border) _headerBorderPen.Color = Palette.Border;
+        e.Graphics.FillRectangle(_headerBrush, e.Bounds);
+        e.Graphics.DrawLine(_headerBorderPen, e.Bounds.Right - 1, e.Bounds.Top, e.Bounds.Right - 1, e.Bounds.Bottom);
         TextRenderer.DrawText(e.Graphics, e.Header?.Text ?? string.Empty, Palette.UiFont,
             Rectangle.Inflate(e.Bounds, -6, 0), Palette.TextDim,
             TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
@@ -327,8 +358,9 @@ public sealed class SessionListView : UserControl
         var selected = e.Item.Selected;
         var session = e.Item.Tag as Session;
 
-        using var background = new SolidBrush(selected ? Palette.Selection : Palette.Surface);
-        e.Graphics.FillRectangle(background, e.Bounds);
+        if (_surfaceBrush.Color != Palette.Surface) _surfaceBrush.Color = Palette.Surface;
+        if (_selectionBrush.Color != Palette.Selection) _selectionBrush.Color = Palette.Selection;
+        e.Graphics.FillRectangle(selected ? _selectionBrush : _surfaceBrush, e.Bounds);
 
         var colour = session is null
             ? Palette.Text
@@ -365,11 +397,12 @@ public sealed class SessionListView : UserControl
         if (e.Button == MouseButtons.Right)
         {
             var rightHit = _list.HitTest(e.Location);
-            if (rightHit.Item is not null)
+            // Preserve a multi-row selection when its member is right-clicked, so a context-menu
+            // operation applies to the rows the user deliberately selected. An outside row starts
+            // a new, one-row selection as expected.
+            if (rightHit.Item is not null && !rightHit.Item.Selected)
             {
-                _list.SelectedIndices.Clear();
-                rightHit.Item.Selected = true;
-                rightHit.Item.Focused = true;
+                SelectOnly(rightHit.Item);
             }
             return;
         }
@@ -432,7 +465,8 @@ public sealed class SessionListView : UserControl
         menu.Items.Add("Copy as c&url", null, (_, _) => CopyAsCurl());
         menu.Items.Add("Copy full &session", null, (_, _) => CopyFullSession());
         var save = new ToolStripMenuItem("&Save");
-        save.DropDownItems.Add("Response &body only...", null, (_, _) => SaveResponseBody());
+        var saveResponseBody = save.DropDownItems.Add("Response &body only...", null, (_, _) => SaveResponseBody());
+        var saveSessionsAsSaz = save.DropDownItems.Add("Selected sessions as &SAZ...", null, (_, _) => SaveSelectedSessionsAsSaz());
         menu.Items.Add(save);
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("Filter to this &host", null, (_, _) =>
@@ -450,7 +484,9 @@ public sealed class SessionListView : UserControl
         menu.Items.Add("&Remove selected\tDel", null, (_, _) => RemoveSelected());
         menu.Opening += (_, _) =>
         {
-            save.Enabled = SelectedSession?.Response is not null;
+            saveResponseBody.Enabled = SelectedSession?.Response is not null;
+            saveSessionsAsSaz.Enabled = SelectedSessions.Any(session => session.Request is not null);
+            save.Enabled = saveResponseBody.Enabled || saveSessionsAsSaz.Enabled;
             resend.Enabled = SelectedSession is { IsTunnel: false, Request: not null };
         };
 
@@ -504,6 +540,85 @@ public sealed class SessionListView : UserControl
             MessageBox.Show(this, $"Could not save the response body: {ex.Message}",
                 "Piper", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
+    }
+
+    /// <summary>Prompts for a Fiddler SAZ file and saves the current capture selection.</summary>
+    public bool SaveSelectedSessionsAsSaz()
+    {
+        var sessions = SelectedSessions.Where(session => session.Request is not null).ToArray();
+        if (sessions.Length == 0) return false;
+
+        using var dialog = new SaveFileDialog
+        {
+            Title = "Save selected sessions as Fiddler SAZ",
+            Filter = "Fiddler SAZ captures (*.saz)|*.saz|All files (*.*)|*.*",
+            DefaultExt = "saz",
+            AddExtension = true,
+            FileName = $"piper-capture-{DateTime.Now:yyyyMMdd-HHmmss}.saz",
+        };
+        if (dialog.ShowDialog(this) != DialogResult.OK) return false;
+
+        try
+        {
+            SazExporter.Export(dialog.FileName, sessions);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, $"Could not save the selected sessions: {ex.Message}",
+                "Piper", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            return false;
+        }
+    }
+
+    private void OnSelectionChanged()
+    {
+        if (_suppressSelectionChanged) return;
+
+        var previousSession = _primarySelectedSession;
+        if (previousSession is null || !IsSelected(previousSession))
+            _primarySelectedSession = FirstSelectedSession();
+
+        if (!ReferenceEquals(previousSession, _primarySelectedSession))
+            SelectionChanged?.Invoke(this, _primarySelectedSession);
+        SelectedSessionsChanged?.Invoke(this, EventArgs.Empty);
+    }
+
+    private bool IsSelected(Session session)
+    {
+        foreach (int index in _list.SelectedIndices)
+            if (index >= 0 && index < _visible.Count && ReferenceEquals(_visible[index], session))
+                return true;
+        return false;
+    }
+
+    private Session? FirstSelectedSession()
+    {
+        foreach (int index in _list.SelectedIndices)
+            if (index >= 0 && index < _visible.Count)
+                return _visible[index];
+        return null;
+    }
+
+    private void SelectOnly(ListViewItem item)
+    {
+        var previousSession = SelectedSession;
+        _suppressSelectionChanged = true;
+        try
+        {
+            _list.SelectedIndices.Clear();
+            item.Selected = true;
+            item.Focused = true;
+        }
+        finally
+        {
+            _suppressSelectionChanged = false;
+        }
+
+        _primarySelectedSession = item.Tag as Session;
+        if (!ReferenceEquals(previousSession, SelectedSession))
+            SelectionChanged?.Invoke(this, SelectedSession);
+        SelectedSessionsChanged?.Invoke(this, EventArgs.Empty);
     }
 
     private static string SuggestedResponseFileName(Session session, Piper.Core.Http.HttpResponseData response)
@@ -574,7 +689,14 @@ public sealed class SessionListView : UserControl
 
     protected override void Dispose(bool disposing)
     {
-        if (disposing) _refreshTimer.Dispose();
+        if (disposing)
+        {
+            _refreshTimer.Dispose();
+            _surfaceBrush.Dispose();
+            _selectionBrush.Dispose();
+            _headerBrush.Dispose();
+            _headerBorderPen.Dispose();
+        }
         base.Dispose(disposing);
     }
 }

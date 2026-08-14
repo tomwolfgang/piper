@@ -6,6 +6,8 @@ namespace Piper.Core.Http;
 /// <summary>Content-Encoding and charset handling for display purposes.</summary>
 public static class ContentCodec
 {
+    private static readonly Encoding Utf8NoBom = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
+
     /// <summary>
     /// Strips Content-Encoding so the body can be shown as text. Encodings are applied
     /// right-to-left per RFC 9110. Returns the input unchanged if anything fails - a
@@ -14,6 +16,9 @@ public static class ContentCodec
     public static byte[] Decode(byte[] body, string? contentEncoding)
     {
         if (body.Length == 0 || string.IsNullOrWhiteSpace(contentEncoding)) return body;
+
+        if (!contentEncoding.Contains(','))
+            return TryDecodeOne(body, contentEncoding.Trim(), out var singleDecoded) ? singleDecoded : body;
 
         var encodings = contentEncoding.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
         var current = body;
@@ -25,39 +30,42 @@ public static class ContentCodec
         return current;
     }
 
-    public static bool IsKnownEncoding(string encoding) => encoding.ToLowerInvariant() switch
-    {
-        "gzip" or "x-gzip" or "deflate" or "br" or "identity" or "none" => true,
-        _ => false,
-    };
+    public static bool IsKnownEncoding(string encoding) =>
+        encoding.Equals("gzip", StringComparison.OrdinalIgnoreCase)
+        || encoding.Equals("x-gzip", StringComparison.OrdinalIgnoreCase)
+        || encoding.Equals("deflate", StringComparison.OrdinalIgnoreCase)
+        || encoding.Equals("br", StringComparison.OrdinalIgnoreCase)
+        || encoding.Equals("identity", StringComparison.OrdinalIgnoreCase)
+        || encoding.Equals("none", StringComparison.OrdinalIgnoreCase);
 
     private static bool TryDecodeOne(byte[] input, string encoding, out byte[] output)
     {
         output = input;
         try
         {
-            switch (encoding.ToLowerInvariant())
+            if (encoding.Length == 0
+                || encoding.Equals("identity", StringComparison.OrdinalIgnoreCase)
+                || encoding.Equals("none", StringComparison.OrdinalIgnoreCase)) return true;
+            if (encoding.Equals("gzip", StringComparison.OrdinalIgnoreCase)
+                || encoding.Equals("x-gzip", StringComparison.OrdinalIgnoreCase))
             {
-                case "identity":
-                case "none":
-                case "":
-                    return true;
-                case "gzip":
-                case "x-gzip":
-                    output = Run(input, s => new GZipStream(s, CompressionMode.Decompress));
-                    return true;
-                case "br":
-                    output = Run(input, s => new BrotliStream(s, CompressionMode.Decompress));
-                    return true;
-                case "deflate":
-                    // Servers disagree on whether "deflate" means zlib (RFC 1950) or raw
-                    // (RFC 1951). Try zlib first, then fall back to raw.
-                    try { output = Run(input, s => new ZLibStream(s, CompressionMode.Decompress)); }
-                    catch { output = Run(input, s => new DeflateStream(s, CompressionMode.Decompress)); }
-                    return true;
-                default:
-                    return false; // unknown (e.g. zstd) - leave the body alone
+                output = Run(input, s => new GZipStream(s, CompressionMode.Decompress));
+                return true;
             }
+            if (encoding.Equals("br", StringComparison.OrdinalIgnoreCase))
+            {
+                output = Run(input, s => new BrotliStream(s, CompressionMode.Decompress));
+                return true;
+            }
+            if (encoding.Equals("deflate", StringComparison.OrdinalIgnoreCase))
+            {
+                // Servers disagree on whether "deflate" means zlib (RFC 1950) or raw
+                // (RFC 1951). Try zlib first, then fall back to raw.
+                try { output = Run(input, s => new ZLibStream(s, CompressionMode.Decompress)); }
+                catch { output = Run(input, s => new DeflateStream(s, CompressionMode.Decompress)); }
+                return true;
+            }
+            return false; // unknown (e.g. zstd) - leave the body alone
         }
         catch
         {
@@ -69,7 +77,10 @@ public static class ContentCodec
     {
         using var source = new MemoryStream(input, writable: false);
         using var decompressor = wrap(source);
-        using var target = new MemoryStream(input.Length * 4);
+        // Compressed payloads can be large. Avoid reserving four times their size up front (and
+        // immediately landing on the LOH); MemoryStream can grow as the decompressor produces data.
+        var initialCapacity = (int)Math.Min((long)input.Length * 2, 1024 * 1024);
+        using var target = new MemoryStream(initialCapacity);
         decompressor.CopyTo(target);
         return target.ToArray();
     }
@@ -96,7 +107,7 @@ public static class ContentCodec
                 }
             }
         }
-        return new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
+        return Utf8NoBom;
     }
 
     /// <summary>Heuristic: is this payload safe to show in a text view?</summary>
@@ -104,12 +115,17 @@ public static class ContentCodec
     {
         if (!string.IsNullOrEmpty(contentType))
         {
-            var ct = contentType.ToLowerInvariant();
-            if (ct.StartsWith("text/")) return true;
-            if (ct.Contains("json") || ct.Contains("xml") || ct.Contains("javascript")
-                || ct.Contains("x-www-form-urlencoded") || ct.Contains("graphql")) return true;
-            if (ct.StartsWith("image/") || ct.StartsWith("video/") || ct.StartsWith("audio/")
-                || ct.Contains("octet-stream") || ct.Contains("font")) return false;
+            if (contentType.StartsWith("text/", StringComparison.OrdinalIgnoreCase)) return true;
+            if (contentType.Contains("json", StringComparison.OrdinalIgnoreCase)
+                || contentType.Contains("xml", StringComparison.OrdinalIgnoreCase)
+                || contentType.Contains("javascript", StringComparison.OrdinalIgnoreCase)
+                || contentType.Contains("x-www-form-urlencoded", StringComparison.OrdinalIgnoreCase)
+                || contentType.Contains("graphql", StringComparison.OrdinalIgnoreCase)) return true;
+            if (contentType.StartsWith("image/", StringComparison.OrdinalIgnoreCase)
+                || contentType.StartsWith("video/", StringComparison.OrdinalIgnoreCase)
+                || contentType.StartsWith("audio/", StringComparison.OrdinalIgnoreCase)
+                || contentType.Contains("octet-stream", StringComparison.OrdinalIgnoreCase)
+                || contentType.Contains("font", StringComparison.OrdinalIgnoreCase)) return false;
         }
 
         // Sniff: treat as binary if there are NUL bytes in the first block.

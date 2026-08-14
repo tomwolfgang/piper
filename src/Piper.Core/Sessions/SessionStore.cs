@@ -17,6 +17,7 @@ public sealed class SessionStore
     private readonly Lock _gate = new();
     private Func<Session, bool>? _captureFilter;
     private Func<Session, bool>? _completedSessionFilter;
+    private int _firstSession;
 
     /// <summary>Oldest sessions are dropped once the cap is hit. 0 disables trimming.</summary>
     public int Capacity { get; set; } = 20_000;
@@ -50,7 +51,7 @@ public sealed class SessionStore
     {
         get
         {
-            lock (_gate) return _sessions.Count;
+            lock (_gate) return _sessions.Count - _firstSession;
         }
     }
 
@@ -76,8 +77,20 @@ public sealed class SessionStore
         lock (_gate)
         {
             _sessions.Add(session);
-            if (Capacity > 0 && _sessions.Count > Capacity)
-                _sessions.RemoveRange(0, _sessions.Count - Capacity);
+            if (Capacity > 0)
+            {
+                var discardCount = _sessions.Count - _firstSession - Capacity;
+                if (discardCount > 0)
+                {
+                    // Do not shift the whole retained list for every new session once the cap is
+                    // reached. Clear discarded references immediately, then compact the prefix in
+                    // one amortized operation after enough additions have accumulated.
+                    var discardEnd = _firstSession + discardCount;
+                    for (var i = _firstSession; i < discardEnd; i++) _sessions[i] = null!;
+                    _firstSession = discardEnd;
+                    CompactDiscardedPrefixIfNeeded();
+                }
+            }
         }
         SessionAdded?.Invoke(this, new SessionEventArgs(session));
     }
@@ -108,14 +121,32 @@ public sealed class SessionStore
 
     public Session[] Snapshot()
     {
-        lock (_gate) return _sessions.ToArray();
+        lock (_gate)
+        {
+            var result = new Session[_sessions.Count - _firstSession];
+            _sessions.CopyTo(_firstSession, result, 0, result.Length);
+            return result;
+        }
+    }
+
+    /// <summary>Copies the retained sessions into a caller-owned reusable buffer.</summary>
+    public void CopyTo(List<Session> destination)
+    {
+        ArgumentNullException.ThrowIfNull(destination);
+        lock (_gate)
+        {
+            destination.Clear();
+            destination.EnsureCapacity(_sessions.Count - _firstSession);
+            for (var i = _firstSession; i < _sessions.Count; i++)
+                destination.Add(_sessions[i]);
+        }
     }
 
     public Session? FindById(int id)
     {
         lock (_gate)
         {
-            for (var i = _sessions.Count - 1; i >= 0; i--)
+            for (var i = _sessions.Count - 1; i >= _firstSession; i--)
                 if (_sessions[i].Id == id) return _sessions[i];
         }
         return null;
@@ -126,6 +157,7 @@ public sealed class SessionStore
         lock (_gate)
         {
             _sessions.Clear();
+            _firstSession = 0;
             _pendingAdmission.Clear();
         }
         Cleared?.Invoke(this, EventArgs.Empty);
@@ -133,8 +165,25 @@ public sealed class SessionStore
 
     public void RemoveAll(Func<Session, bool> predicate)
     {
-        lock (_gate) _sessions.RemoveAll(s => predicate(s));
+        lock (_gate)
+        {
+            CompactDiscardedPrefix();
+            _sessions.RemoveAll(s => predicate(s));
+        }
         Cleared?.Invoke(this, EventArgs.Empty);
+    }
+
+    private void CompactDiscardedPrefixIfNeeded()
+    {
+        if (_firstSession >= 4_096 && _firstSession >= _sessions.Count / 2)
+            CompactDiscardedPrefix();
+    }
+
+    private void CompactDiscardedPrefix()
+    {
+        if (_firstSession == 0) return;
+        _sessions.RemoveRange(0, _firstSession);
+        _firstSession = 0;
     }
 
     /// <summary>Applies a compiled query against a snapshot.</summary>
