@@ -27,7 +27,7 @@ src/Piper.Core/          no UI dependencies, targets net10.0
   Security/                 root CA, per-host leaf certs, trust store management
   Sessions/                 session model, store, search query compiler
 src/Piper.App/           WinForms shell, targets net10.0-windows
-  Controls/                 session grid, inspectors, composer
+  Controls/                 session grid, inspectors, composer, autoresponder
   Theme/                    dark palette and owner-drawn list/tab controls
 tests/Piper.SmokeTests/  end-to-end tests, no test framework needed
 tools/Piper.TrafficGen/  local origin + traffic generator for manual UI testing
@@ -134,6 +134,49 @@ targets, so `Invoke-WebRequest -Proxy` would never reach Piper.
 - Composer with search, raw-request editing, repeat-N, and verbatim header sending
 - Copy as curl, per-host filtering, dark theme
 - Importing and exporting Fiddler SAZ session archives
+- AutoResponder: ordered rules that answer a request locally instead of sending it upstream —
+  see below
+
+### AutoResponder
+
+The **AutoResponder** tab holds an ordered rule list. Rules are checked top down and the first
+enabled one that matches decides the answer, so a request can be served from a file, given a status,
+delayed, redirected or dropped without ever reaching its origin. The syntax is Fiddler's, so rules
+copied from a Fiddler setup work unchanged.
+
+| Match | |
+|---|---|
+| `orders` | part of the URL, ignoring case |
+| `EXACT:https://host/path` | the whole URL, case-sensitive |
+| `NOT:orders` | everything the rest does not match |
+| `REGEX:/v(?<n>\d+)/items` | a regular expression; `${n}` is then usable in the action |
+| `METHOD:POST` | the request method |
+| `HEADER:X-Env=staging` | a request header |
+| `URLWithBody:coupon` | the URL and request body together |
+| `Q:method:POST host:api` | Piper's own [search grammar](#search-grammar), request fields only |
+
+| Action | |
+|---|---|
+| `*404`, `*503` | answer with that status |
+| `C:\mocks\orders.json` | serve that file, content type from its extension |
+| `*inline` | serve the rule's own body |
+| `*raw:C:\path\captured.txt` | serve a complete saved response, headers included |
+| `*redir:https://other/path` | send the client a 307 |
+| `https://other/path` | fetch that instead, without telling the client |
+| `*delay:500` | pause, then carry on — combine as `*delay:500 *503` |
+| `*drop`, `*reset` | kill the connection |
+| `*CORSPreflightAllow` | answer an `OPTIONS` preflight permissively |
+
+Drag a captured session onto the tab (or use **Create AutoResponder rule** in the grid's context
+menu) to build a rule that replays exactly what came back. Right-click a rule to edit its response as
+raw HTTP, or as an editable JSON tree when the body is JSON. The **Test URL** box says which rule
+wins for a URL and what it would return, without issuing a request, and each rule shows how many
+times it has fired.
+
+Sessions a rule answered are coloured differently in the grid, and searchable with `is:auto`.
+
+Rules cannot see inside an undecrypted `CONNECT` tunnel, so a rule for an HTTPS host only fires when
+that host is being decrypted.
 
 ### HTTP/3
 
@@ -163,7 +206,8 @@ streams entirely.
   pseudo-headers and forbidden headers are structurally at odds with "what you type is what goes
   on the wire")
 - HTTP/3 stream reuse (one QUIC connection per request) and server push
-- Breakpoints and request/response tampering
+- Breakpoints, and tampering with a response the origin actually sent (the AutoResponder replaces
+  responses, it does not edit real ones on their way back)
 - Upstream proxy chaining
 - zstd content decoding (bodies are shown as-is, not corrupted)
 
