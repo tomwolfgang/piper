@@ -58,6 +58,9 @@ public sealed class ProxyOptions
     /// <summary>Optional per-host origin overrides, applied without changing the requested host identity.</summary>
     public HostRemapping HostRemapping { get; } = new();
 
+    /// <summary>Ordered rules that can answer a request locally instead of sending it upstream.</summary>
+    public AutoResponder AutoResponder { get; } = new();
+
     /// <summary>How long to wait for a QUIC handshake before abandoning h3 and falling back to
     /// TCP. Deliberately short -- this is speculative work in front of a request that has a
     /// perfectly good TCP path available.</summary>

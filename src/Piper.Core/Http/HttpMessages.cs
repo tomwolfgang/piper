@@ -112,4 +112,29 @@ public sealed class HttpResponseData : HttpMessage
         r.Headers.Set("Connection", "close");
         return r;
     }
+
+    /// <summary>
+    /// A locally-generated response whose downstream framing is decided later - by
+    /// <c>ProxyServer.BuildInboundResponse</c> on HTTP/1.1, or by the framer on HTTP/2.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately sets no Connection header, unlike <see cref="Simple"/>, which exists for terminal
+    /// errors on a connection that is about to close. A response served from a rule has to be able to
+    /// keep the connection alive, or every faked request would look artificially slow.
+    /// </remarks>
+    public static HttpResponseData Canned(int status, byte[] body, string? contentType = null, string? reason = null)
+    {
+        ArgumentNullException.ThrowIfNull(body);
+
+        var response = new HttpResponseData
+        {
+            StatusCode = status,
+            ReasonPhrase = reason ?? ReasonPhrases.ForOrClass(status),
+            Body = body,
+        };
+
+        if (contentType is not null) response.Headers.Set("Content-Type", contentType);
+        response.Headers.Set("Content-Length", body.Length.ToString());
+        return response;
+    }
 }

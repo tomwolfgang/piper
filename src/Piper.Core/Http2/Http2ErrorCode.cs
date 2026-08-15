@@ -21,6 +21,16 @@ public enum Http2ErrorCode : uint
 
 /// <summary>A violation of the HTTP/2 wire protocol. Connection-level (no <see cref="StreamId"/>)
 /// unless set, in which case only that stream is reset rather than the whole connection.</summary>
+/// <summary>
+/// A deliberate abort of one stream rather than a protocol failure, raised by an AutoResponder
+/// <c>*drop</c> or <c>*reset</c> rule. Only the stream dies; the connection and every other stream
+/// on it carry on, which is as close as multiplexed HTTP/2 gets to killing one TCP connection.
+/// </summary>
+public sealed class Http2StreamAbortException(Http2ErrorCode errorCode) : Exception($"stream aborted ({errorCode})")
+{
+    public Http2ErrorCode ErrorCode { get; } = errorCode;
+}
+
 public sealed class Http2ProtocolException(Http2ErrorCode errorCode, string message) : Exception(message)
 {
     public Http2ErrorCode ErrorCode { get; } = errorCode;

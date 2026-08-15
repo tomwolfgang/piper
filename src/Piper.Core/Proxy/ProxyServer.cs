@@ -142,12 +142,14 @@ public sealed class ProxyServer : IAsyncDisposable
                 if (string.Equals(request.Method, "CONNECT", StringComparison.OrdinalIgnoreCase))
                 {
                     // CONNECT takes over the connection entirely; it never returns to this loop.
-                    await HandleConnectAsync(request, clientStream, clientEndpoint, processName, ct).ConfigureAwait(false);
+                    await HandleConnectAsync(request, clientStream, client.Client, clientEndpoint, processName, ct)
+                        .ConfigureAwait(false);
                     return;
                 }
 
                 var keepAlive = await HandleRequestAsync(
-                    request, clientStream, slot, clientEndpoint, processName, isHttps: false, ct).ConfigureAwait(false);
+                    request, clientStream, client.Client, slot, clientEndpoint, processName, isHttps: false, ct)
+                    .ConfigureAwait(false);
 
                 if (!keepAlive) break;
             }
@@ -174,7 +176,8 @@ public sealed class ProxyServer : IAsyncDisposable
     // ------------------------------------------------------------------- CONNECT
 
     private async Task HandleConnectAsync(
-        HttpRequestData connect, Stream clientStream, string clientEndpoint, string processName, CancellationToken ct)
+        HttpRequestData connect, Stream clientStream, Socket clientSocket,
+        string clientEndpoint, string processName, CancellationToken ct)
     {
         var (host, port) = SplitAuthority(connect.RequestTarget, defaultPort: 443);
 
@@ -244,7 +247,7 @@ public sealed class ProxyServer : IAsyncDisposable
                 request.Url = BuildTunnelUrl(request, host, port);
 
                 var keepAlive = await HandleRequestAsync(
-                    request, ssl, slot, clientEndpoint, processName, isHttps: true, ct).ConfigureAwait(false);
+                    request, ssl, clientSocket, slot, clientEndpoint, processName, isHttps: true, ct).ConfigureAwait(false);
 
                 if (!keepAlive) break;
             }
@@ -254,7 +257,10 @@ public sealed class ProxyServer : IAsyncDisposable
         catch (HttpParseException ex) { Log?.Invoke(this, $"Protocol error in tunnel to {host}: {ex.Message}"); }
         finally
         {
-            await ssl.DisposeAsync().ConfigureAwait(false);
+            // An AutoResponder *reset rule may already have aborted the socket underneath this
+            // stream, in which case writing close_notify throws.
+            try { await ssl.DisposeAsync().ConfigureAwait(false); }
+            catch (Exception) { /* the connection is already gone */ }
         }
     }
 
@@ -371,7 +377,7 @@ public sealed class ProxyServer : IAsyncDisposable
 
     /// <summary>Forwards one request and writes the response back. Returns false when the connection must close.</summary>
     private async Task<bool> HandleRequestAsync(
-        HttpRequestData request, Stream clientStream,
+        HttpRequestData request, Stream clientStream, Socket clientSocket,
         ConnectionSlot slot, string clientEndpoint, string processName, bool isHttps, CancellationToken ct)
     {
         var session = new Session
@@ -403,11 +409,63 @@ public sealed class ProxyServer : IAsyncDisposable
                                || request.HttpVersion == "HTTP/1.0";
 
         var isUpgrade = request.Headers.HasToken("Connection", "Upgrade") && request.Headers.Contains("Upgrade");
+        Uri? refetchTarget = null;
+
+        // AutoResponder rules run here: late enough that the URL is resolved and the session exists,
+        // early enough that nothing has been sent upstream. Outside the try below, so an IOException
+        // from writing a canned response is not reported as a 502 from an origin we never contacted.
+        //
+        // Answering here and keeping the connection alive is only safe because HttpParser has already
+        // read the whole request body -- no unread bytes are left on the socket to desynchronise the
+        // next request. If body reading ever becomes lazy, revisit this.
+        var decision = _options.AutoResponder.Evaluate(session);
+        if (decision.Outcome is not AutoResponderOutcome.Passthrough)
+        {
+            if (decision.Delay > TimeSpan.Zero) await Task.Delay(decision.Delay, ct).ConfigureAwait(false);
+
+            switch (decision.Outcome)
+            {
+                case AutoResponderOutcome.Respond:
+                {
+                    var canned = await decision.Action!
+                        .BuildResponseAsync(decision.Rule!, decision.Match, request, _options.MaxBodyBytes, ct)
+                        .ConfigureAwait(false);
+                    return await RespondFromRuleAsync(clientStream, session, request, canned, decision,
+                        clientWantsClose || isUpgrade, ct).ConfigureAwait(false);
+                }
+
+                case AutoResponderOutcome.Drop:
+                    FinishAborted(session, decision, "closed the connection without responding");
+                    return false;
+
+                case AutoResponderOutcome.Reset:
+                    FinishAborted(session, decision, "reset the connection");
+                    AbortConnection(clientSocket);
+                    return false;
+
+                // A bare-URL action is Fiddler's transparent refetch: fetch somewhere else, but let the
+                // client keep believing it called the address it asked for. session.Request stays
+                // untouched so the grid still shows what the client actually sent.
+                case AutoResponderOutcome.Redirect when decision.Action!.ResolveTarget(decision.Match, request.Url) is { } target:
+                    session.AutoResponderRule = decision.Description;
+                    refetchTarget = target;
+                    host = target.Host;
+                    port = target.Port;
+                    targetIsTls = target.Scheme.Equals("https", StringComparison.OrdinalIgnoreCase);
+                    break;
+            }
+        }
 
         var stopwatch = Stopwatch.StartNew();
         try
         {
             var outbound = BuildOutboundRequest(request, isUpgrade, _options);
+            if (refetchTarget is not null)
+            {
+                outbound.Url = refetchTarget;
+                outbound.Headers.Set("Host",
+                    refetchTarget.IsDefaultPort ? refetchTarget.Host : $"{refetchTarget.Host}:{refetchTarget.Port}");
+            }
             var beforeResponse = stopwatch.Elapsed;
 
             void MarkSent()
@@ -510,6 +568,69 @@ public sealed class ProxyServer : IAsyncDisposable
 
             return false;
         }
+    }
+
+    /// <summary>
+    /// Writes a response produced by an AutoResponder rule. Unlike <see cref="RespondLocallyAsync"/>,
+    /// which serves terminal errors on a connection that is closing anyway, this goes through
+    /// <see cref="BuildInboundResponse"/> so a faked response can keep the connection alive - otherwise
+    /// every rule hit would cost a fresh TCP handshake and look artificially slow.
+    /// </summary>
+    private async Task<bool> RespondFromRuleAsync(
+        Stream clientStream, Session session, HttpRequestData request, HttpResponseData canned,
+        AutoResponderDecision decision, bool clientWantsClose, CancellationToken ct)
+    {
+        session.Response = canned;
+        session.AutoResponderRule = decision.Description;
+        session.State = SessionState.Complete;
+        session.Completed = DateTimeOffset.Now;
+        session.InvalidateSearchIndex();
+        _store.NotifyUpdated(session);
+
+        var inbound = BuildInboundResponse(canned, clientWantsClose);
+        inbound.HttpVersion = "HTTP/1.1";
+
+        // After BuildInboundResponse, so Content-Length still describes the body a GET would receive.
+        if (string.Equals(request.Method, "HEAD", StringComparison.OrdinalIgnoreCase)) inbound.Body = [];
+
+        try
+        {
+            await clientStream.WriteAsync(inbound.ToBytes(), ct).ConfigureAwait(false);
+            await clientStream.FlushAsync(ct).ConfigureAwait(false);
+        }
+        catch (IOException)
+        {
+            return false; // client gone
+        }
+
+        return !clientWantsClose;
+    }
+
+    /// <summary>Records a session that a rule deliberately killed. Failed is honest: the client sees one.</summary>
+    private void FinishAborted(Session session, AutoResponderDecision decision, string what)
+    {
+        session.AutoResponderRule = decision.Description;
+        session.State = SessionState.Failed;
+        session.Error = $"AutoResponder rule '{decision.Description}' {what}.";
+        session.Completed = DateTimeOffset.Now;
+        session.InvalidateSearchIndex();
+        _store.NotifyUpdated(session);
+    }
+
+    /// <summary>
+    /// Closes a connection so the client sees a TCP reset rather than an orderly shutdown, which is
+    /// the failure most worth being able to reproduce deliberately.
+    /// </summary>
+    private static void AbortConnection(Socket socket)
+    {
+        try
+        {
+            // Linger zero turns Close() into an RST instead of a FIN. Order matters.
+            socket.LingerState = new LingerOption(true, 0);
+            socket.Close();
+        }
+        catch (SocketException) { }
+        catch (ObjectDisposedException) { }
     }
 
     private async Task RespondLocallyAsync(Stream clientStream, Session session, HttpResponseData response, CancellationToken ct)

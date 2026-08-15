@@ -46,6 +46,15 @@ public sealed class SearchQuery
     /// <summary>Any parse problems. The query still runs, ignoring the bad terms.</summary>
     public IReadOnlyList<string> Warnings { get; private init; } = [];
 
+    /// <summary>
+    /// The field names the query used, lowercased. Callers that can only honour part of the grammar
+    /// -- the AutoResponder matches before a response exists -- check this instead of reparsing.
+    /// </summary>
+    public IReadOnlyList<string> Fields { get; private init; } = [];
+
+    /// <summary>The <c>is:</c> values the query used, lowercased, for the same reason.</summary>
+    public IReadOnlyList<string> IsValuesUsed { get; private init; } = [];
+
     public bool Matches(Session session)
     {
         for (var i = 0; i < _predicates.Count; i++)
@@ -64,9 +73,21 @@ public sealed class SearchQuery
         var predicates = new List<Func<Session, bool>>();
         var plainTerms = new List<string>();
         var warnings = new List<string>();
+        var fields = new List<string>();
+        var isValues = new List<string>();
 
         foreach (var token in Tokenize(query))
         {
+            if (token.Field is { } field)
+            {
+                if (!fields.Contains(field)) fields.Add(field);
+                if (field is "is" or "has")
+                {
+                    var isValue = token.Value.ToLowerInvariant();
+                    if (!isValues.Contains(isValue)) isValues.Add(isValue);
+                }
+            }
+
             try
             {
                 var predicate = Compile(token, plainTerms);
@@ -79,7 +100,12 @@ public sealed class SearchQuery
             }
         }
 
-        return new SearchQuery(predicates, plainTerms, query) { Warnings = warnings };
+        return new SearchQuery(predicates, plainTerms, query)
+        {
+            Warnings = warnings,
+            Fields = fields,
+            IsValuesUsed = isValues,
+        };
     }
 
     private static Func<Session, bool> Negate(Func<Session, bool> inner) => s => !inner(s);
@@ -345,6 +371,7 @@ public sealed class SearchQuery
         "tunnel" or "connect" => s => s.IsTunnel,
         "composed" or "composer" => s => s.IsComposed,
         "captured" => s => !s.IsComposed,
+        "auto" or "autoresponder" or "faked" => s => s.IsAutoResponded,
         "error" or "failed" => s => s.State == SessionState.Failed || s.StatusCode >= 400,
         "complete" or "done" => s => s.State == SessionState.Complete,
         "pending" or "inflight" => s => s.State is SessionState.Pending or SessionState.SendingRequest or SessionState.AwaitingResponse,
@@ -428,7 +455,7 @@ public sealed class SearchQuery
 
     public static readonly string[] IsValues =
     [
-        "is:https", "is:http", "is:tunnel", "is:composed", "is:captured", "is:error",
+        "is:https", "is:http", "is:tunnel", "is:composed", "is:captured", "is:auto", "is:error",
         "is:complete", "is:pending", "is:redirect", "is:ok", "is:json", "is:xml",
         "is:html", "is:image", "is:script", "is:css", "is:slow", "is:cached", "is:body",
     ];
