@@ -2,6 +2,7 @@ using System.Drawing;
 using System.Runtime.InteropServices;
 using System.Windows.Forms;
 using Microsoft.Win32;
+using Piper.Core.Sessions;
 
 namespace Piper.App.Theme;
 
@@ -19,13 +20,15 @@ public static class Palette
         Color.FromArgb(45, 45, 48), Color.FromArgb(62, 62, 66), Color.FromArgb(224, 224, 226),
         Color.FromArgb(150, 150, 156), Color.FromArgb(0, 122, 204), Color.FromArgb(38, 79, 120),
         Color.FromArgb(106, 190, 120), Color.FromArgb(120, 170, 220), Color.FromArgb(230, 180, 100),
-        Color.FromArgb(232, 110, 110), Color.FromArgb(140, 140, 148), Color.FromArgb(190, 150, 230));
+        Color.FromArgb(232, 110, 110), Color.FromArgb(140, 140, 148), Color.FromArgb(190, 150, 230),
+        Color.FromArgb(105, 205, 200));
     private static readonly ThemeColors Light = new(
         Color.FromArgb(250, 250, 250), Color.White, Color.FromArgb(255, 240, 240),
         Color.FromArgb(242, 242, 242), Color.FromArgb(205, 205, 205), Color.FromArgb(35, 35, 35),
         Color.FromArgb(100, 100, 100), Color.FromArgb(0, 102, 204), Color.FromArgb(214, 232, 251),
         Color.FromArgb(35, 130, 65), Color.FromArgb(55, 115, 180), Color.FromArgb(170, 105, 15),
-        Color.FromArgb(190, 55, 55), Color.FromArgb(105, 105, 112), Color.FromArgb(125, 80, 180));
+        Color.FromArgb(190, 55, 55), Color.FromArgb(105, 105, 112), Color.FromArgb(125, 80, 180),
+        Color.FromArgb(20, 125, 125));
 
     private static ThemeMode _mode = DetectWindowsTheme();
 
@@ -49,6 +52,9 @@ public static class Palette
     public static Color StatusServerError => Current.StatusServerError;
     public static Color StatusTunnel => Current.StatusTunnel;
     public static Color Composed => Current.Composed;
+
+    /// <summary>Rows an AutoResponder rule answered, so a faked response is obvious at a glance.</summary>
+    public static Color AutoResponded => Current.AutoResponded;
 
     public static readonly Font Mono = new("Consolas", 9.5f);
     public static readonly Font UiFont = new("Segoe UI", 9f);
@@ -98,6 +104,22 @@ public static class Palette
     }
 
     /// <summary>Colour used for a session row, by outcome.</summary>
+    /// <summary>
+    /// The row colour for a captured session.
+    /// </summary>
+    /// <remarks>
+    /// A session an AutoResponder rule answered is coloured for that before anything else: when
+    /// rules are running, "did this come from a rule or from the origin" is the thing you are
+    /// looking for, and the status itself is still spelled out in the Result column.
+    /// </remarks>
+    public static Color ForStatus(Session session)
+    {
+        ArgumentNullException.ThrowIfNull(session);
+        return session.IsAutoResponded
+            ? AutoResponded
+            : ForStatus(session.StatusCode, session.IsTunnel, session.State == SessionState.Failed, session.IsComposed);
+    }
+
     public static Color ForStatus(int statusCode, bool isTunnel, bool failed, bool composed)
     {
         if (failed) return StatusServerError;
@@ -262,7 +284,7 @@ public static class Palette
         Color Background, Color Surface, Color SurfaceWarning, Color SurfaceAlt, Color Border,
         Color Text, Color TextDim, Color Accent, Color Selection, Color StatusOk,
         Color StatusRedirect, Color StatusClientError, Color StatusServerError, Color StatusTunnel,
-        Color Composed);
+        Color Composed, Color AutoResponded);
 }
 
 public enum ThemeMode
