@@ -73,6 +73,36 @@ internal static class DarkListView
         Resize();
     }
 
+    /// <summary>
+    /// Draws a checkbox in Piper's palette.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="CheckBoxRenderer"/> paints the current Windows visual style, which stays light
+    /// while the rest of the form is dark. An owner-drawn list also loses the native state image
+    /// entirely, so any grid with a checkbox column has to draw its own.
+    /// </remarks>
+    public static void DrawCheckGlyph(Graphics graphics, Rectangle bounds, bool isChecked)
+    {
+        ArgumentNullException.ThrowIfNull(graphics);
+
+        if (!isChecked)
+        {
+            using var empty = new Pen(Palette.Border);
+            graphics.DrawRectangle(empty, bounds);
+            return;
+        }
+
+        using var fill = new SolidBrush(Palette.Accent);
+        using var tick = new Pen(Palette.Text, 2);
+        graphics.FillRectangle(fill, bounds);
+        graphics.DrawLines(tick,
+        [
+            new Point(bounds.Left + 2, bounds.Top + 7),
+            new Point(bounds.Left + 5, bounds.Bottom - 3),
+            new Point(bounds.Right - 2, bounds.Top + 3),
+        ]);
+    }
+
     public static void DrawHeader(object? sender, DrawListViewColumnHeaderEventArgs e)
     {
         using var background = new SolidBrush(Palette.SurfaceAlt);

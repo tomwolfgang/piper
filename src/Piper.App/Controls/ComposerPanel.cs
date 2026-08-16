@@ -437,10 +437,10 @@ public sealed class ComposerPanel : UserControl
 
         var colour = session is null || selected
             ? Palette.Text
-            : Palette.ForStatus(session.StatusCode, session.IsTunnel, session.State == SessionState.Failed, session.IsComposed);
+            : Palette.ForStatus(session);
 
         if (e.ColumnIndex == 1 && session is not null)
-            colour = Palette.ForStatus(session.StatusCode, session.IsTunnel, session.State == SessionState.Failed, session.IsComposed);
+            colour = Palette.ForStatus(session);
 
         TextRenderer.DrawText(e.Graphics, e.SubItem?.Text ?? string.Empty, Palette.Mono,
             Rectangle.Inflate(e.Bounds, -4, 0), colour,

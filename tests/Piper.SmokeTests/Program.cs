@@ -358,6 +358,171 @@ await runner.RunAsync("content codec round trips", () =>
     return Task.CompletedTask;
 });
 
+// --------------------------------------------------------- AutoResponder (end to end)
+
+// Every case restores an empty rule set in a finally: a rule left enabled would silently claim
+// every later test's traffic.
+static AutoResponderSettings RuleSet(params AutoResponderRule[] rules) =>
+    new() { Enabled = true, Rules = [.. rules] };
+
+await runner.RunAsync("AutoResponder answers without contacting the origin", async () =>
+{
+    var before = origin.RequestCount;
+    options.AutoResponder.Apply(RuleSet(new AutoResponderRule { Match = "/api/orders", Action = "*503" }));
+    try
+    {
+        var response = await client.GetAsync($"{originBase}/api/orders?id=faked");
+        runner.AreEqual(HttpStatusCode.ServiceUnavailable, response.StatusCode, "the client gets the rule's status");
+        runner.AreEqual(before, origin.RequestCount, "and the origin was never contacted");
+
+        var session = await WaitForAsync(store, s => s.Query == "?id=faked");
+        runner.IsTrue(session.IsAutoResponded, "the session records that a rule answered it");
+        runner.IsTrue(SearchQuery.Parse("is:auto").Matches(session), "is:auto finds it");
+        runner.AreEqual(503, session.StatusCode, "the captured response is the faked one");
+    }
+    finally
+    {
+        options.AutoResponder.Apply(new AutoResponderSettings());
+    }
+});
+
+await runner.RunAsync("a faked response keeps the connection alive", async () =>
+{
+    options.AutoResponder.Apply(RuleSet(new AutoResponderRule { Match = "/keepalive", Action = "*404" }));
+    try
+    {
+        // Two requests in a row: if the first faked response closed the connection or mis-framed its
+        // body, the second either fails or hangs.
+        for (var i = 1; i <= 2; i++)
+        {
+            var response = await client.GetAsync($"{originBase}/keepalive?n={i}");
+            runner.AreEqual(HttpStatusCode.NotFound, response.StatusCode, $"request {i} answered");
+            runner.IsTrue(response.Headers.ConnectionClose != true, $"request {i} did not force a close");
+        }
+
+        var head = await client.SendAsync(new HttpRequestMessage(HttpMethod.Head, $"{originBase}/keepalive"));
+        runner.AreEqual(0, (await head.Content.ReadAsByteArrayAsync()).Length, "HEAD gets no body");
+    }
+    finally
+    {
+        options.AutoResponder.Apply(new AutoResponderSettings());
+    }
+});
+
+await runner.RunAsync("AutoResponder serves a file and honours rule order", async () =>
+{
+    var path = Path.Combine(Path.GetTempPath(), $"piper-autoresponder-{Guid.NewGuid():N}.json");
+    await File.WriteAllTextAsync(path, """{"served":"from disk"}""");
+    options.AutoResponder.Apply(RuleSet(
+        new AutoResponderRule { Enabled = false, Match = "/from-disk", Action = "*500" },
+        new AutoResponderRule { Match = "/from-disk", Action = path },
+        new AutoResponderRule { Match = "/from-disk", Action = "*418" }));
+    try
+    {
+        var response = await client.GetAsync($"{originBase}/from-disk");
+        runner.AreEqual(HttpStatusCode.OK, response.StatusCode, "the first enabled match wins");
+        runner.AreEqual("application/json; charset=utf-8", response.Content.Headers.ContentType?.ToString(),
+            "Content-Type comes from the file extension");
+        runner.AreEqual("""{"served":"from disk"}""", await response.Content.ReadAsStringAsync(), "file body served");
+    }
+    finally
+    {
+        options.AutoResponder.Apply(new AutoResponderSettings());
+        if (File.Exists(path)) File.Delete(path);
+    }
+});
+
+await runner.RunAsync("AutoResponder redirects and refetches", async () =>
+{
+    options.AutoResponder.Apply(RuleSet(
+        new AutoResponderRule { Match = @"REGEX:/redirect/(?<id>\d+)", Action = $"*redir:{originBase}/api/orders?id=${{id}}" },
+        new AutoResponderRule { Match = "/refetch", Action = $"{originBase}/api/orders?id=refetched" }));
+    try
+    {
+        // *redir: is a real 307 the client follows, so it ends up at the origin itself.
+        var redirected = await client.GetAsync($"{originBase}/redirect/77");
+        runner.AreEqual(HttpStatusCode.OK, redirected.StatusCode, "the client followed the redirect to the origin");
+
+        var redirectSession = await WaitForAsync(store, s => s.Path == "/redirect/77");
+        runner.AreEqual(307, redirectSession.StatusCode, "the rule answered with a 307");
+        runner.IsTrue(redirectSession.IsAutoResponded, "and it is marked as auto-responded");
+
+        // The followed request landing on ?id=77 is the proof that ${id} expanded from the regex.
+        var followed = await WaitForAsync(store, s => s.Query == "?id=77");
+        runner.AreEqual(200, followed.StatusCode, "the redirect target carried the captured id to the origin");
+
+        // A bare URL refetches transparently: the client never learns another address was used.
+        var refetched = await client.GetAsync($"{originBase}/refetch");
+        runner.AreEqual(HttpStatusCode.OK, refetched.StatusCode, "the refetch succeeded");
+        runner.IsTrue((await refetched.Content.ReadAsStringAsync()).Contains("orderId"), "with the other URL's content");
+
+        var session = await WaitForAsync(store, s => s.Path == "/refetch");
+        runner.AreEqual("/refetch", session.Path, "the session still shows the URL the client asked for");
+        runner.IsTrue(session.IsAutoResponded, "and records the rule that redirected it");
+    }
+    finally
+    {
+        options.AutoResponder.Apply(new AutoResponderSettings());
+    }
+});
+
+await runner.RunAsync("AutoResponder drops a connection on demand", async () =>
+{
+    // A dedicated client: SocketsHttpHandler silently retries once on a reused connection, which
+    // would hide the drop on the shared client.
+    using var dropClient = new HttpClient(new HttpClientHandler
+    {
+        Proxy = new WebProxy($"http://127.0.0.1:{ProxyPort}", BypassOnLocal: false),
+        UseProxy = true,
+    })
+    { Timeout = TimeSpan.FromSeconds(10) };
+
+    options.AutoResponder.Apply(RuleSet(new AutoResponderRule { Match = "/dropped", Action = "*drop" }));
+    try
+    {
+        var failed = false;
+        try { await dropClient.GetAsync($"{originBase}/dropped"); }
+        catch (HttpRequestException) { failed = true; }
+        runner.IsTrue(failed, "the request fails because the connection went away");
+
+        var session = await WaitForAsync(store, s => s.Path == "/dropped");
+        runner.AreEqual(SessionState.Failed, session.State, "the session is recorded as failed");
+        runner.IsTrue(session.IsAutoResponded, "and names the rule that dropped it");
+    }
+    finally
+    {
+        options.AutoResponder.Apply(new AutoResponderSettings());
+    }
+});
+
+await runner.RunAsync("AutoResponder toggles gate the whole rule set", async () =>
+{
+    var rules = RuleSet(new AutoResponderRule { Match = "/api/orders", Action = "*418" });
+
+    // Disabled: rules exist but must not touch traffic.
+    rules.Enabled = false;
+    options.AutoResponder.Apply(rules);
+    try
+    {
+        runner.AreEqual(HttpStatusCode.OK, (await client.GetAsync($"{originBase}/api/orders")).StatusCode,
+            "with the master toggle off the request reaches the origin");
+
+        // Passthrough off: anything unmatched is refused instead of being sent upstream.
+        rules.Enabled = true;
+        rules.PassthroughUnmatched = false;
+        options.AutoResponder.Apply(rules);
+
+        var before = origin.RequestCount;
+        var unmatched = await client.GetAsync($"{originBase}/chunked");
+        runner.AreEqual(HttpStatusCode.NotFound, unmatched.StatusCode, "an unmatched request is refused");
+        runner.AreEqual(before, origin.RequestCount, "and never reaches the origin");
+    }
+    finally
+    {
+        options.AutoResponder.Apply(new AutoResponderSettings());
+    }
+});
+
 await proxy.StopAsync();
 origin.Stop();
 
@@ -369,6 +534,11 @@ await FilterSettingsStoreTests.RunAsync(runner);
 await StatusBarSettingsStoreTests.RunAsync(runner);
 await ProxyConfigurationSettingsStoreTests.RunAsync(runner);
 await ConnectionSettingsBlobTests.RunAsync(runner);
+await AutoResponderMatchTests.RunAsync(runner);
+await AutoResponderActionTests.RunAsync(runner);
+await AutoResponderSettingsStoreTests.RunAsync(runner);
+await HttpWireFormatTests.RunAsync(runner);
+await JsonEditingTests.RunAsync(runner);
 await HostRemappingTests.RunAsync(runner);
 await SessionStoreAdmissionTests.RunAsync(runner);
 await SazImporterTests.RunAsync(runner);
@@ -405,6 +575,10 @@ sealed class OriginServer(int port) : IDisposable
 
     public string LastRequestHeaders { get; private set; } = string.Empty;
 
+    /// <summary>Requests actually served. Proving the origin was *never* contacted needs a count,
+    /// not a last-write-wins snapshot of the headers.</summary>
+    public int RequestCount { get; private set; }
+
     public void Start()
     {
         _listener.Prefixes.Add($"http://127.0.0.1:{port}/");
@@ -437,6 +611,7 @@ sealed class OriginServer(int port) : IDisposable
 
         LastRequestHeaders = string.Join("\r\n",
             request.Headers.AllKeys.Select(k => $"{k}: {request.Headers[k]}"));
+        RequestCount++;
 
         switch (request.Url?.AbsolutePath)
         {

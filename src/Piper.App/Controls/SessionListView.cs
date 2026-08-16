@@ -41,6 +41,9 @@ public sealed class SessionListView : UserControl
     /// <summary>Raised when the user asks to send a session to the Composer.</summary>
     public event EventHandler<Session>? SendToComposerRequested;
 
+    /// <summary>Raised to turn a captured session into an AutoResponder rule that replays it.</summary>
+    public event EventHandler<Session>? SendToAutoResponderRequested;
+
     /// <summary>Raised when the user asks to replay a captured request immediately.</summary>
     public event EventHandler<Session>? ResendRequested;
 
@@ -373,13 +376,13 @@ public sealed class SessionListView : UserControl
 
         var colour = session is null
             ? Palette.Text
-            : Palette.ForStatus(session.StatusCode, session.IsTunnel, session.State == SessionState.Failed, session.IsComposed);
+            : Palette.ForStatus(session);
 
         if (selected) colour = Palette.Text;
 
         // The status column keeps its outcome colour even when the row is selected.
         if (selected && e.ColumnIndex == 1 && session is not null)
-            colour = Palette.ForStatus(session.StatusCode, session.IsTunnel, session.State == SessionState.Failed, session.IsComposed);
+            colour = Palette.ForStatus(session);
 
         var alignment = e.Header?.TextAlign ?? HorizontalAlignment.Left;
         var flags = TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | alignment switch
@@ -469,6 +472,10 @@ public sealed class SessionListView : UserControl
         {
             if (SelectedSession is { } session) SendToComposerRequested?.Invoke(this, session);
         });
+        var autoResponder = menu.Items.Add("Create AutoResponder r&ule", null, (_, _) =>
+        {
+            if (SelectedSession is { } session) SendToAutoResponderRequested?.Invoke(this, session);
+        });
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("Copy &URL\tCtrl+C", null, (_, _) => CopyUrls());
         menu.Items.Add("Copy as c&url", null, (_, _) => CopyAsCurl());
@@ -497,6 +504,7 @@ public sealed class SessionListView : UserControl
             saveSessionsAsSaz.Enabled = SelectedSessions.Any(session => session.Request is not null);
             save.Enabled = saveResponseBody.Enabled || saveSessionsAsSaz.Enabled;
             resend.Enabled = SelectedSession is { IsTunnel: false, Request: not null };
+            autoResponder.Enabled = SelectedSession is { IsTunnel: false, Request.Url: not null };
         };
 
         _list.ContextMenuStrip = menu;

@@ -60,15 +60,7 @@ internal sealed class DarkTabControl : TabControl
             if (_checkedTabs.Contains(TabPages[i]))
             {
                 var checkBounds = new Rectangle(bounds.X + 9, bounds.Y + (bounds.Height - 13) / 2, 13, 13);
-                using var checkFill = new SolidBrush(Palette.Accent);
-                using var checkPen = new Pen(Palette.Text, 2);
-                g.FillRectangle(checkFill, checkBounds);
-                g.DrawLines(checkPen,
-                [
-                    new Point(checkBounds.Left + 2, checkBounds.Top + 7),
-                    new Point(checkBounds.Left + 5, checkBounds.Bottom - 3),
-                    new Point(checkBounds.Right - 2, checkBounds.Top + 3),
-                ]);
+                DarkListView.DrawCheckGlyph(g, checkBounds, isChecked: true);
                 textBounds = new Rectangle(bounds.X + 17, bounds.Y, bounds.Width - 17, bounds.Height);
             }
 

@@ -321,6 +321,13 @@ public sealed class Http2Connection(Stream stream, Func<HttpRequestData, Cancell
             {
                 response = await handler(http2Stream.Request!, http2Stream.Cancellation.Token).ConfigureAwait(false);
             }
+            catch (Http2StreamAbortException abort)
+            {
+                // A rule killed this stream on purpose. RST_STREAM says so without disturbing the
+                // other streams sharing the connection.
+                EnqueueRstStream(http2Stream.Id, abort.ErrorCode);
+                return;
+            }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 response = HttpResponseData.Simple(502, "Bad Gateway",

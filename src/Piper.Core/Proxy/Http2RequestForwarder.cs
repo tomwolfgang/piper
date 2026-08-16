@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Net.Sockets;
 using System.Security.Authentication;
 using Piper.Core.Http;
+using Piper.Core.Http2;
 using Piper.Core.Sessions;
 
 namespace Piper.Core.Proxy;
@@ -38,6 +39,50 @@ internal static class Http2RequestForwarder
             return badRequest;
         }
 
+        // Same insertion point as the HTTP/1.1 path: the session exists, the URL is resolved, and
+        // nothing has gone upstream yet.
+        var decision = options.AutoResponder.Evaluate(session);
+        if (decision.Outcome is not AutoResponderOutcome.Passthrough)
+        {
+            if (decision.Delay > TimeSpan.Zero) await Task.Delay(decision.Delay, ct).ConfigureAwait(false);
+
+            if (decision.Outcome is AutoResponderOutcome.Drop or AutoResponderOutcome.Reset)
+            {
+                FinishAborted(session, store, decision);
+
+                // Cancel/InternalError, never RefusedStream: RFC 9113 declares that one explicitly
+                // retry-safe, so browsers would silently re-issue the request and the rule would look
+                // as though it never fired.
+                throw new Http2StreamAbortException(decision.Outcome == AutoResponderOutcome.Drop
+                    ? Http2ErrorCode.Cancel
+                    : Http2ErrorCode.InternalError);
+            }
+
+            if (decision.Outcome == AutoResponderOutcome.Respond)
+            {
+                var canned = await decision.Action!
+                    .BuildResponseAsync(decision.Rule!, decision.Match, request, options.MaxBodyBytes, ct)
+                    .ConfigureAwait(false);
+
+                var faked = ProxyServer.BuildInboundResponse(canned, clientWantsClose: true);
+                faked.Headers.Remove("Connection"); // h2 has no such header at all
+                session.Response = faked;
+                session.AutoResponderRule = decision.Description;
+                session.State = SessionState.Complete;
+                session.Completed = DateTimeOffset.Now;
+                session.InvalidateSearchIndex();
+                store.NotifyUpdated(session);
+                return faked;
+            }
+
+            if (decision.Outcome == AutoResponderOutcome.Redirect
+                && decision.Action!.ResolveTarget(decision.Match, url) is { } target)
+            {
+                session.AutoResponderRule = decision.Description;
+                url = target;
+            }
+        }
+
         var host = url.Host;
         var port = url.Port;
         var stopwatch = Stopwatch.StartNew();
@@ -46,6 +91,11 @@ internal static class Http2RequestForwarder
         try
         {
             var outbound = ProxyServer.BuildOutboundRequest(request, preserveUpgrade: false, options);
+            if (!ReferenceEquals(url, request.Url))
+            {
+                outbound.Url = url;
+                outbound.Headers.Set("Host", url.IsDefaultPort ? url.Host : $"{url.Host}:{url.Port}");
+            }
             var beforeResponse = stopwatch.Elapsed;
 
             void MarkSent()
@@ -98,6 +148,16 @@ internal static class Http2RequestForwarder
         {
             upstream?.Dispose();
         }
+    }
+
+    private static void FinishAborted(Session session, SessionStore store, AutoResponderDecision decision)
+    {
+        session.AutoResponderRule = decision.Description;
+        session.State = SessionState.Failed;
+        session.Error = $"AutoResponder rule '{decision.Description}' aborted the stream.";
+        session.Completed = DateTimeOffset.Now;
+        session.InvalidateSearchIndex();
+        store.NotifyUpdated(session);
     }
 
     private static void FinishFailed(Session session, SessionStore store, string error, HttpResponseData response)

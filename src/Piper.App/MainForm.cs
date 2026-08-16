@@ -19,6 +19,8 @@ public sealed class MainForm : Form
     private readonly InspectorPanel _inspector;
     private readonly ComposerPanel _composer;
     private readonly FilterPanel _filterPanel;
+    private readonly AutoResponderPanel _autoResponder;
+    private TabPage _autoResponderPage = null!;
     private readonly TextBox _logView;
     private readonly DarkTabControl _rightTabs;
 
@@ -78,6 +80,7 @@ public sealed class MainForm : Form
         _inspector = new InspectorPanel { Dock = DockStyle.Fill };
         _composer = new ComposerPanel(_store, _executor) { Dock = DockStyle.Fill };
         _filterPanel = new FilterPanel { Dock = DockStyle.Fill };
+        _autoResponder = new AutoResponderPanel(_options.AutoResponder) { Dock = DockStyle.Fill };
 
         _logView = new TextBox
         {
@@ -94,6 +97,8 @@ public sealed class MainForm : Form
         _rightTabs.TabPages.Add(NewPage("Composer", _composer));
         var filtersPage = NewPage("Filters", _filterPanel);
         _rightTabs.TabPages.Add(filtersPage);
+        _autoResponderPage = NewPage("AutoResponder", _autoResponder);
+        _rightTabs.TabPages.Add(_autoResponderPage);
         _rightTabs.TabPages.Add(NewPage("Log", _logView));
 
         var split = new SplitContainer
@@ -113,9 +118,9 @@ public sealed class MainForm : Form
         _captureScopeLabel.Click += (_, _) => ShowCaptureScopeMenu();
         ApplyCaptureScope();
         _rightTabs.AllowDrop = true;
-        _rightTabs.DragEnter += OnComposerDragEnter;
-        _rightTabs.DragOver += OnComposerDragOver;
-        _rightTabs.DragDrop += OnComposerDragDrop;
+        _rightTabs.DragEnter += OnSessionDragEnter;
+        _rightTabs.DragOver += OnSessionDragOver;
+        _rightTabs.DragDrop += OnSessionDragDrop;
 
         Controls.Add(split);
         Controls.Add(toolbar);
@@ -156,6 +161,26 @@ public sealed class MainForm : Form
         if (FilterSettingsStore.Load() is { } filterSettings)
             _filterPanel.ApplySettings(filterSettings);
         _filterPanel.ApplyCurrentFilterset();
+
+        // Rules apply the moment they are edited, so the proxy and the panel never disagree about
+        // what is live. The tab glyph is the reminder that traffic is being intercepted.
+        _autoResponder.SettingsChanged += (_, _) =>
+        {
+            var settings = _autoResponder.Settings;
+            _options.AutoResponder.Apply(settings);
+            AutoResponderSettingsStore.Save(settings);
+            _rightTabs.SetTabChecked(_autoResponderPage, settings.Enabled && settings.Rules.Count > 0);
+            foreach (var warning in _options.AutoResponder.Warnings) AppendLog($"AutoResponder: {warning}");
+        };
+
+        if (AutoResponderSettingsStore.Load() is { } autoResponderSettings)
+            _autoResponder.ApplySettings(autoResponderSettings);
+
+        _sessionList.SendToAutoResponderRequested += (_, session) =>
+        {
+            _rightTabs.SelectedTab = _autoResponderPage;
+            _autoResponder.AddRuleFromSession(session);
+        };
 
         _proxy.Log += (_, message) => BeginInvoke(() => AppendLog(message));
 
@@ -266,32 +291,33 @@ public sealed class MainForm : Form
         return page;
     }
 
-    private void OnComposerDragEnter(object? sender, DragEventArgs e) => SetComposerDragEffect(e);
+    private void OnSessionDragEnter(object? sender, DragEventArgs e) => SetSessionDragEffect(e);
 
-    private void OnComposerDragOver(object? sender, DragEventArgs e) => SetComposerDragEffect(e);
+    private void OnSessionDragOver(object? sender, DragEventArgs e) => SetSessionDragEffect(e);
 
-    private void SetComposerDragEffect(DragEventArgs e)
+    private void SetSessionDragEffect(DragEventArgs e)
     {
-        if (!HasCapturedRequest(e.Data) || !IsComposerDropTarget(e))
+        if (!HasCapturedRequest(e.Data) || SessionDropTarget(e) is not { } target)
         {
             e.Effect = DragDropEffects.None;
             return;
         }
 
-        // Selecting on hover makes the Composer target clear even when it was not the active tab.
-        _rightTabs.SelectedIndex = 1;
+        // Selecting on hover makes the target clear even when it was not the active tab.
+        _rightTabs.SelectedTab = target;
         e.Effect = DragDropEffects.Copy;
     }
 
-    private void OnComposerDragDrop(object? sender, DragEventArgs e)
+    private void OnSessionDragDrop(object? sender, DragEventArgs e)
     {
-        if (!IsComposerDropTarget(e)
+        if (SessionDropTarget(e) is not { } target
             || e.Data?.GetData(typeof(Session)) is not Session session
             || session.Request is null)
             return;
 
-        _rightTabs.SelectedIndex = 1;
-        _composer.LoadSession(session);
+        _rightTabs.SelectedTab = target;
+        if (target == _autoResponderPage) _autoResponder.AddRuleFromSession(session);
+        else _composer.LoadSession(session);
     }
 
     private static bool HasCapturedRequest(IDataObject? data) =>
@@ -321,15 +347,28 @@ public sealed class MainForm : Form
         if (paths.Length > 0) ImportSazFiles(paths);
     }
 
-    private bool IsComposerDropTarget(DragEventArgs e)
+    /// <summary>
+    /// The tab a dragged session would land on, or null where a drop means nothing. Composer and
+    /// AutoResponder both take sessions; every other tab refuses them.
+    /// </summary>
+    private TabPage? SessionDropTarget(DragEventArgs e)
     {
         var point = _rightTabs.PointToClient(new Point(e.X, e.Y));
-        var composerTab = _rightTabs.GetTabRect(1);
-        if (composerTab.Contains(point)) return true;
 
-        // Once hover has activated Composer, continue accepting the drop inside its page too.
-        return _rightTabs.SelectedIndex == 1 && point.Y >= composerTab.Bottom;
+        for (var i = 0; i < _rightTabs.TabCount; i++)
+        {
+            if (!_rightTabs.GetTabRect(i).Contains(point)) continue;
+            var tab = _rightTabs.TabPages[i];
+            return AcceptsSessions(tab) ? tab : null;
+        }
+
+        // Once hover has activated a tab that takes sessions, keep accepting the drop on its page too.
+        var stripBottom = _rightTabs.TabCount > 0 ? _rightTabs.GetTabRect(0).Bottom : 0;
+        return point.Y >= stripBottom && AcceptsSessions(_rightTabs.SelectedTab) ? _rightTabs.SelectedTab : null;
     }
+
+    private bool AcceptsSessions(TabPage? tab) =>
+        tab is not null && (tab == _autoResponderPage || tab.Controls.Contains(_composer));
 
     // ------------------------------------------------------------------ chrome
 
@@ -386,6 +425,26 @@ public sealed class MainForm : Form
             userAgent.DropDownItems.Add(new ToolStripSeparator());
             userAgent.DropDownItems.Add(CreateCustomUserAgentChoice());
             rules.DropDownItems.Add(userAgent);
+            rules.DropDownItems.Add(new ToolStripSeparator());
+
+            var settings = _autoResponder.Settings;
+            var automatic = new ToolStripMenuItem("Enable &automatic responses")
+            {
+                Checked = settings.Enabled,
+                CheckOnClick = true,
+            };
+            automatic.Click += (_, _) => _autoResponder.SetEnabled(automatic.Checked);
+            rules.DropDownItems.Add(automatic);
+
+            var passthrough = new ToolStripMenuItem("&Unmatched requests pass through")
+            {
+                Checked = settings.PassthroughUnmatched,
+                CheckOnClick = true,
+            };
+            passthrough.Click += (_, _) => _autoResponder.SetPassthroughUnmatched(passthrough.Checked);
+            rules.DropDownItems.Add(passthrough);
+
+            rules.DropDownItems.Add("A&utoResponder rules...", null, (_, _) => _rightTabs.SelectedTab = _autoResponderPage);
         };
         return rules;
     }
@@ -744,7 +803,7 @@ public sealed class MainForm : Form
             AppendLog($"Could not listen on 127.0.0.1:{_options.Port} - {ex.GetType().Name}: {ex.Message}");
             AppendLog("Another proxy may be using the port. Change it, or stop the other proxy, then press F12.");
             UpdateCaptureStatus();
-            _rightTabs.SelectedIndex = 3; // surface the Log tab (Inspectors, Composer, Filters, Log)
+            _rightTabs.SelectedIndex = 4; // surface the Log tab (Inspectors, Composer, Filters, AutoResponder, Log)
         }
     }
 
@@ -1080,6 +1139,7 @@ public sealed class MainForm : Form
             : "Not capturing";
         UpdateCaptureStatus();
         UpdateSessionsStatus();
+        _autoResponder.RefreshStatistics();
     }
 
     private void UpdateSessionsStatus()
