@@ -255,7 +255,16 @@ public sealed class SessionListView : UserControl
         try
         {
             _suppressSelectionChanged = true;
+            var previousCount = _list.VirtualListSize;
             _list.VirtualListSize = _visible.Count;
+
+            // A virtual ListView keeps its scroll offset when the row count changes underneath it.
+            // Clearing the grid, or typing a filter that matches far fewer rows, leaves the view
+            // parked past the last row: the rows are there, but nothing paints until a click happens
+            // to scroll it back into range. Pull it to the top first whenever the old offset can no
+            // longer be meaningful, then let the rules below decide where to leave it.
+            if (_visible.Count > 0 && (_visible.Count < previousCount || previousCount == 0))
+                _list.EnsureVisible(0);
 
             if (previousIds is { Count: > 0 })
             {
