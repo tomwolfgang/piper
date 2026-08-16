@@ -211,6 +211,11 @@ streams entirely.
 - Upstream proxy chaining
 - zstd content decoding (bodies are shown as-is, not corrupted)
 
+## Contributing and security
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the automated checks and pull-request requirements.
+Report suspected vulnerabilities privately as described in [SECURITY.md](SECURITY.md).
+
 ## License
 
 Piper is licensed under the GNU General Public License v3.0 only. See [LICENSE](LICENSE).

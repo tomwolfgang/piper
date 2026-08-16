@@ -1,0 +1,4 @@
+interface:
+  display_name: "Piper PR Review"
+  short_description: "Review Piper changes for defects and security"
+  default_prompt: "Use $review-pull-request to audit this change against Piper standards."
