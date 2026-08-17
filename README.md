@@ -87,6 +87,7 @@ method:POST host:api status:>=400 -is:image body:"order"
 | `F12` | start / stop capturing |
 | `Ctrl+K` | jump to the Composer search |
 | `Ctrl+E` | send the selected session to the Composer |
+| `Ctrl+T` | open the TextWizard |
 | `Ctrl+S` | save selected sessions as a Fiddler SAZ archive |
 | `Ctrl+X` | clear sessions |
 | `Ctrl+C` | copy selected URLs |
@@ -136,6 +137,31 @@ targets, so `Invoke-WebRequest -Proxy` would never reach Piper.
 - Importing and exporting Fiddler SAZ session archives
 - AutoResponder: ordered rules that answer a request locally instead of sending it upstream —
   see below
+- TextWizard: encode, decode and hash a value without leaving Piper — see below
+
+### TextWizard
+
+**Tools > TextWizard** (`Ctrl+T`) opens a scratchpad that converts one piece of text at a time. Pick a
+transform on the left and the output updates as you type; **Output to Input** chains conversions, which is
+how you get from a captured cookie to readable JSON in two clicks.
+
+| | |
+| --- | --- |
+| URL | encode / decode — decoding treats `+` as a space, the way a query string does |
+| HTML | encode / decode |
+| Base64 | to / from, with padding |
+| Base64Url | to / from, unpadded — this is what JWT segments use |
+| Hex | to / from, uppercase and unspaced |
+| JSON string | to / from a quoted JSON string literal |
+| Hashes | MD5, SHA-1, SHA-256, SHA-512, as uppercase hex |
+
+Rather than opening it and pasting, you can send a value straight from a capture: **Send value to
+TextWizard** sits on the Headers, JSON and WebForms inspector context menus, and **Send URL to TextWizard**
+on the session grid. The window is shared and stays open beside the grid.
+
+Text is treated as UTF-8 throughout; bytes that are not valid UTF-8 come back as `�`, so use the Hex
+inspector for genuinely binary payloads. A decoder given malformed input says so instead of guessing.
+Input is capped at 1 MiB.
 
 ### AutoResponder
 
