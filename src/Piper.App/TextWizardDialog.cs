@@ -47,6 +47,7 @@ public sealed class TextWizardDialog : Form
 
     private static TextWizardDialog? _open;
 
+    private readonly SplitContainer _split;
     private readonly TextBox _input;
     private readonly ComboBox _transform;
     private readonly CheckBox _viewBytes;
@@ -65,11 +66,13 @@ public sealed class TextWizardDialog : Form
         MinimizeBox = false;
         ShowInTaskbar = false;
 
+        // AutoSize throughout: fixed pixel sizes do not survive display scaling, and a clipped button
+        // loses the part of its hit box that the text was overflowing into.
         var hint = new Label
         {
             Dock = DockStyle.Top,
-            Height = 28,
-            Padding = new Padding(10, 6, 0, 0),
+            AutoSize = true,
+            Padding = new Padding(10, 6, 10, 6),
             BackColor = Palette.SurfaceAlt,
             ForeColor = Palette.TextDim,
             Text = "Encodes and decodes text. Enter text above and choose a transform.",
@@ -99,23 +102,17 @@ public sealed class TextWizardDialog : Form
             AccessibleName = "TextWizard output",
         };
 
-        _status = new Label
-        {
-            Dock = DockStyle.Bottom,
-            Height = 24,
-            Padding = new Padding(10, 4, 0, 0),
-            ForeColor = Palette.TextDim,
-            AccessibleName = "TextWizard status",
-        };
-
         _transform = new ComboBox
         {
             DropDownStyle = ComboBoxStyle.DropDownList,
             Font = Palette.UiFont,
-            Width = 190,
             AccessibleName = "TextWizard transform",
+            Margin = new Padding(0, 3, 0, 0),
         };
         foreach (var choice in Choices) _transform.Items.Add(choice.Label);
+        // Wide enough for the longest entry at whatever scale the display is running.
+        _transform.Width = _transform.Items.Cast<string>()
+            .Max(item => TextRenderer.MeasureText(item, Palette.UiFont).Width) + 40;
         _transform.SelectedIndex = 0;
         _transform.SelectedIndexChanged += (_, _) => Run();
 
@@ -125,64 +122,106 @@ public sealed class TextWizardDialog : Form
             Font = Palette.UiFont,
             AutoSize = true,
             AccessibleName = "TextWizard view bytes",
+            Margin = new Padding(16, 6, 0, 0),
         };
         _viewBytes.CheckedChanged += (_, _) => ShowResult();
 
-        var saveToFile = new Button { Text = "Save Output...", Size = new Size(120, 28), Font = Palette.UiFont };
-        saveToFile.Click += (_, _) => SaveOutput();
-        var chain = new Button { Text = "Send output to input", Size = new Size(150, 28), Font = Palette.UiFont };
-        chain.Click += (_, _) => _input.Text = _result;
+        var saveToFile = Action("Save Output...", SaveOutput);
+        var chain = Action("Send output to input", () => _input.Text = _result);
 
         // The strip that sits between the two editors, matching Fiddler's arrangement.
         var bar = new FlowLayoutPanel
         {
             Dock = DockStyle.Top,
-            Height = 44,
-            Padding = new Padding(8, 8, 8, 4),
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            Padding = new Padding(8, 6, 8, 6),
             WrapContents = false,
-            AutoScroll = false,
         };
         bar.Controls.Add(new Label
         {
             Text = "Transform:",
             Font = Palette.UiFont,
             AutoSize = true,
-            Padding = new Padding(0, 6, 4, 0),
+            Margin = new Padding(0, 7, 6, 0),
         });
         bar.Controls.Add(_transform);
-        bar.Controls.Add(new Panel { Width = 12, Height = 1 });
         bar.Controls.Add(_viewBytes);
-        bar.Controls.Add(new Panel { Width = 12, Height = 1 });
         bar.Controls.Add(saveToFile);
         bar.Controls.Add(chain);
 
-        var split = new SplitContainer
+        _split = new SplitContainer
         {
             Dock = DockStyle.Fill,
             Orientation = Orientation.Horizontal,
         };
-        split.Panel1.Controls.Add(_input);
-        split.Panel2.Controls.Add(_output);
-        split.Panel2.Controls.Add(bar);
+        _split.Panel1.Controls.Add(_input);
+        _split.Panel2.Controls.Add(_output);
+        _split.Panel2.Controls.Add(bar);
 
-        var close = new Button { Text = "Close", DialogResult = DialogResult.Cancel, Size = new Size(100, 30) };
-        var actions = new FlowLayoutPanel
+        // A modeless form ignores a button's DialogResult, so Close has to be wired explicitly. Without
+        // this the button and the Escape key both do nothing while the title-bar X still works.
+        // Sized from PreferredSize and then pinned right: Dock and AutoSize fight each other, and the
+        // loser is the button's height.
+        var close = Action("Close", Close);
+        close.Margin = Padding.Empty;
+        close.AutoSize = false;
+        close.Size = close.PreferredSize;
+        close.Dock = DockStyle.Right;
+
+        _status = new Label
+        {
+            Dock = DockStyle.Fill,
+            Padding = new Padding(2, 8, 8, 0),
+            ForeColor = Palette.TextDim,
+            AutoEllipsis = true,
+            AccessibleName = "TextWizard status",
+        };
+
+        // Status and Close share one strip rather than each claiming a band of their own. PreferredSize
+        // rather than Height: AutoSize has not been applied yet while the constructor is still running.
+        var footer = new Panel
         {
             Dock = DockStyle.Bottom,
-            Height = 44,
-            Padding = new Padding(10, 6, 10, 6),
-            FlowDirection = FlowDirection.RightToLeft,
-            WrapContents = false,
+            Height = close.Height + 16,
+            Padding = new Padding(10, 8, 10, 8),
         };
-        actions.Controls.Add(close);
+        footer.Controls.Add(_status);
+        footer.Controls.Add(close);
 
-        Controls.Add(split);
+        Controls.Add(_split);
         Controls.Add(hint);
-        Controls.Add(_status);
-        Controls.Add(actions);
+        Controls.Add(footer);
         CancelButton = close;
         Palette.Apply(this);
         Run();
+    }
+
+    private static Button Action(string text, Action onClick)
+    {
+        var button = new Button
+        {
+            Text = text,
+            Font = Palette.UiFont,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            Padding = new Padding(12, 4, 12, 4),
+            Margin = new Padding(10, 2, 0, 0),
+        };
+        button.Click += (_, _) => onClick();
+        return button;
+    }
+
+    /// <summary>
+    /// The splitter can only be positioned once the container has a real height; setting it in the
+    /// constructor throws because the container is still its default 150x100 at that point.
+    /// </summary>
+    protected override void OnLoad(EventArgs e)
+    {
+        base.OnLoad(e);
+        var wanted = _split.Height * 2 / 5;
+        if (wanted > _split.Panel1MinSize && wanted < _split.Height - _split.Panel2MinSize)
+            _split.SplitterDistance = wanted;
     }
 
     /// <summary>
