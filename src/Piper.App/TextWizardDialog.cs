@@ -1,3 +1,4 @@
+using System.Text;
 using System.Text.Json;
 using System.Windows.Forms;
 using Piper.App.Theme;
@@ -6,8 +7,9 @@ using Piper.Core.Text;
 namespace Piper.App;
 
 /// <summary>
-/// Fiddler's TextWizard: paste a value, pick a transform, read the result. Opened from the Tools menu or
-/// from the inspector context menus, which is where the encoded values in captured traffic actually live.
+/// Fiddler's TextWizard: paste a value, pick a transform, read the result. Laid out the same way, so the
+/// transform list and its wording carry over. Opened from the Tools menu or from the inspector context
+/// menus, which is where the encoded values in captured traffic actually live.
 /// </summary>
 public sealed class TextWizardDialog : Form
 {
@@ -17,42 +19,61 @@ public sealed class TextWizardDialog : Form
     /// </summary>
     private const int MaxInputLength = 1024 * 1024;
 
+    /// <summary>Fiddler's transform list, in Fiddler's order and using Fiddler's names.</summary>
     private static readonly (string Label, TextTransform Transform)[] Choices =
     [
-        ("URL encode", TextTransform.UrlEncode),
-        ("URL decode", TextTransform.UrlDecode),
-        ("HTML encode", TextTransform.HtmlEncode),
-        ("HTML decode", TextTransform.HtmlDecode),
-        ("To Base64", TextTransform.Base64Encode),
-        ("From Base64", TextTransform.Base64Decode),
-        ("To Base64Url (JWT)", TextTransform.Base64UrlEncode),
-        ("From Base64Url (JWT)", TextTransform.Base64UrlDecode),
-        ("To hex", TextTransform.HexEncode),
-        ("From hex", TextTransform.HexDecode),
-        ("To JSON string", TextTransform.JsonStringEncode),
-        ("From JSON string", TextTransform.JsonStringDecode),
-        ("MD5 hash", TextTransform.Md5),
-        ("SHA-1 hash", TextTransform.Sha1),
-        ("SHA-256 hash", TextTransform.Sha256),
-        ("SHA-512 hash", TextTransform.Sha512),
+        ("To Base64", TextTransform.ToBase64),
+        ("To Base64URL", TextTransform.ToBase64Url),
+        ("From Base64", TextTransform.FromBase64),
+        ("URLEncode", TextTransform.UrlEncode),
+        ("URLDecode", TextTransform.UrlDecode),
+        ("HexEncode", TextTransform.HexEncode),
+        ("HexDecode", TextTransform.HexDecode),
+        ("To C# byte[]", TextTransform.ToCSharpByteArray),
+        ("To JS string", TextTransform.ToJsString),
+        ("From JS string", TextTransform.FromJsString),
+        ("HTML Encode", TextTransform.HtmlEncode),
+        ("HTML Decode", TextTransform.HtmlDecode),
+        ("To UTF-7", TextTransform.ToUtf7),
+        ("From UTF-7", TextTransform.FromUtf7),
+        ("To DeflatedSAML", TextTransform.ToDeflatedSaml),
+        ("From DeflatedSAML", TextTransform.FromDeflatedSaml),
+        ("To MD5", TextTransform.Md5),
+        ("To SHA1", TextTransform.Sha1),
+        ("To SHA256", TextTransform.Sha256),
+        ("To SHA384", TextTransform.Sha384),
+        ("To SHA512", TextTransform.Sha512),
     ];
 
     private static TextWizardDialog? _open;
 
     private readonly TextBox _input;
-    private readonly ListBox _choices;
+    private readonly ComboBox _transform;
+    private readonly CheckBox _viewBytes;
     private readonly TextBox _output;
     private readonly Label _status;
+
+    private string _result = string.Empty;
 
     private TextWizardDialog()
     {
         Text = "TextWizard";
         StartPosition = FormStartPosition.CenterParent;
         FormBorderStyle = FormBorderStyle.Sizable;
-        MinimumSize = new Size(640, 480);
-        ClientSize = new Size(860, 620);
+        MinimumSize = new Size(700, 500);
+        ClientSize = new Size(900, 660);
         MinimizeBox = false;
         ShowInTaskbar = false;
+
+        var hint = new Label
+        {
+            Dock = DockStyle.Top,
+            Height = 28,
+            Padding = new Padding(10, 6, 0, 0),
+            BackColor = Palette.SurfaceAlt,
+            ForeColor = Palette.TextDim,
+            Text = "Encodes and decodes text. Enter text above and choose a transform.",
+        };
 
         _input = new TextBox
         {
@@ -81,69 +102,87 @@ public sealed class TextWizardDialog : Form
         _status = new Label
         {
             Dock = DockStyle.Bottom,
-            Height = 22,
-            Padding = new Padding(2, 4, 0, 0),
+            Height = 24,
+            Padding = new Padding(10, 4, 0, 0),
             ForeColor = Palette.TextDim,
             AccessibleName = "TextWizard status",
         };
 
-        _choices = new ListBox
+        _transform = new ComboBox
         {
-            Dock = DockStyle.Fill,
-            IntegralHeight = false,
+            DropDownStyle = ComboBoxStyle.DropDownList,
             Font = Palette.UiFont,
+            Width = 190,
             AccessibleName = "TextWizard transform",
         };
-        foreach (var choice in Choices) _choices.Items.Add(choice.Label);
-        _choices.SelectedIndex = 0;
-        _choices.SelectedIndexChanged += (_, _) => Run();
+        foreach (var choice in Choices) _transform.Items.Add(choice.Label);
+        _transform.SelectedIndex = 0;
+        _transform.SelectedIndexChanged += (_, _) => Run();
 
-        // No SplitterDistance: at construction the container is still its default 150x100, so any distance
-        // worth asking for is out of range. An even split of input and output is the right default anyway.
+        _viewBytes = new CheckBox
+        {
+            Text = "View bytes",
+            Font = Palette.UiFont,
+            AutoSize = true,
+            AccessibleName = "TextWizard view bytes",
+        };
+        _viewBytes.CheckedChanged += (_, _) => ShowResult();
+
+        var saveToFile = new Button { Text = "Save Output...", Size = new Size(120, 28), Font = Palette.UiFont };
+        saveToFile.Click += (_, _) => SaveOutput();
+        var chain = new Button { Text = "Send output to input", Size = new Size(150, 28), Font = Palette.UiFont };
+        chain.Click += (_, _) => _input.Text = _result;
+
+        // The strip that sits between the two editors, matching Fiddler's arrangement.
+        var bar = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Top,
+            Height = 44,
+            Padding = new Padding(8, 8, 8, 4),
+            WrapContents = false,
+            AutoScroll = false,
+        };
+        bar.Controls.Add(new Label
+        {
+            Text = "Transform:",
+            Font = Palette.UiFont,
+            AutoSize = true,
+            Padding = new Padding(0, 6, 4, 0),
+        });
+        bar.Controls.Add(_transform);
+        bar.Controls.Add(new Panel { Width = 12, Height = 1 });
+        bar.Controls.Add(_viewBytes);
+        bar.Controls.Add(new Panel { Width = 12, Height = 1 });
+        bar.Controls.Add(saveToFile);
+        bar.Controls.Add(chain);
+
         var split = new SplitContainer
         {
             Dock = DockStyle.Fill,
             Orientation = Orientation.Horizontal,
         };
         split.Panel1.Controls.Add(_input);
-        split.Panel1.Controls.Add(Caption("Input"));
         split.Panel2.Controls.Add(_output);
-        split.Panel2.Controls.Add(Caption("Output"));
-        split.Panel2.Controls.Add(_status);
+        split.Panel2.Controls.Add(bar);
 
-        var chooser = new Panel { Dock = DockStyle.Left, Width = 200, Padding = new Padding(12, 0, 8, 0) };
-        chooser.Controls.Add(_choices);
-        chooser.Controls.Add(Caption("Transform"));
-
-        var editors = new Panel { Dock = DockStyle.Fill, Padding = new Padding(0, 0, 12, 0) };
-        editors.Controls.Add(split);
-
-        var copy = new Button { Text = "Copy Output", Size = new Size(120, 34) };
-        copy.Click += (_, _) => CopyOutput();
-        var chain = new Button { Text = "Output to Input", Size = new Size(140, 34) };
-        chain.Click += (_, _) => _input.Text = _output.Text;
-        var close = new Button { Text = "Close", DialogResult = DialogResult.Cancel, Size = new Size(100, 34) };
-
+        var close = new Button { Text = "Close", DialogResult = DialogResult.Cancel, Size = new Size(100, 30) };
         var actions = new FlowLayoutPanel
         {
-            Dock = DockStyle.Right,
-            Width = 390,
+            Dock = DockStyle.Bottom,
+            Height = 44,
+            Padding = new Padding(10, 6, 10, 6),
             FlowDirection = FlowDirection.RightToLeft,
             WrapContents = false,
         };
         actions.Controls.Add(close);
-        actions.Controls.Add(chain);
-        actions.Controls.Add(copy);
 
-        var footer = new Panel { Dock = DockStyle.Bottom, Height = 68, Padding = new Padding(12, 12, 12, 10) };
-        footer.Paint += DrawFooterBorder;
-        footer.Controls.Add(actions);
-
-        Controls.Add(editors);
-        Controls.Add(chooser);
-        Controls.Add(footer);
+        Controls.Add(split);
+        Controls.Add(hint);
+        Controls.Add(_status);
+        Controls.Add(actions);
         CancelButton = close;
         Palette.Apply(this);
+        Run();
     }
 
     /// <summary>
@@ -175,44 +214,75 @@ public sealed class TextWizardDialog : Form
 
     private void Run()
     {
-        var index = _choices.SelectedIndex;
+        var index = _transform.SelectedIndex;
         if (index < 0 || index >= Choices.Length) return;
 
         try
         {
-            _output.Text = TextTransforms.Apply(Choices[index].Transform, _input.Text);
+            _result = TextTransforms.Apply(Choices[index].Transform, _input.Text);
             _status.ForeColor = Palette.TextDim;
             _status.Text = _input.TextLength >= MaxInputLength
                 ? $"Input reached the {MaxInputLength / 1024 / 1024} MiB limit and was truncated."
                 : string.Empty;
         }
-        catch (Exception ex) when (ex is FormatException or JsonException)
+        catch (Exception ex) when (ex is FormatException or JsonException or InvalidDataException)
         {
             // Malformed input is the normal case for a decoder, not a crash: say so and show nothing.
-            _output.Clear();
+            _result = string.Empty;
             _status.ForeColor = Palette.StatusClientError;
-            _status.Text = $"{_choices.Text}: {ex.Message}";
+            _status.Text = $"{_transform.Text}: {ex.Message}";
         }
+
+        ShowResult();
     }
 
-    private void CopyOutput()
+    private void ShowResult()
     {
-        if (_output.TextLength == 0) return;
-        Clipboard.SetText(_output.Text);
+        _output.Text = _viewBytes.Checked ? HexDump(_result) : _result;
+        Text = $"TextWizard [{_input.TextLength} => {_result.Length} chars]";
     }
 
-    private static Label Caption(string text) => new()
+    /// <summary>Offset, hex and printable ASCII, the same shape as the Hex inspector's view.</summary>
+    private static string HexDump(string value)
     {
-        Dock = DockStyle.Top,
-        Height = 24,
-        Padding = new Padding(2, 4, 0, 0),
-        ForeColor = Palette.TextDim,
-        Text = text,
-    };
+        if (value.Length == 0) return string.Empty;
 
-    private static void DrawFooterBorder(object? sender, PaintEventArgs e)
+        var bytes = Encoding.UTF8.GetBytes(value);
+        var dump = new StringBuilder(bytes.Length * 4);
+        for (var offset = 0; offset < bytes.Length; offset += 16)
+        {
+            var line = bytes.AsSpan(offset, Math.Min(16, bytes.Length - offset));
+            dump.Append(offset.ToString("X8")).Append("  ");
+            for (var i = 0; i < 16; i++)
+                dump.Append(i < line.Length ? line[i].ToString("X2") : "  ").Append(' ');
+            dump.Append(' ');
+            foreach (var b in line) dump.Append(b is >= 0x20 and < 0x7F ? (char)b : '.');
+            dump.AppendLine();
+        }
+
+        return dump.ToString();
+    }
+
+    private void SaveOutput()
     {
-        using var pen = new Pen(Palette.Border);
-        e.Graphics.DrawLine(pen, 0, 0, e.ClipRectangle.Width, 0);
+        if (_result.Length == 0) return;
+
+        using var dialog = new SaveFileDialog
+        {
+            Title = "Save TextWizard output",
+            Filter = "Text files (*.txt)|*.txt|All files (*.*)|*.*",
+            FileName = "textwizard-output.txt",
+        };
+        if (dialog.ShowDialog(this) != DialogResult.OK) return;
+
+        try
+        {
+            File.WriteAllText(dialog.FileName, _result);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            MessageBox.Show(this, $"Piper could not write that file:\r\n\r\n{ex.Message}",
+                "Save TextWizard output", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
     }
 }
