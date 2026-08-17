@@ -161,33 +161,36 @@ public sealed class TextWizardDialog : Form
 
         // A modeless form ignores a button's DialogResult, so Close has to be wired explicitly. Without
         // this the button and the Escape key both do nothing while the title-bar X still works.
-        // Sized from PreferredSize and then pinned right: Dock and AutoSize fight each other, and the
-        // loser is the button's height.
         var close = Action("Close", Close);
-        close.Margin = Padding.Empty;
-        close.AutoSize = false;
-        close.Size = close.PreferredSize;
-        close.Dock = DockStyle.Right;
+        close.Anchor = AnchorStyles.Right;
 
         _status = new Label
         {
             Dock = DockStyle.Fill,
-            Padding = new Padding(2, 8, 8, 0),
+            Padding = new Padding(2, 4, 8, 0),
             ForeColor = Palette.TextDim,
             AutoEllipsis = true,
             AccessibleName = "TextWizard status",
         };
 
-        // Status and Close share one strip rather than each claiming a band of their own. PreferredSize
-        // rather than Height: AutoSize has not been applied yet while the constructor is still running.
-        var footer = new Panel
+        // Status and Close share one strip rather than each claiming a band of their own. A
+        // TableLayoutPanel rather than arithmetic over the button's Height: sizes read in the constructor
+        // are pre-scaling, so computing the band height from them leaves the button clipped on a scaled
+        // display. AutoSize lets the row grow to whatever the button really measures.
+        var footer = new TableLayoutPanel
         {
             Dock = DockStyle.Bottom,
-            Height = close.Height + 16,
-            Padding = new Padding(10, 8, 10, 8),
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            ColumnCount = 2,
+            RowCount = 1,
+            Padding = new Padding(10, 4, 10, 6),
         };
-        footer.Controls.Add(_status);
-        footer.Controls.Add(close);
+        footer.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
+        footer.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        footer.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        footer.Controls.Add(_status, 0, 0);
+        footer.Controls.Add(close, 1, 0);
 
         Controls.Add(_split);
         Controls.Add(hint);
