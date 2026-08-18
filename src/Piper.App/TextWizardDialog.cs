@@ -73,7 +73,6 @@ public sealed class TextWizardDialog : Form
             Dock = DockStyle.Top,
             AutoSize = true,
             Padding = new Padding(10, 6, 10, 6),
-            BackColor = Palette.SurfaceAlt,
             ForeColor = Palette.TextDim,
             Text = "Encodes and decodes text. Enter text above and choose a transform.",
         };
@@ -197,6 +196,9 @@ public sealed class TextWizardDialog : Form
         Controls.Add(footer);
         CancelButton = close;
         Palette.Apply(this);
+        // After Apply, which paints every Label transparent: the hint reads as a band above the input
+        // the way Fiddler's does, so it needs a surface of its own back.
+        hint.BackColor = Palette.SurfaceAlt;
         Run();
     }
 
