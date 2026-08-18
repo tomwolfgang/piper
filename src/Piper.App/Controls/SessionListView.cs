@@ -497,9 +497,14 @@ public sealed class SessionListView : UserControl
                     : $"{FilterText} -host:{session.Host}";
         });
         menu.Items.Add(new ToolStripSeparator());
+        var textWizard = new ToolStripMenuItem("Send URL to Text&Wizard", null,
+            (_, _) => TextWizardDialog.Open(FindForm(), SelectedSession?.Url));
+        menu.Items.Add(textWizard);
+        menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("&Remove selected\tDel", null, (_, _) => RemoveSelected());
         menu.Opening += (_, _) =>
         {
+            textWizard.Enabled = SelectedSession is { Url.Length: > 0 };
             saveResponseBody.Enabled = SelectedSession?.Response is not null;
             saveSessionsAsSaz.Enabled = SelectedSessions.Any(session => session.Request is not null);
             save.Enabled = saveResponseBody.Enabled || saveSessionsAsSaz.Enabled;

@@ -399,6 +399,12 @@ public sealed class MainForm : Form
         tools.DropDownItems.Add("&Configurations...", null, (_, _) => ShowConfigurations());
         var hosts = new ToolStripMenuItem("&Hosts...", null, (_, _) => ShowHosts());
         tools.DropDownItems.Add(hosts);
+        tools.DropDownItems.Add(new ToolStripSeparator());
+        // Fiddler puts TextWizard on Ctrl+E; that is already send-to-Composer here, so Ctrl+T it is.
+        tools.DropDownItems.Add(new ToolStripMenuItem("&TextWizard...", null, (_, _) => TextWizardDialog.Open(this))
+        {
+            ShortcutKeys = Keys.Control | Keys.T,
+        });
         tools.DropDownOpening += (_, _) => hosts.Checked = _options.HostRemapping.Enabled;
 
         var help = new ToolStripMenuItem("&Help");
