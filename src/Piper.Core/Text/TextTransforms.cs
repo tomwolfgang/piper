@@ -131,6 +131,10 @@ public static class TextTransforms
 
     private static string ToCSharpLiteral(byte[] bytes)
     {
+        if (bytes.Length == 0) return "new byte[] { }";
+
+        // StringBuilder rather than string.Join over a Select: at the 1 MiB input cap that would allocate
+        // a million short-lived strings.
         var literal = new StringBuilder(bytes.Length * 6 + 16).Append("new byte[] { ");
         for (var i = 0; i < bytes.Length; i++)
         {

@@ -101,6 +101,8 @@ internal static class TextTransformsTests
             runner.AreEqual("�", Apply(TextTransform.FromBase64, "/w=="), "an invalid byte becomes the replacement character");
             runner.AreEqual(string.Empty, Apply(TextTransform.FromBase64, string.Empty), "empty input stays empty");
             runner.AreEqual(string.Empty, Apply(TextTransform.UrlEncode, string.Empty), "an empty encode is not an error");
+            runner.AreEqual("new byte[] { }", Apply(TextTransform.ToCSharpByteArray, string.Empty),
+                "an empty C# literal is still valid C#");
             return Task.CompletedTask;
         });
     }
