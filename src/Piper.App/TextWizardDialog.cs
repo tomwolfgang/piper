@@ -19,6 +19,9 @@ public sealed class TextWizardDialog : Form
     /// </summary>
     private const int MaxInputLength = 1024 * 1024;
 
+    /// <summary>How much of the output the byte view will render. See <see cref="HexDump"/>.</summary>
+    private const int MaxDumpBytes = 64 * 1024;
+
     /// <summary>Fiddler's transform list, in Fiddler's order and using Fiddler's names.</summary>
     private static readonly (string Label, TextTransform Transform)[] Choices =
     [
@@ -286,16 +289,24 @@ public sealed class TextWizardDialog : Form
         Text = $"TextWizard [{_input.TextLength} => {_result.Length} chars]";
     }
 
-    /// <summary>Offset, hex and printable ASCII, the same shape as the Hex inspector's view.</summary>
+    /// <summary>
+    /// Offset, hex and printable ASCII, the same shape as the Hex inspector's view. Capped: the dump is
+    /// roughly five times the size of what it describes, and a transform can already have multiplied a
+    /// bounded input several times over, so an uncapped dump turns 1 MiB of input into a ten-megabyte
+    /// string in a TextBox. Nobody reads past the first few hundred lines either - the Hex inspector is
+    /// the tool for a whole binary payload.
+    /// </summary>
     private static string HexDump(string value)
     {
         if (value.Length == 0) return string.Empty;
 
-        var bytes = Encoding.UTF8.GetBytes(value);
-        var dump = new StringBuilder(bytes.Length * 4);
+        var all = Encoding.UTF8.GetBytes(value);
+        var shown = Math.Min(all.Length, MaxDumpBytes);
+        var bytes = all.AsSpan(0, shown);
+        var dump = new StringBuilder(shown * 5 + 80);
         for (var offset = 0; offset < bytes.Length; offset += 16)
         {
-            var line = bytes.AsSpan(offset, Math.Min(16, bytes.Length - offset));
+            var line = bytes.Slice(offset, Math.Min(16, bytes.Length - offset));
             dump.Append(offset.ToString("X8")).Append("  ");
             for (var i = 0; i < 16; i++)
                 dump.Append(i < line.Length ? line[i].ToString("X2") : "  ").Append(' ');
@@ -303,6 +314,9 @@ public sealed class TextWizardDialog : Form
             foreach (var b in line) dump.Append(b is >= 0x20 and < 0x7F ? (char)b : '.');
             dump.AppendLine();
         }
+
+        if (shown < all.Length)
+            dump.Append("... ").Append(all.Length - shown).AppendLine(" more bytes not shown.");
 
         return dump.ToString();
     }
