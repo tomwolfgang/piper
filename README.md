@@ -1,4 +1,4 @@
-# Piper — Free Fiddler Classic Alternative for Windows
+# Piper - Free Fiddler Classic Alternative for Windows
 
 [![CI](https://github.com/tomwolfgang/piper/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/tomwolfgang/piper/actions/workflows/ci.yml)
 [![Latest release](https://img.shields.io/github/v/release/tomwolfgang/piper?display_name=tag&sort=semver)](https://github.com/tomwolfgang/piper/releases)
@@ -71,7 +71,7 @@ certificate**. Read the dialog before accepting: the private key sits unencrypte
 `%LOCALAPPDATA%\Piper\Certificates`, so anything able to read it can impersonate any
 TLS site to your Windows account. **Tools > Remove trusted root certificate** reverses it.
 
-Nothing installs the root implicitly — it is only ever a deliberate menu action.
+Nothing installs the root implicitly - it is only ever a deliberate menu action.
 
 ## Search grammar
 
@@ -119,7 +119,7 @@ method:POST host:api status:>=400 -is:image body:"order"
 dotnet run --project tests/Piper.SmokeTests/Piper.SmokeTests.csproj
 ```
 
-Stands up real origin servers, runs the real proxy, and drives a real `HttpClient` through it —
+Stands up real origin servers, runs the real proxy, and drives a real `HttpClient` through it -
 320+ assertions covering proxying, chunked de-framing, gzip decode, failure capture, the composer,
 header semantics, the full search grammar, HTTP/2 (HPACK against RFC 7541's own worked vectors,
 framing, padding, flow control, multiplexing, and the real MITM path negotiating h2 on either or
@@ -142,11 +142,11 @@ targets, so `Invoke-WebRequest -Proxy` would never reach Piper.
 
 - HTTP/1.1 forward proxying with keep-alive and connection reuse
 - `CONNECT` blind tunnelling, and TLS termination with per-host certificates honouring SNI
-- HTTP/2 on both legs (from-scratch HPACK, framing and flow control) — ALPN-negotiated with the
+- HTTP/2 on both legs (from-scratch HPACK, framing and flow control) - ALPN-negotiated with the
   browser inside a decrypted tunnel and, independently, with the origin server, so Piper freely
   translates between h1.1 and h2 on either side and records which protocol each leg actually used
 - HTTP/3 to origin servers (from-scratch QPACK and framing over `System.Net.Quic`), off by
-  default — see below
+  default - see below
 - Chunked de-framing; gzip, deflate and brotli decoding for display
 - WebSocket / `101 Switching Protocols` upgrade pass-through
 - Virtual-mode session grid that stays responsive under load
@@ -154,7 +154,7 @@ targets, so `Invoke-WebRequest -Proxy` would never reach Piper.
 - Composer with search, raw-request editing, repeat-N, and verbatim header sending
 - Copy as curl, per-host filtering, dark theme
 - Importing and exporting Fiddler SAZ session archives
-- AutoResponder: ordered rules that answer a request locally instead of sending it upstream —
+- AutoResponder: ordered rules that answer a request locally instead of sending it upstream -
   see below
 
 ### AutoResponder
@@ -183,7 +183,7 @@ copied from a Fiddler setup work unchanged.
 | `*raw:C:\path\captured.txt` | serve a complete saved response, headers included |
 | `*redir:https://other/path` | send the client a 307 |
 | `https://other/path` | fetch that instead, without telling the client |
-| `*delay:500` | pause, then carry on — combine as `*delay:500 *503` |
+| `*delay:500` | pause, then carry on - combine as `*delay:500 *503` |
 | `*drop`, `*reset` | kill the connection |
 | `*CORSPreflightAllow` | answer an `OPTIONS` preflight permissively |
 
@@ -208,13 +208,13 @@ browser speaking HTTP/3 *to* a forward proxy. What this does is let Piper dial t
 QUIC to see what it actually serves there.
 
 An origin is only tried over QUIC after it has advertised `h3` in an `Alt-Svc` header on an
-ordinary TCP response — never on the first, cold request, which is the one you are waiting on.
+ordinary TCP response - never on the first, cold request, which is the one you are waiting on.
 Failures are remembered per host with a cool-down, so a network that blocks outbound UDP/443
 (many do) costs one timeout rather than one per request. Any failure falls back to TCP, and only
 safe methods (`GET`, `HEAD`, `OPTIONS`) are attempted, so a fallback can never re-submit a request
 with side effects.
 
-QUIC comes from `System.Net.Quic` — msquic ships inside the .NET runtime, so this still needs no
+QUIC comes from `System.Net.Quic` - msquic ships inside the .NET runtime, so this still needs no
 NuGet packages and nothing extra installed. The HTTP/3 layer above it (framing, QPACK) is
 from-scratch like the rest. QPACK uses the static table only and advertises a zero-capacity
 dynamic table, which RFC 9204 explicitly permits and which removes the encoder/decoder instruction
@@ -222,7 +222,7 @@ streams entirely.
 
 ## Not implemented
 
-- HTTP/2 or HTTP/3 in the Composer (raw/verbatim sending stays HTTP/1.1-only — the mandatory
+- HTTP/2 or HTTP/3 in the Composer (raw/verbatim sending stays HTTP/1.1-only - the mandatory
   pseudo-headers and forbidden headers are structurally at odds with "what you type is what goes
   on the wire")
 - HTTP/3 stream reuse (one QUIC connection per request) and server push
