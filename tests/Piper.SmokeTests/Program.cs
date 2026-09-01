@@ -531,6 +531,7 @@ origin.Stop();
 await HostFilterTests.RunAsync(runner);
 await WebFormParserTests.RunAsync(runner);
 await TextTransformsTests.RunAsync(runner);
+await TextTransformDetectorTests.RunAsync(runner);
 await FilterSettingsStoreTests.RunAsync(runner);
 await StatusBarSettingsStoreTests.RunAsync(runner);
 await ProxyConfigurationSettingsStoreTests.RunAsync(runner);

@@ -143,8 +143,7 @@ targets, so `Invoke-WebRequest -Proxy` would never reach Piper.
 
 **Tools > TextWizard** (`Ctrl+T`) opens a scratchpad that converts one piece of text at a time, laid out
 like Fiddler's: input on top, the transform dropdown between the two panes, output below. The output
-updates as you type and the title tracks the character counts. **Send output to input** chains
-conversions, which is how you get from a captured cookie to readable JSON in two clicks.
+updates as you type and the title tracks the character counts.
 
 The transform list matches Fiddler's, in the same order:
 
@@ -159,7 +158,14 @@ The transform list matches Fiddler's, in the same order:
 | SAML | To DeflatedSAML, From DeflatedSAML — the raw-DEFLATE HTTP-Redirect binding |
 | Hashes | To MD5, SHA1, SHA256, SHA384, SHA512, as uppercase hex |
 
-**View bytes** shows the output as a hex dump, and **Save Output...** writes it to a file.
+When it opens with a value sent from an inspector it guesses the encoding and preselects the matching
+decoder - base64, URL, hex, HTML entities, a JSON string literal, UTF-7 or a deflated SAML payload - and
+says so on the status bar. The guess is only a hint; picking something else is always one click away. When
+nothing is recognisable it falls back to the last transform you chose yourself, which is remembered between
+runs. Only the name of the transform is stored, never the text.
+
+**View bytes** shows the output as a hex dump, **Save** writes the output to a file, and **To Input** feeds
+it back round for a second pass. The window is resizable from the grip on its status bar.
 
 Rather than opening it and pasting, you can send a value straight from a capture: **Send value to
 TextWizard** sits on the Headers, JSON and WebForms inspector context menus, and **Send URL to TextWizard**

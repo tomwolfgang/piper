@@ -2,6 +2,7 @@ using System.Text;
 using System.Text.Json;
 using System.Windows.Forms;
 using Piper.App.Theme;
+using Piper.Core.Sessions;
 using Piper.Core.Text;
 
 namespace Piper.App;
@@ -55,9 +56,15 @@ public sealed class TextWizardDialog : Form
     private readonly ComboBox _transform;
     private readonly CheckBox _viewBytes;
     private readonly TextBox _output;
-    private readonly Label _status;
+    private readonly ToolStripStatusLabel _status;
 
     private string _result = string.Empty;
+
+    /// <summary>
+    /// Set while the dialog is choosing a transform for the user, so that a detected or restored choice is
+    /// neither saved back over their own preference nor charged an extra transform run.
+    /// </summary>
+    private bool _selectingForUser;
 
     private TextWizardDialog()
     {
@@ -115,8 +122,8 @@ public sealed class TextWizardDialog : Form
         // Wide enough for the longest entry at whatever scale the display is running.
         _transform.Width = _transform.Items.Cast<string>()
             .Max(item => TextRenderer.MeasureText(item, Palette.UiFont).Width) + 40;
-        _transform.SelectedIndex = 0;
-        _transform.SelectedIndexChanged += (_, _) => Run();
+        _transform.SelectedIndex = IndexOf(LoadLastTransform()) is { } restored ? restored : 0;
+        _transform.SelectedIndexChanged += OnTransformChanged;
 
         _viewBytes = new CheckBox
         {
@@ -128,29 +135,41 @@ public sealed class TextWizardDialog : Form
         };
         _viewBytes.CheckedChanged += (_, _) => ShowResult();
 
-        var saveToFile = Action("Save Output...", SaveOutput);
-        var chain = Action("Send output to input", () => _input.Text = _result);
+        var saveToFile = Action("Save", "Save the output to a file", SaveIcon(), SaveOutput);
+        var chain = Action("To Input", "Send output to input", UpArrowIcon(), () => _input.Text = _result);
+        var close = Action("Close", "Close the TextWizard", null, Close);
+        MakeSameSize(saveToFile, chain, close);
 
-        // The strip that sits between the two editors, matching Fiddler's arrangement.
-        var bar = new FlowLayoutPanel
-        {
-            Dock = DockStyle.Top,
-            AutoSize = true,
-            AutoSizeMode = AutoSizeMode.GrowAndShrink,
-            Padding = new Padding(8, 6, 8, 6),
-            WrapContents = false,
-        };
-        bar.Controls.Add(new Label
+        var left = new FlowLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, WrapContents = false, Margin = Padding.Empty };
+        left.Controls.Add(new Label
         {
             Text = "Transform:",
             Font = Palette.UiFont,
             AutoSize = true,
             Margin = new Padding(0, 7, 6, 0),
         });
-        bar.Controls.Add(_transform);
-        bar.Controls.Add(_viewBytes);
-        bar.Controls.Add(saveToFile);
-        bar.Controls.Add(chain);
+        left.Controls.Add(_transform);
+        left.Controls.Add(_viewBytes);
+
+        var right = new FlowLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, WrapContents = false, Margin = Padding.Empty, Anchor = AnchorStyles.Right };
+        right.Controls.AddRange([saveToFile, chain, close]);
+
+        // Two columns so the actions sit against the window's right edge and stay there as it is resized;
+        // a FlowLayoutPanel alone cannot right-align part of its contents.
+        var bar = new TableLayoutPanel
+        {
+            Dock = DockStyle.Top,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            ColumnCount = 2,
+            RowCount = 1,
+            Padding = new Padding(8, 6, 8, 6),
+        };
+        bar.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        bar.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
+        bar.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        bar.Controls.Add(left, 0, 0);
+        bar.Controls.Add(right, 1, 0);
 
         _split = new SplitContainer
         {
@@ -161,75 +180,27 @@ public sealed class TextWizardDialog : Form
         _split.Panel2.Controls.Add(_output);
         _split.Panel2.Controls.Add(bar);
 
-        // A modeless form ignores a button's DialogResult, so Close has to be wired explicitly. Without
-        // this the button and the Escape key both do nothing while the title-bar X still works.
-        var close = Action("Close", Close);
-        close.Anchor = AnchorStyles.Right;
-
-        _status = new Label
+        // A real status bar rather than a label: it carries the sizing grip, which is the affordance that
+        // tells people the window resizes at all.
+        _status = new ToolStripStatusLabel
         {
-            Dock = DockStyle.Fill,
-            Padding = new Padding(2, 4, 8, 0),
+            Spring = true,
+            TextAlign = ContentAlignment.MiddleLeft,
             ForeColor = Palette.TextDim,
-            AutoEllipsis = true,
             AccessibleName = "TextWizard status",
         };
-
-        // Status and Close share one strip rather than each claiming a band of their own. A
-        // TableLayoutPanel rather than arithmetic over the button's Height: sizes read in the constructor
-        // are pre-scaling, so computing the band height from them leaves the button clipped on a scaled
-        // display. AutoSize lets the row grow to whatever the button really measures.
-        var footer = new TableLayoutPanel
-        {
-            Dock = DockStyle.Bottom,
-            AutoSize = true,
-            AutoSizeMode = AutoSizeMode.GrowAndShrink,
-            ColumnCount = 2,
-            RowCount = 1,
-            Padding = new Padding(10, 4, 10, 6),
-        };
-        footer.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
-        footer.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        footer.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        footer.Controls.Add(_status, 0, 0);
-        footer.Controls.Add(close, 1, 0);
+        var statusBar = new StatusStrip { Font = Palette.UiFont, SizingGrip = true };
+        statusBar.Items.Add(_status);
 
         Controls.Add(_split);
         Controls.Add(hint);
-        Controls.Add(footer);
+        Controls.Add(statusBar);
         CancelButton = close;
         Palette.Apply(this);
         // After Apply, which paints every Label transparent: the hint reads as a band above the input
         // the way Fiddler's does, so it needs a surface of its own back.
         hint.BackColor = Palette.SurfaceAlt;
         Run();
-    }
-
-    private static Button Action(string text, Action onClick)
-    {
-        var button = new Button
-        {
-            Text = text,
-            Font = Palette.UiFont,
-            AutoSize = true,
-            AutoSizeMode = AutoSizeMode.GrowAndShrink,
-            Padding = new Padding(12, 4, 12, 4),
-            Margin = new Padding(10, 2, 0, 0),
-        };
-        button.Click += (_, _) => onClick();
-        return button;
-    }
-
-    /// <summary>
-    /// The splitter can only be positioned once the container has a real height; setting it in the
-    /// constructor throws because the container is still its default 150x100 at that point.
-    /// </summary>
-    protected override void OnLoad(EventArgs e)
-    {
-        base.OnLoad(e);
-        var wanted = _split.Height * 2 / 5;
-        if (wanted > _split.Panel1MinSize && wanted < _split.Height - _split.Panel2MinSize)
-            _split.SplitterDistance = wanted;
     }
 
     /// <summary>
@@ -254,13 +225,49 @@ public sealed class TextWizardDialog : Form
     private void SetInput(string text)
     {
         // MaxLength bounds typing and pasting but not an assignment, so oversized text is cut here too.
-        _input.Text = text.Length > MaxInputLength ? text[..MaxInputLength] : text;
+        var bounded = text.Length > MaxInputLength ? text[..MaxInputLength] : text;
+
+        // Both the text and the transform are being set for the user, so the pair is applied as one change:
+        // one transform run at the end rather than one per assignment, and no write over their saved choice.
+        _selectingForUser = true;
+        try
+        {
+            _input.Text = bounded;
+            if (TextTransformDetector.Detect(bounded) is { } detected && IndexOf(detected) is { } index)
+            {
+                _transform.SelectedIndex = index;
+                _status.Text = $"Detected {Choices[index].Label}.";
+            }
+        }
+        finally
+        {
+            _selectingForUser = false;
+        }
+
         _input.Select(0, 0);
         _input.Focus();
+        Run(keepStatus: true);
     }
 
-    private void Run()
+    private void OnTransformChanged(object? sender, EventArgs e)
     {
+        if (_selectingForUser) return;
+
+        // Only a choice the user made themselves is worth remembering; a detected one belongs to the text
+        // they happened to open, not to how they like to work.
+        if (_transform.SelectedIndex >= 0 && _transform.SelectedIndex < Choices.Length)
+            TextWizardSettingsStore.Save(new TextWizardSettings
+            {
+                LastTransform = Choices[_transform.SelectedIndex].Transform.ToString(),
+            });
+
+        Run();
+    }
+
+    private void Run(bool keepStatus = false)
+    {
+        if (_selectingForUser) return;
+
         var index = _transform.SelectedIndex;
         if (index < 0 || index >= Choices.Length) return;
 
@@ -268,9 +275,10 @@ public sealed class TextWizardDialog : Form
         {
             _result = TextTransforms.Apply(Choices[index].Transform, _input.Text);
             _status.ForeColor = Palette.TextDim;
-            _status.Text = _input.TextLength >= MaxInputLength
-                ? $"Input reached the {MaxInputLength / 1024 / 1024} MiB limit and was truncated."
-                : string.Empty;
+            if (_input.TextLength >= MaxInputLength)
+                _status.Text = $"Input reached the {MaxInputLength / 1024 / 1024} MiB limit and was truncated.";
+            else if (!keepStatus)
+                _status.Text = string.Empty;
         }
         catch (Exception ex) when (ex is FormatException or JsonException or InvalidDataException)
         {
@@ -288,6 +296,20 @@ public sealed class TextWizardDialog : Form
         _output.Text = _viewBytes.Checked ? HexDump(_result) : _result;
         Text = $"TextWizard [{_input.TextLength} => {_result.Length} chars]";
     }
+
+    private static int? IndexOf(TextTransform? transform)
+    {
+        if (transform is not { } wanted) return null;
+        for (var i = 0; i < Choices.Length; i++)
+            if (Choices[i].Transform == wanted) return i;
+        return null;
+    }
+
+    private static TextTransform? LoadLastTransform() =>
+        TextWizardSettingsStore.Load()?.LastTransform is { } name
+        && Enum.TryParse<TextTransform>(name, out var parsed)
+            ? parsed
+            : null;
 
     /// <summary>
     /// Offset, hex and printable ASCII, the same shape as the Hex inspector's view. Capped: the dump is
@@ -342,5 +364,66 @@ public sealed class TextWizardDialog : Form
             MessageBox.Show(this, $"Piper could not write that file:\r\n\r\n{ex.Message}",
                 "Save TextWizard output", MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
+    }
+
+    private static Button Action(string text, string tooltip, Image? icon, Action onClick)
+    {
+        var button = new Button
+        {
+            Text = text,
+            Font = Palette.UiFont,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            Padding = new Padding(4, 0, 4, 0),
+            Margin = new Padding(6, 2, 0, 0),
+            Image = icon,
+            TextImageRelation = TextImageRelation.ImageBeforeText,
+            ImageAlign = ContentAlignment.MiddleLeft,
+            TextAlign = ContentAlignment.MiddleCenter,
+            AccessibleName = tooltip,
+        };
+        new ToolTip().SetToolTip(button, tooltip);
+        button.Click += (_, _) => onClick();
+        return button;
+    }
+
+    /// <summary>
+    /// Gives every action the width of the widest one. Measured rather than hard-coded, so the row stays
+    /// even at any display scale.
+    /// </summary>
+    private static void MakeSameSize(params Button[] buttons)
+    {
+        var width = buttons.Max(b => b.PreferredSize.Width);
+        var height = buttons.Max(b => b.PreferredSize.Height);
+        foreach (var button in buttons)
+        {
+            button.AutoSize = false;
+            button.Size = new Size(width, height);
+        }
+    }
+
+    /// <summary>An up arrow, drawn rather than shipped as a resource, like the status-bar icons.</summary>
+    private static Bitmap UpArrowIcon()
+    {
+        var image = new Bitmap(16, 16);
+        using var graphics = Graphics.FromImage(image);
+        graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+        using var brush = new SolidBrush(Palette.Text);
+        graphics.FillPolygon(brush, [new Point(8, 3), new Point(13, 9), new Point(3, 9)]);
+        graphics.FillRectangle(brush, 6, 9, 4, 4);
+        return image;
+    }
+
+    /// <summary>A disk, for saving the output.</summary>
+    private static Bitmap SaveIcon()
+    {
+        var image = new Bitmap(16, 16);
+        using var graphics = Graphics.FromImage(image);
+        using var pen = new Pen(Palette.Text);
+        using var brush = new SolidBrush(Palette.Text);
+        graphics.DrawRectangle(pen, 3, 3, 10, 10);
+        graphics.FillRectangle(brush, 6, 3, 5, 4);
+        graphics.FillRectangle(brush, 5, 9, 7, 4);
+        return image;
     }
 }
