@@ -23,7 +23,7 @@
   <ItemGroup>
     <PackageReference Include="Be.Windows.Forms.HexBox.Net8" Version="2.1.0" />
     <PackageReference Include="ShimmyMySherbet.WinForms.ZoomableImageBox" Version="1.0.0" />
-    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.4129.50" GeneratePathProperty="true" ExcludeAssets="build;buildTransitive" />
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.4191.47" GeneratePathProperty="true" ExcludeAssets="build;buildTransitive" />
     <PackageReference Include="SixLabors.ImageSharp" Version="3.1.12" />
   </ItemGroup>
 
