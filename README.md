@@ -1,4 +1,4 @@
-# Piper
+# Piper — Free Fiddler Classic Alternative for Windows
 
 [![CI](https://github.com/tomwolfgang/piper/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/tomwolfgang/piper/actions/workflows/ci.yml)
 [![Latest release](https://img.shields.io/github/v/release/tomwolfgang/piper?display_name=tag&sort=semver)](https://github.com/tomwolfgang/piper/releases)
@@ -6,7 +6,27 @@
 [![.NET 10](https://img.shields.io/badge/.NET-10-512BD4?logo=dotnet&logoColor=white)](https://dotnet.microsoft.com/)
 [![Windows](https://img.shields.io/badge/platform-Windows-0078D6?logo=windows&logoColor=white)](https://www.microsoft.com/windows/)
 
-An HTTP(S) debugging proxy for Windows, written from scratch in C# on .NET 10 / WinForms.
+Piper is a free, open-source HTTP(S) debugging proxy for Windows and a modern alternative to
+Fiddler Classic. It lets developers capture, inspect, filter, replay, compose, and mock
+HTTP/HTTPS traffic, including TLS decryption, HTTP/1.1, HTTP/2, and upstream HTTP/3.
+
+Migrating from Fiddler Classic? Piper can import and export Fiddler SAZ archives, and its
+AutoResponder supports Fiddler-compatible rule syntax.
+
+## Why Piper instead of Fiddler Classic?
+
+Piper is a free, open-source Windows HTTPS debugging proxy with no paid edition, license key, or
+feature tiers. It is designed for developers who want a modern Fiddler Classic alternative while
+keeping familiar workflows and file formats.
+
+| Capability | Piper |
+| --- | --- |
+| Platform | Windows desktop app |
+| License | Open source (GPL-3.0-only) |
+| HTTPS debugging proxy | Capture, inspect, filter, replay, compose, and mock HTTP/HTTPS traffic |
+| Fiddler Classic migration | Import and export Fiddler SAZ archives; Fiddler-compatible AutoResponder rules |
+| Protocols | HTTP/1.1, HTTP/2, and upstream HTTP/3 |
+| Developer tools | Composer, AutoResponder, search, and Copy as curl |
 
 ## Why this exists
 
