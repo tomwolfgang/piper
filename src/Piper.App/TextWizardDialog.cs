@@ -58,6 +58,11 @@ public sealed class TextWizardDialog : Form
     private readonly TextBox _output;
     private readonly ToolStripStatusLabel _status;
 
+    private readonly ToolTip _tips = new();
+
+    /// <summary>Drawn icons and the shared tooltip are owned here; a Button does not dispose its Image.</summary>
+    private readonly List<Image> _icons = [];
+
     private string _result = string.Empty;
 
     /// <summary>
@@ -136,7 +141,10 @@ public sealed class TextWizardDialog : Form
         _viewBytes.CheckedChanged += (_, _) => ShowResult();
 
         var saveToFile = Action("Save", "Save the output to a file", SaveIcon(), SaveOutput);
-        var chain = Action("To Input", "Send output to input", UpArrowIcon(), () => _input.Text = _result);
+        // Through SetInput, never straight into _input.Text: MaxLength does not apply to an assignment, so
+        // a direct write would skip the 1 MiB bound, and transforms expand their input - repeated chaining
+        // of "To C# byte[]" would compound 1 MiB into hundreds.
+        var chain = Action("To Input", "Send output to input", UpArrowIcon(), () => SetInput(_result));
         var close = Action("Close", "Close the TextWizard", null, Close);
         MakeSameSize(saveToFile, chain, close);
 
@@ -229,14 +237,17 @@ public sealed class TextWizardDialog : Form
 
         // Both the text and the transform are being set for the user, so the pair is applied as one change:
         // one transform run at the end rather than one per assignment, and no write over their saved choice.
+        var note = bounded.Length < text.Length
+            ? $"Input was truncated to {MaxInputLength / 1024 / 1024} MiB."
+            : null;
         _selectingForUser = true;
         try
         {
             _input.Text = bounded;
-            if (TextTransformDetector.Detect(bounded) is { } detected && IndexOf(detected) is { } index)
+            if (note is null && TextTransformDetector.Detect(bounded) is { } detected && IndexOf(detected) is { } index)
             {
                 _transform.SelectedIndex = index;
-                _status.Text = $"Detected {Choices[index].Label}.";
+                note = $"Detected {Choices[index].Label}.";
             }
         }
         finally
@@ -246,7 +257,11 @@ public sealed class TextWizardDialog : Form
 
         _input.Select(0, 0);
         _input.Focus();
-        Run(keepStatus: true);
+
+        // Only hold a status that was actually written here, or a stale error from the previous value
+        // would sit beside a correct result.
+        if (note is not null) _status.Text = note;
+        Run(keepStatus: note is not null);
     }
 
     private void OnTransformChanged(object? sender, EventArgs e)
@@ -275,8 +290,9 @@ public sealed class TextWizardDialog : Form
         {
             _result = TextTransforms.Apply(Choices[index].Transform, _input.Text);
             _status.ForeColor = Palette.TextDim;
-            if (_input.TextLength >= MaxInputLength)
-                _status.Text = $"Input reached the {MaxInputLength / 1024 / 1024} MiB limit and was truncated.";
+            // At the limit is not the same as cut short: text of exactly this length was never truncated.
+            if (_input.TextLength >= MaxInputLength && !keepStatus)
+                _status.Text = $"Input is at the {MaxInputLength / 1024 / 1024} MiB limit.";
             else if (!keepStatus)
                 _status.Text = string.Empty;
         }
@@ -366,8 +382,9 @@ public sealed class TextWizardDialog : Form
         }
     }
 
-    private static Button Action(string text, string tooltip, Image? icon, Action onClick)
+    private Button Action(string text, string tooltip, Image? icon, Action onClick)
     {
+        if (icon is not null) _icons.Add(icon);
         var button = new Button
         {
             Text = text,
@@ -382,9 +399,21 @@ public sealed class TextWizardDialog : Form
             TextAlign = ContentAlignment.MiddleCenter,
             AccessibleName = tooltip,
         };
-        new ToolTip().SetToolTip(button, tooltip);
+        _tips.SetToolTip(button, tooltip);
         button.Click += (_, _) => onClick();
         return button;
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+        {
+            _tips.Dispose();
+            foreach (var icon in _icons) icon.Dispose();
+            _icons.Clear();
+        }
+
+        base.Dispose(disposing);
     }
 
     /// <summary>

@@ -83,6 +83,7 @@ internal static class TextTransformsTests
             Throws<JsonException>(runner, TextTransform.FromJsString, "not a literal", "an unquoted JS string");
             Throws<JsonException>(runner, TextTransform.FromJsString, "123", "a JS number where a string was expected");
             Throws<InvalidDataException>(runner, TextTransform.FromDeflatedSaml, "aGVsbG8=", "base64 that is not DEFLATE data");
+            Throws<FormatException>(runner, TextTransform.FromUtf7, "café", "non-ASCII given to the ASCII-only UTF-7 decoder");
             return Task.CompletedTask;
         });
 

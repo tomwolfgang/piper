@@ -92,7 +92,7 @@ public static class TextTransforms
             TextTransform.HtmlDecode => WebUtility.HtmlDecode(input),
             // UTF-7 output is pure ASCII by construction, which is the point of the encoding.
             TextTransform.ToUtf7 => Encoding.ASCII.GetString(Utf7.GetBytes(input)),
-            TextTransform.FromUtf7 => Utf7.GetString(Encoding.ASCII.GetBytes(input)),
+            TextTransform.FromUtf7 => Utf7.GetString(AsciiBytes(input)),
             TextTransform.ToDeflatedSaml => Convert.ToBase64String(Deflate(Encoding.UTF8.GetBytes(input))),
             TextTransform.FromDeflatedSaml => Encoding.UTF8.GetString(Inflate(FromBase64Lenient(input))),
             TextTransform.Md5 => Convert.ToHexString(MD5.HashData(Encoding.UTF8.GetBytes(input))),
@@ -127,6 +127,20 @@ public static class TextTransforms
         }
 
         return Convert.FromBase64String(buffer.ToString());
+    }
+
+    /// <summary>
+    /// UTF-7 is an ASCII-only encoding, so anything outside ASCII is malformed input rather than something
+    /// to approximate. Encoding.ASCII would quietly substitute "?" for it, which would make this the one
+    /// decoder that guesses instead of throwing.
+    /// </summary>
+    private static byte[] AsciiBytes(string input)
+    {
+        foreach (var c in input)
+            if (!char.IsAscii(c))
+                throw new FormatException("UTF-7 is ASCII-only; the input contains a non-ASCII character.");
+
+        return Encoding.ASCII.GetBytes(input);
     }
 
     private static string ToCSharpLiteral(byte[] bytes)
