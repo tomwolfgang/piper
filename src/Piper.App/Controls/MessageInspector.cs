@@ -434,13 +434,16 @@ public sealed class MessageInspector : UserControl
         var copyValue = new ToolStripMenuItem("Copy value only", null, (_, _) => CopySelectedHeader(valueOnly: true));
         var openInBrowser = new ToolStripMenuItem("Open with default browser", null,
             (_, _) => OpenInDefaultBrowser(SelectedHeader?.Value));
-        menu.Items.AddRange([copyHeader, copyValue, new ToolStripSeparator(), openInBrowser]);
+        var textWizard = new ToolStripMenuItem("Send value to TextWizard", null,
+            (_, _) => SendToTextWizard(SelectedHeader?.Value));
+        menu.Items.AddRange([copyHeader, copyValue, new ToolStripSeparator(), openInBrowser, textWizard]);
         menu.Opening += (_, _) =>
         {
             var header = SelectedHeader;
             var enabled = header is not null;
             copyHeader.Enabled = enabled;
             copyValue.Enabled = enabled;
+            textWizard.Enabled = enabled;
             openInBrowser.Enabled = header is { } selected && TryGetBrowserUrl(selected.Value, out _);
         };
         return menu;
@@ -453,13 +456,16 @@ public sealed class MessageInspector : UserControl
         var copyValue = new ToolStripMenuItem("Copy value only", null, (_, _) => CopySelectedJson(valueOnly: true));
         var openInBrowser = new ToolStripMenuItem("Open with default browser", null,
             (_, _) => OpenInDefaultBrowser(SelectedJsonValue?.StringValue));
-        menu.Items.AddRange([copyPair, copyValue, new ToolStripSeparator(), openInBrowser]);
+        var textWizard = new ToolStripMenuItem("Send value to TextWizard", null,
+            (_, _) => SendToTextWizard(SelectedJsonValue is { } selected ? selected.StringValue ?? selected.RawValue : null));
+        menu.Items.AddRange([copyPair, copyValue, new ToolStripSeparator(), openInBrowser, textWizard]);
         menu.Opening += (_, _) =>
         {
             var value = SelectedJsonValue;
             var enabled = value is not null;
             copyPair.Enabled = enabled;
             copyValue.Enabled = enabled;
+            textWizard.Enabled = enabled;
             openInBrowser.Enabled = value is { StringValue: { } stringValue } && TryGetBrowserUrl(stringValue, out _);
         };
         return menu;
@@ -472,12 +478,15 @@ public sealed class MessageInspector : UserControl
         var copyValue = new ToolStripMenuItem("Copy Value", null, (_, _) => CopySelectedWebForm(valueOnly: true));
         var save = new ToolStripMenuItem("Save binary data...", null, (_, _) => SaveSelectedWebFormBinary());
         var viewHex = new ToolStripMenuItem("View in Hex...", null, (_, _) => ViewSelectedWebFormBinaryAsHex());
-        menu.Items.AddRange([copyNameValue, copyValue, new ToolStripSeparator(), save, viewHex]);
+        var textWizard = new ToolStripMenuItem("Send value to TextWizard", null,
+            (_, _) => SendToTextWizard(SelectedWebFormField?.Value));
+        menu.Items.AddRange([copyNameValue, copyValue, new ToolStripSeparator(), save, viewHex, textWizard]);
         menu.Opening += (_, _) =>
         {
             var field = SelectedWebFormField;
             copyNameValue.Enabled = field is not null;
             copyValue.Enabled = field is not null;
+            textWizard.Enabled = field is not null;
             save.Enabled = field?.HasBinaryData == true;
             viewHex.Enabled = field?.HasBinaryData == true;
         };
@@ -689,6 +698,12 @@ public sealed class MessageInspector : UserControl
     {
         if (!TryGetBrowserUrl(value, out var url)) return;
         System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(url) { UseShellExecute = true });
+    }
+
+    private void SendToTextWizard(string? value)
+    {
+        if (value is null) return;
+        TextWizardDialog.Open(FindForm(), value);
     }
 
     private static bool TryGetBrowserUrl(string? value, out string url)

@@ -107,6 +107,7 @@ method:POST host:api status:>=400 -is:image body:"order"
 | `F12` | start / stop capturing |
 | `Ctrl+K` | jump to the Composer search |
 | `Ctrl+E` | send the selected session to the Composer |
+| `Ctrl+T` | open the TextWizard |
 | `Ctrl+S` | save selected sessions as a Fiddler SAZ archive |
 | `Ctrl+X` | clear sessions |
 | `Ctrl+C` | copy selected URLs |
@@ -156,6 +157,46 @@ targets, so `Invoke-WebRequest -Proxy` would never reach Piper.
 - Importing and exporting Fiddler SAZ session archives
 - AutoResponder: ordered rules that answer a request locally instead of sending it upstream -
   see below
+- TextWizard: encode, decode and hash a value without leaving Piper — see below
+
+### TextWizard
+
+**Tools > TextWizard** (`Ctrl+T`) opens a scratchpad that converts one piece of text at a time, laid out
+like Fiddler's: input on top, the transform dropdown between the two panes, output below. The output
+updates as you type and the title tracks the character counts.
+
+The transform list matches Fiddler's, in the same order:
+
+| | |
+| --- | --- |
+| Base64 | To Base64, To Base64URL, From Base64 |
+| URL | URLEncode, URLDecode — decoding treats `+` as a space, the way a query string does |
+| Hex | HexEncode, HexDecode — uppercase and unspaced |
+| Code | To C# byte[], To JS string, From JS string |
+| HTML | HTML Encode, HTML Decode |
+| UTF-7 | To UTF-7, From UTF-7 — for legacy gateways and UTF-7 filter-evasion payloads |
+| SAML | To DeflatedSAML, From DeflatedSAML — the raw-DEFLATE HTTP-Redirect binding |
+| Hashes | To MD5, SHA1, SHA256, SHA384, SHA512, as uppercase hex |
+
+When it opens with a value sent from an inspector it guesses the encoding and preselects the matching
+decoder - base64, URL, hex, HTML entities, a JSON string literal, UTF-7 or a deflated SAML payload - and
+says so on the status bar. The guess is only a hint; picking something else is always one click away. When
+nothing is recognisable it falls back to the last transform you chose yourself, which is remembered between
+runs. Only the name of the transform is stored, never the text.
+
+**View bytes** shows the output as a hex dump, **Save** writes the output to a file, and **To Input** feeds
+it back round for a second pass. The window is resizable from the grip on its status bar.
+
+Rather than opening it and pasting, you can send a value straight from a capture: **Send value to
+TextWizard** sits on the Headers, JSON and WebForms inspector context menus, and **Send URL to TextWizard**
+on the session grid. The window is shared and stays open beside the grid.
+
+Text is treated as UTF-8 throughout; bytes that are not valid UTF-8 come back as `�`, so use the Hex
+inspector for genuinely binary payloads. **From Base64** is deliberately forgiving — either alphabet,
+padding optional, line wrapping ignored — because that is how base64 arrives in headers and JWTs; illegal
+characters are still an error. Other decoders given malformed input say so instead of guessing. Input is
+capped at 1 MiB, and `From DeflatedSAML` refuses to inflate past 1 MiB so a compression bomb cannot
+exhaust memory.
 
 ### AutoResponder
 
