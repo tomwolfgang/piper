@@ -3,19 +3,18 @@ using Piper.Core.Sessions;
 internal static class SearchQueryTests
 {
     // The query examples the UI advertises, restated here. The smoke runner cannot reference
-    // Piper.App, so these are copies of the strings in ComposerPanel's and SessionListView's
-    // placeholders and MainForm's "Search syntax" dialog. If a field is renamed in SearchQuery
-    // without updating those, this test fails and points at the ones the UI still promises.
+    // Piper.App, so these are copies of the strings in ComposerPanel's search tooltip,
+    // SessionListView's placeholder and MainForm's "Search syntax" dialog. If a field is renamed
+    // in SearchQuery without updating those, this test fails and points at the ones the UI still
+    // promises.
     private static readonly string[] Advertised =
     [
-        // ComposerPanel search box placeholder.
-        "method:POST host:api  status:4xx  -is:image",
         // SessionListView filter box placeholder.
         "status:4xx host:api  -is:image  body:\"order id\"",
         // MainForm's worked example under Help > Search syntax.
         "method:POST host:api status:>=400 -is:image body:\"order\"",
 
-        // Every token the Composer used to advertise, individually.
+        // Every token in ComposerPanel's search tooltip, individually.
         "method:POST",
         "host:api",
         "status:4xx",

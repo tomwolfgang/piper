@@ -38,7 +38,9 @@ public sealed class ComposerPanel : UserControl
     private readonly TabControl _editorTabs;
     private readonly Button _execute;
     private readonly Label _status;
-    private readonly ToolTip _historyToolTip = new();
+    // Also carries the search box's grammar examples, which need longer than the 5s default to
+    // read. Truncated history cells share the instance and simply stay up as long as the hover.
+    private readonly ToolTip _historyToolTip = new() { AutoPopDelay = 30000 };
     private string? _historyToolTipText;
     // Persisted Composer history belongs in this panel, not in SessionStore. The latter drives
     // the capture list, so restoring history there made an old composed request appear as the
@@ -60,13 +62,24 @@ public sealed class ComposerPanel : UserControl
         {
             Dock = DockStyle.Top,
             Font = Palette.Mono,
-            // The examples belong in the placeholder, not a label under the box: a label in dim
-            // text flush below the box reads as a query already typed in. Help > Search syntax
-            // documents the rest of the grammar. Kept in step with SessionListView's filter box.
-            PlaceholderText = "Search sent requests  e.g.  method:POST host:api  status:4xx  -is:image",
+            // Examples live in the tooltip below, not in a label under the box and not in this
+            // placeholder: a dim label flush under the box reads as a query already typed in, and
+            // this pane is narrow enough that a placeholder long enough to teach the grammar just
+            // gets clipped. Help > Search syntax remains the full reference.
+            PlaceholderText = "Search sent requests...",
         };
         _searchBox.TextChanged += (_, _) => RunSearch();
         _searchBox.KeyDown += OnSearchKeyDown;
+        _historyToolTip.SetToolTip(_searchBox, """
+            Filter your sent requests. Terms are ANDed.
+
+            method:POST   host:api   status:4xx
+            body:"user_id"   header:Authorization
+            size:>100kb   dur:>500
+            is:json   -is:image   /v[0-9]+\/orders/
+
+            Full grammar: Help > Search syntax
+            """.ReplaceLineEndings("\r\n"));
 
         _resultCount = new Label
         {
