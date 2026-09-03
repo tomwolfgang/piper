@@ -56,12 +56,19 @@ public sealed class FilterPanel : UserControl
         _useFilters = new CheckBox
         {
             Dock = DockStyle.Fill,
-            Text = "Use Filters when run",
+            Text = "Use Filters",
             AutoSize = false,
             Padding = new Padding(6, 10, 0, 0),
             Font = new Font(Palette.UiFont, FontStyle.Bold),
         };
-        _useFilters.CheckedChanged += (_, _) => OnCriteriaChanged();
+        // The global switch is live, not staged. Leaving a filterset applied after the user
+        // unchecks it keeps SessionStore discarding non-matching completed sessions, which is
+        // unrecoverable. The criteria below stay staged until an Actions command runs them.
+        // FilterChanged already persists the settings, so this must not also raise SettingsChanged.
+        _useFilters.CheckedChanged += (_, _) =>
+        {
+            if (!_applyingSettings) ApplyFilterset();
+        };
 
         // ---------------------------------------------------------------- Hosts
 
@@ -264,16 +271,22 @@ public sealed class FilterPanel : UserControl
 
     private void ShowHelp() => MessageBox.Show(this,
         "Add one or more host patterns, then use their checkboxes to choose which ones apply. "
-        + "Changes stay staged until Actions > Run Filterset now. Actions > Show all sessions "
-        + "removes the applied filter without discarding the filterset.\r\n\r\n"
+        + "Host and Response Status Code edits stay staged until Actions > Run Filterset now. "
+        + "The Use Filters checkbox takes effect immediately: unchecking it stops filtering at "
+        + "once, and Actions > Show all sessions does the same without discarding the "
+        + "filterset.\r\n\r\n"
+        + "Filtered-out sessions are dropped rather than hidden, so traffic captured while a "
+        + "filter is applied cannot be recovered by turning the filter off afterwards.\r\n\r\n"
         + "Filters compose into the same query grammar as the session grid's own filter box, "
         + "so running a filterset overwrites anything typed there by hand.\r\n\r\n"
         + "Only Hosts and Response Status Code filters are implemented.",
         "Filters", MessageBoxButtons.OK, MessageBoxIcon.Information);
 
-    /// <summary>Applies the currently staged filterset; this is intentionally Actions-only.</summary>
-    private void ApplyFilterset() =>
-        FilterChanged?.Invoke(this, _useFilters.Checked ? ComposeQuery() : string.Empty);
+    /// <summary>
+    /// Applies the staged filterset, or clears the applied query when Use Filters is off.
+    /// Reached from the Actions commands, from the Use Filters switch, and once at startup.
+    /// </summary>
+    private void ApplyFilterset() => FilterChanged?.Invoke(this, FilterQuery.Compose(Settings));
 
     /// <summary>Applies restored settings at startup without changing their enabled state.</summary>
     public void ApplyCurrentFilterset() => ApplyFilterset();
@@ -351,24 +364,4 @@ public sealed class FilterPanel : UserControl
             };
         }
     }
-
-    private string ComposeQuery()
-    {
-        var terms = new List<string>();
-
-        var hostsTerm = ComposeHostsTerm();
-        if (hostsTerm.Length > 0) terms.Add(hostsTerm);
-
-        if (_hideSuccess.Checked) terms.Add("-status:200..299");
-        if (_hideNonSuccess.Checked) terms.Add("status:200..299");
-        if (_hideRedirects.Checked) terms.Add("-status:300..303 -status:307");
-        if (_hideAuthDemands.Checked) terms.Add("-status:401 -status:407");
-        if (_hideNotModified.Checked) terms.Add("-status:304");
-
-        return string.Join(' ', terms);
-    }
-
-    private string ComposeHostsTerm() => HostFilterTerm.Compose(
-        string.Join(';', HostEntries().Where(host => host.Enabled).Select(host => host.Pattern)),
-        hide: _hostsMode.SelectedIndex == 1);
 }
