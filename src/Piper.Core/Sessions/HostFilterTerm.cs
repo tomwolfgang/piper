@@ -41,5 +41,5 @@ public static class HostFilterTerm
     /// would never match a real hostname and silently filter every session out. Stripping every
     /// leading '*' regardless of whether a dot follows closes that trap.
     /// </summary>
-    private static string StripWildcard(string pattern) => pattern.TrimStart('*', '.');
+    public static string StripWildcard(string pattern) => pattern.TrimStart('*', '.');
 }

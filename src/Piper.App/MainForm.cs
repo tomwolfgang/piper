@@ -155,6 +155,7 @@ public sealed class MainForm : Form
             _rightTabs.SetTabChecked(filtersPage, !admissionQuery.IsEmpty);
         };
         _filterPanel.SettingsChanged += (_, _) => FilterSettingsStore.Save(_filterPanel.Settings);
+        _sessionList.HideHostRequested += (_, host) => HideHost(host);
 
         // Restore the editable settings and then apply their saved enabled state so a restart
         // returns to the same filtered capture view.
@@ -1130,6 +1131,49 @@ public sealed class MainForm : Form
             e.Handled = true;
         }
     }
+
+    /// <summary>
+    /// Routes the capture list's "Hide this host" into the Filters tab's persisted Hosts list, so
+    /// the choice is still there after a restart. Following Fiddler Classic, this records the host
+    /// but never ticks "Use Filters" for the user: running a filterset stays their explicit action,
+    /// which is why the grid also gets an immediate transient term while the filterset is inactive.
+    /// </summary>
+    private void HideHost(string host)
+    {
+        var settings = _filterPanel.Settings;
+        var wasShowOnly = settings.HostsMode != 1;
+        if (!settings.HideHost(host))
+        {
+            AppendTransientHideTerm(host);
+            AppendLog($"Hide this host: the Filters tab is showing only specific hosts, so {host} "
+                + "was hidden in the capture list only and will not be remembered.");
+            return;
+        }
+
+        _filterPanel.ApplySettings(settings);
+        if (wasShowOnly && settings.HostsMode == 1)
+            AppendLog("Hide this host: the Filters tab had no hosts ticked, so its Hosts list "
+                + "switched to \"Hide the following Hosts\".");
+
+        if (settings.UseFilters)
+        {
+            // The filterset is live, so recomposing it is what actually hides the host.
+            _filterPanel.ApplyCurrentFilterset();
+            return;
+        }
+
+        // Nothing is applied yet; keep the click's immediate effect without silently enabling the
+        // rest of the staged filterset. ApplyCurrentFilterset would clear the grid's filter box.
+        AppendTransientHideTerm(host);
+        AppendLog($"Hide this host: {host} was added to the Filters tab's Hosts list. "
+            + "Turn on \"Use Filters\" there to hide it after a restart.");
+    }
+
+    /// <summary>Hides a host in the capture list only, for the rest of this session.</summary>
+    private void AppendTransientHideTerm(string host) =>
+        _sessionList.FilterText = string.IsNullOrWhiteSpace(_sessionList.FilterText)
+            ? $"-host:{host}"
+            : $"{_sessionList.FilterText} -host:{host}";
 
     private void AppendLog(string message)
     {

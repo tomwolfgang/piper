@@ -50,6 +50,12 @@ public sealed class SessionListView : UserControl
     /// <summary>Raised when the user double-clicks a row, asking to look at it in the inspector.</summary>
     public event EventHandler<Session>? SessionActivated;
 
+    /// <summary>
+    /// Raised with a host the user asked to stop seeing. The grid deliberately does not know how
+    /// hiding is stored, so the form routes this into the Filters tab's persisted Hosts list.
+    /// </summary>
+    public event EventHandler<string>? HideHostRequested;
+
     public SessionListView(SessionStore store)
     {
         _store = store;
@@ -491,10 +497,7 @@ public sealed class SessionListView : UserControl
         });
         menu.Items.Add("&Hide this host", null, (_, _) =>
         {
-            if (SelectedSession is { } session)
-                FilterText = string.IsNullOrWhiteSpace(FilterText)
-                    ? $"-host:{session.Host}"
-                    : $"{FilterText} -host:{session.Host}";
+            if (SelectedSession is { Host.Length: > 0 } session) HideHostRequested?.Invoke(this, session.Host);
         });
         menu.Items.Add(new ToolStripSeparator());
         var textWizard = new ToolStripMenuItem("Send URL to Text&Wizard", null,

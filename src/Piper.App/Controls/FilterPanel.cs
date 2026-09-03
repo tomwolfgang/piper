@@ -266,6 +266,9 @@ public sealed class FilterPanel : UserControl
         "Add one or more host patterns, then use their checkboxes to choose which ones apply. "
         + "Changes stay staged until Actions > Run Filterset now. Actions > Show all sessions "
         + "removes the applied filter without discarding the filterset.\r\n\r\n"
+        + "Right-clicking a session and choosing \"Hide this host\" adds it here, so the choice "
+        + "is remembered. Like the rest of the filterset it only applies once \"Use Filters\" is "
+        + "on; untick or remove the entry to undo it.\r\n\r\n"
         + "Filters compose into the same query grammar as the session grid's own filter box, "
         + "so running a filterset overwrites anything typed there by hand.\r\n\r\n"
         + "Only Hosts and Response Status Code filters are implemented.",
