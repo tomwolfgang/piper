@@ -193,6 +193,9 @@ internal static class HostFilterHideTests
                          "evil.test\r\napi.example.com",
                          "evil.test\napi.example.com",
                          new string('a', 254),
+                         // Letters outside ASCII are allowed, so the length cap has to count bytes
+                         // rather than characters or a header could still overrun it three to one.
+                         new string('漢', 100),
                      })
             {
                 var target = new FilterSettings { HostsMode = 1 };
@@ -211,7 +214,11 @@ internal static class HostFilterHideTests
                 "and leaves a host the user did not pick visible");
 
             // Real hosts must still be accepted, including an IPv6 literal and a punycode IDN.
-            foreach (var legitimate in new[] { "localhost", "192.168.0.1", "[::1]", "xn--bcher-kva.example", new string('a', 253) })
+            foreach (var legitimate in new[]
+                     {
+                         "localhost", "192.168.0.1", "[::1]", "xn--bcher-kva.example",
+                         "bücher.example", new string('a', 253),
+                     })
             {
                 var target = new FilterSettings { HostsMode = 1 };
                 runner.IsTrue(target.HideHost(legitimate), $"accepts {Describe(legitimate)}");

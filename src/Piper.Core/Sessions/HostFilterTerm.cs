@@ -1,4 +1,5 @@
 using System.Diagnostics.CodeAnalysis;
+using System.Text;
 
 namespace Piper.Core.Sessions;
 
@@ -36,11 +37,13 @@ public static class HostFilterTerm
     /// anything that is not plain hostname material must never be composed into a query or
     /// persisted as a pattern: whitespace ends a value and injects a whole extra term, '|' adds
     /// alternatives, a leading '/' or '"' switches the value into regex or quoted mode, and
-    /// ';', ',' and newlines split one pattern into several. The length cap keeps an oversized
-    /// header out of the settings file; 253 is the longest legal DNS name.
+    /// ';', ',' and newlines split one pattern into several. Letters and digits are accepted in any
+    /// script so hiding an internationalised host still works, and the length is capped in bytes --
+    /// 253, the longest legal DNS name -- to keep an oversized header out of the settings file.
     /// </summary>
     public static bool IsFilterableHost([NotNullWhen(true)] string? host) =>
-        host is { Length: > 0 and <= 253 }
+        host is { Length: > 0 }
+        && Encoding.UTF8.GetByteCount(host) <= 253
         && host.All(c => char.IsLetterOrDigit(c) || c is '-' or '.' or '_' or ':' or '[' or ']' or '%');
 
     /// <summary>Splits user-entered host patterns without changing their display text.</summary>
