@@ -1150,11 +1150,16 @@ public sealed class MainForm : Form
             return;
         }
 
+        // Hide it here and now, but leave the filterset staged rather than running it: recomposing
+        // would overwrite anything typed in the grid's own filter box, and would start dropping
+        // this host at admission (SessionStore.CompletedSessionFilter), which unticking the entry
+        // later cannot undo. As in Fiddler Classic, running a filterset stays an explicit action.
+        AppendTransientHideTerm(host);
+
         var settings = _filterPanel.Settings;
         var wasShowOnly = settings.HostsMode != 1;
         if (!settings.HideHost(host))
         {
-            AppendTransientHideTerm(host);
             AppendLog($"Hide this host: the Filters tab is showing only specific hosts, so {host} "
                 + "was hidden in the capture list only and will not be remembered.");
             return;
@@ -1167,18 +1172,8 @@ public sealed class MainForm : Form
             AppendLog("Hide this host: the Filters tab's Hosts list switched to "
                 + "\"Hide the following Hosts\".");
 
-        if (settings.UseFilters)
-        {
-            // The filterset is live, so recomposing it is what actually hides the host.
-            _filterPanel.ApplyCurrentFilterset();
-            return;
-        }
-
-        // Nothing is applied yet; keep the click's immediate effect without silently enabling the
-        // rest of the staged filterset. ApplyCurrentFilterset would clear the grid's filter box.
-        AppendTransientHideTerm(host);
-        AppendLog($"Hide this host: {host} was added to the Filters tab's Hosts list. "
-            + "Turn on \"Use Filters\" there to hide it after a restart.");
+        AppendLog($"Hide this host: the Filters tab's Hosts list now hides {host}. It stays hidden "
+            + "here for this session; \"Use Filters\" there applies the list after a restart.");
     }
 
     /// <summary>Hides a host in the capture list only, for the rest of this session.</summary>

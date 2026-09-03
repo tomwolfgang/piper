@@ -497,7 +497,7 @@ public sealed class SessionListView : UserControl
         });
         menu.Items.Add("&Hide this host", null, (_, _) =>
         {
-            if (SelectedSession is { Host.Length: > 0 } session) HideHostRequested?.Invoke(this, session.Host);
+            if (SelectedSession is { } session) HideHostRequested?.Invoke(this, session.Host);
         });
         menu.Items.Add(new ToolStripSeparator());
         var textWizard = new ToolStripMenuItem("Send URL to Text&Wizard", null,
