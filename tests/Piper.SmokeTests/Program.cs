@@ -533,6 +533,7 @@ await WebFormParserTests.RunAsync(runner);
 await TextTransformsTests.RunAsync(runner);
 await TextTransformDetectorTests.RunAsync(runner);
 await FilterSettingsStoreTests.RunAsync(runner);
+await HostFilterHideTests.RunAsync(runner);
 await StatusBarSettingsStoreTests.RunAsync(runner);
 await ProxyConfigurationSettingsStoreTests.RunAsync(runner);
 await ConnectionSettingsBlobTests.RunAsync(runner);

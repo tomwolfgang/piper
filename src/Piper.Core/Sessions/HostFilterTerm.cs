@@ -1,3 +1,6 @@
+using System.Diagnostics.CodeAnalysis;
+using System.Text;
+
 namespace Piper.Core.Sessions;
 
 /// <summary>
@@ -27,6 +30,22 @@ public static class HostFilterTerm
         return hide ? $"-host:{joined}" : $"host:{joined}";
     }
 
+    /// <summary>
+    /// Whether a host observed on the wire may be turned into a filter pattern. A Host header is
+    /// attacker-controlled and reaches <see cref="Session.Host"/> verbatim whenever the request
+    /// line has no parseable URL (<see cref="Http.HttpParser.ResolveUrl"/> returns null), so
+    /// anything that is not plain hostname material must never be composed into a query or
+    /// persisted as a pattern: whitespace ends a value and injects a whole extra term, '|' adds
+    /// alternatives, a leading '/' or '"' switches the value into regex or quoted mode, and
+    /// ';', ',' and newlines split one pattern into several. Letters and digits are accepted in any
+    /// script so hiding an internationalised host still works, and the length is capped in bytes --
+    /// 253, the longest legal DNS name -- to keep an oversized header out of the settings file.
+    /// </summary>
+    public static bool IsFilterableHost([NotNullWhen(true)] string? host) =>
+        host is { Length: > 0 }
+        && Encoding.UTF8.GetByteCount(host) <= 253
+        && host.All(c => char.IsLetterOrDigit(c) || c is '-' or '.' or '_' or ':' or '[' or ']' or '%');
+
     /// <summary>Splits user-entered host patterns without changing their display text.</summary>
     public static IReadOnlyList<string> Split(string? hostsText) =>
         string.IsNullOrWhiteSpace(hostsText)
@@ -41,5 +60,5 @@ public static class HostFilterTerm
     /// would never match a real hostname and silently filter every session out. Stripping every
     /// leading '*' regardless of whether a dot follows closes that trap.
     /// </summary>
-    private static string StripWildcard(string pattern) => pattern.TrimStart('*', '.');
+    public static string StripWildcard(string pattern) => pattern.TrimStart('*', '.');
 }

@@ -155,6 +155,7 @@ public sealed class MainForm : Form
             _rightTabs.SetTabChecked(filtersPage, !admissionQuery.IsEmpty);
         };
         _filterPanel.SettingsChanged += (_, _) => FilterSettingsStore.Save(_filterPanel.Settings);
+        _sessionList.HideHostRequested += (_, host) => HideHost(host);
 
         // Restore the editable settings and then apply their saved enabled state so a restart
         // returns to the same filtered capture view.
@@ -1129,6 +1130,64 @@ public sealed class MainForm : Form
             _store.Clear();
             e.Handled = true;
         }
+    }
+
+    /// <summary>
+    /// Routes the capture list's "Hide this host" into the Filters tab's persisted Hosts list, so
+    /// the choice is still there after a restart. Following Fiddler Classic, this records the host
+    /// but never ticks "Use Filters" for the user: running a filterset stays their explicit action,
+    /// which is why the grid also gets an immediate transient term while the filterset is inactive.
+    /// </summary>
+    private void HideHost(string host)
+    {
+        // Session.Host is the raw Host header whenever the request line had no parseable URL, so it
+        // is attacker-controlled. Composing that into a query -- transiently or persisted -- would
+        // let it inject terms of its own, so refuse it before it reaches either.
+        if (!HostFilterTerm.IsFilterableHost(host))
+        {
+            AppendLog("Hide this host: that session's host is not usable as a filter pattern, "
+                + "so nothing was hidden.");
+            return;
+        }
+
+        // Hide it here and now, but leave the filterset staged rather than running it: recomposing
+        // would overwrite anything typed in the grid's own filter box, and would start dropping
+        // this host at admission (SessionStore.CompletedSessionFilter), which unticking the entry
+        // later cannot undo. As in Fiddler Classic, running a filterset stays an explicit action.
+        AppendTransientHideTerm(host);
+
+        var settings = _filterPanel.Settings;
+        var wasShowOnly = settings.HostsMode != 1;
+        if (!settings.HideHost(host))
+        {
+            AppendLog($"Hide this host: the Filters tab is showing only specific hosts, so {host} "
+                + "was hidden in the capture list only and will not be remembered.");
+            return;
+        }
+
+        _filterPanel.ApplySettings(settings);
+        // Reached both when the list had nothing ticked to begin with and when unticking the only
+        // entry that showed this host left nothing ticked, so the message states the effect only.
+        if (wasShowOnly && settings.HostsMode == 1)
+            AppendLog("Hide this host: the Filters tab's Hosts list switched to "
+                + "\"Hide the following Hosts\".");
+
+        AppendLog($"Hide this host: the Filters tab's Hosts list now hides {host}. It stays hidden "
+            + "here for this session; \"Use Filters\" there applies the list after a restart.");
+    }
+
+    /// <summary>Hides a host in the capture list only, for the rest of this session.</summary>
+    private void AppendTransientHideTerm(string host)
+    {
+        var term = $"-host:{host}";
+        var current = _sessionList.FilterText;
+        // Hiding an already hidden host is a no-op in the persisted list, so this path can be
+        // reached repeatedly; appending each time would grow the filter box without changing it.
+        // Compare whole terms: "-host:a.example.com" is not already covered by a longer term that
+        // merely starts with it, such as "-host:a.example.com.example.net".
+        if (current.Split(' ', StringSplitOptions.RemoveEmptyEntries)
+            .Any(existing => string.Equals(existing, term, StringComparison.OrdinalIgnoreCase))) return;
+        _sessionList.FilterText = string.IsNullOrWhiteSpace(current) ? term : $"{current} {term}";
     }
 
     private void AppendLog(string message)
