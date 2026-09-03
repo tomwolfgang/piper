@@ -111,6 +111,26 @@ public sealed class RequestExecutor(ProxyOptions options, SessionStore store)
     }
 
     /// <summary>
+    /// Renders an editable raw block from the composer's separate method/URL/header/body fields.
+    /// The inverse of <see cref="TryParseRaw"/>, which must round-trip this text unchanged.
+    /// </summary>
+    /// <remarks>
+    /// CRLF, because the text lands in a multiline WinForms text box. An empty header block still
+    /// has to produce exactly one blank line: appending a header terminator to nothing would push
+    /// the blank line one CRLF early and leak a newline into the parsed body.
+    /// </remarks>
+    public static string BuildRawText(string method, string target, string headerBlock, string body)
+    {
+        var sb = new StringBuilder();
+        sb.Append(method.Trim().ToUpperInvariant()).Append(' ')
+          .Append(target.Trim()).Append(" HTTP/1.1\r\n");
+        var headers = headerBlock.TrimEnd();
+        if (headers.Length > 0) sb.Append(headers).Append("\r\n");
+        sb.Append("\r\n").Append(body);
+        return sb.ToString();
+    }
+
+    /// <summary>
     /// Parses a raw "METHOD url HTTP/1.1" + headers + blank line + body block, so a request
     /// can be pasted in whole from logs, curl output or another tool.
     /// </summary>

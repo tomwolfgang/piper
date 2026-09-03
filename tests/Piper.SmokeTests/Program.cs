@@ -540,6 +540,7 @@ await AutoResponderMatchTests.RunAsync(runner);
 await AutoResponderActionTests.RunAsync(runner);
 await AutoResponderSettingsStoreTests.RunAsync(runner);
 await HttpWireFormatTests.RunAsync(runner);
+await ComposerRawRoundTripTests.RunAsync(runner);
 await JsonEditingTests.RunAsync(runner);
 await HostRemappingTests.RunAsync(runner);
 await SessionStoreAdmissionTests.RunAsync(runner);
