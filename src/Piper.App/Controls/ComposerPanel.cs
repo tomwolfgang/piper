@@ -24,7 +24,6 @@ public sealed class ComposerPanel : UserControl
     private readonly TextBox _searchBox;
     private readonly ListView _results;
     private readonly Label _resultCount;
-    private readonly Label _searchHint;
     private readonly SolidBrush _resultSurfaceBrush = new(Palette.Surface);
     private readonly SolidBrush _resultSelectionBrush = new(Palette.Selection);
     private readonly SolidBrush _resultHeaderBrush = new(Palette.SurfaceAlt);
@@ -61,20 +60,13 @@ public sealed class ComposerPanel : UserControl
         {
             Dock = DockStyle.Top,
             Font = Palette.Mono,
-            PlaceholderText = "Search requests you've sent...",
+            // The examples belong in the placeholder, not a label under the box: a label in dim
+            // text flush below the box reads as a query already typed in. Help > Search syntax
+            // documents the rest of the grammar. Kept in step with SessionListView's filter box.
+            PlaceholderText = "Search sent requests  e.g.  method:POST host:api  status:4xx  -is:image",
         };
         _searchBox.TextChanged += (_, _) => RunSearch();
         _searchBox.KeyDown += OnSearchKeyDown;
-
-        _searchHint = new Label
-        {
-            Dock = DockStyle.Top,
-            Height = 32,
-            ForeColor = Palette.TextDim,
-            Font = new Font("Segoe UI", 7.5f),
-            Text = "method:POST  host:api  status:4xx  body:\"user_id\"  header:Authorization\r\n"
-                 + "size:>100kb  dur:>500  is:json  -is:image  /v[0-9]+\\/orders/",
-        };
 
         _resultCount = new Label
         {
@@ -134,7 +126,6 @@ public sealed class ComposerPanel : UserControl
         var searchPane = new Panel { Dock = DockStyle.Fill, Padding = new Padding(4) };
         searchPane.Controls.Add(_results);
         searchPane.Controls.Add(_resultCount);
-        searchPane.Controls.Add(_searchHint);
         searchPane.Controls.Add(_searchBox);
 
         var searchHeader = new Label
