@@ -33,8 +33,11 @@ public sealed class FilterSettings
     /// </summary>
     public bool HideHost(string? host)
     {
+        // The host comes from a captured session, so it is attacker-controlled: refuse anything
+        // that is not plain hostname material rather than persisting a pattern that could inject
+        // extra terms into every future filter run.
         var pattern = host?.Trim();
-        if (string.IsNullOrEmpty(pattern)) return false;
+        if (!HostFilterTerm.IsFilterableHost(pattern)) return false;
 
         // A hand-edited or truncated file can carry a null list, null entries and blank patterns.
         // Work on a filtered copy so the "cannot express this" path leaves the object untouched.

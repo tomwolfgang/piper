@@ -1,3 +1,5 @@
+using System.Diagnostics.CodeAnalysis;
+
 namespace Piper.Core.Sessions;
 
 /// <summary>
@@ -26,6 +28,20 @@ public static class HostFilterTerm
         var joined = string.Join('|', patterns);
         return hide ? $"-host:{joined}" : $"host:{joined}";
     }
+
+    /// <summary>
+    /// Whether a host observed on the wire may be turned into a filter pattern. A Host header is
+    /// attacker-controlled and reaches <see cref="Session.Host"/> verbatim whenever the request
+    /// line has no parseable URL (<see cref="Http.HttpParser.ResolveUrl"/> returns null), so
+    /// anything that is not plain hostname material must never be composed into a query or
+    /// persisted as a pattern: whitespace ends a value and injects a whole extra term, '|' adds
+    /// alternatives, a leading '/' or '"' switches the value into regex or quoted mode, and
+    /// ';', ',' and newlines split one pattern into several. The length cap keeps an oversized
+    /// header out of the settings file; 253 is the longest legal DNS name.
+    /// </summary>
+    public static bool IsFilterableHost([NotNullWhen(true)] string? host) =>
+        host is { Length: > 0 and <= 253 }
+        && host.All(c => char.IsLetterOrDigit(c) || c is '-' or '.' or '_' or ':' or '[' or ']' or '%');
 
     /// <summary>Splits user-entered host patterns without changing their display text.</summary>
     public static IReadOnlyList<string> Split(string? hostsText) =>

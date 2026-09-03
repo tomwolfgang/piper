@@ -176,6 +176,47 @@ internal static class HostFilterHideTests
             runner.AreEqual(1, junk.Hosts.Count, "unusable entries are dropped, not composed");
             runner.AreEqual("api.example.com", junk.Hosts[0].Pattern, "only the real host survives");
 
+            // A Host header reaches Session.Host verbatim when the request line has no parseable
+            // URL, so the host handed to HideHost is attacker-controlled. None of the SearchQuery
+            // grammar may survive into a persisted pattern: '|' would add alternatives (hiding a
+            // host the user never chose), whitespace would end the value and inject a whole extra
+            // term, a leading '/' or '"' would switch it into regex or quoted mode, and ';', ','
+            // and newlines would split one pattern into several.
+            foreach (var hostile in new[]
+                     {
+                         "evil.test|api.example.com",
+                         "evil.test status:200",
+                         "/^.*$/",
+                         "\"evil.test\"",
+                         "evil.test;api.example.com",
+                         "evil.test,api.example.com",
+                         "evil.test\r\napi.example.com",
+                         "evil.test\napi.example.com",
+                         new string('a', 254),
+                     })
+            {
+                var target = new FilterSettings { HostsMode = 1 };
+                runner.IsTrue(!target.HideHost(hostile), $"refuses a hostile host ({Describe(hostile)})");
+                runner.AreEqual(0, target.Hosts.Count, $"stores nothing for {Describe(hostile)}");
+            }
+
+            // A host made only of hostname characters is allowed through even when it looks like
+            // grammar, because Compose always puts it in value position: "-host:-host:x" reads as
+            // one negated host term whose value is the literal "-host:x", which matches no real
+            // host. Allowing it keeps ':' available for IPv6 literals.
+            var inert = new FilterSettings { HostsMode = 1 };
+            runner.IsTrue(inert.HideHost("-host:api.example.com"), "a grammar-shaped but inert host is allowed");
+            runner.IsTrue(SearchQuery.Parse(HostFilterTerm.Compose(inert.HostsText, hide: true))
+                .Matches(SessionFor("api.example.com")),
+                "and leaves a host the user did not pick visible");
+
+            // Real hosts must still be accepted, including an IPv6 literal and a punycode IDN.
+            foreach (var legitimate in new[] { "localhost", "192.168.0.1", "[::1]", "xn--bcher-kva.example", new string('a', 253) })
+            {
+                var target = new FilterSettings { HostsMode = 1 };
+                runner.IsTrue(target.HideHost(legitimate), $"accepts {Describe(legitimate)}");
+            }
+
             // A lone "*" strips to nothing, so it filters nothing and must not be treated as a
             // pattern that already covers every host.
             var wildcardOnly = new FilterSettings
@@ -224,6 +265,13 @@ internal static class HostFilterHideTests
 
             return Task.CompletedTask;
         });
+    }
+
+    /// <summary>Keeps a hostile host readable, and on one line, in the assertion labels.</summary>
+    private static string Describe(string host)
+    {
+        var visible = host.Replace("\r", "\\r").Replace("\n", "\\n");
+        return visible.Length <= 40 ? $"\"{visible}\"" : $"\"{visible[..40]}...\" ({visible.Length} chars)";
     }
 
     private static Session SessionFor(string host) => new()

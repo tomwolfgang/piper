@@ -1140,6 +1140,16 @@ public sealed class MainForm : Form
     /// </summary>
     private void HideHost(string host)
     {
+        // Session.Host is the raw Host header whenever the request line had no parseable URL, so it
+        // is attacker-controlled. Composing that into a query -- transiently or persisted -- would
+        // let it inject terms of its own, so refuse it before it reaches either.
+        if (!HostFilterTerm.IsFilterableHost(host))
+        {
+            AppendLog("Hide this host: that session's host is not usable as a filter pattern, "
+                + "so nothing was hidden.");
+            return;
+        }
+
         var settings = _filterPanel.Settings;
         var wasShowOnly = settings.HostsMode != 1;
         if (!settings.HideHost(host))
