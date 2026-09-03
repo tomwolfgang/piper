@@ -24,7 +24,6 @@ public sealed class ComposerPanel : UserControl
     private readonly TextBox _searchBox;
     private readonly ListView _results;
     private readonly Label _resultCount;
-    private readonly Label _searchHint;
     private readonly SolidBrush _resultSurfaceBrush = new(Palette.Surface);
     private readonly SolidBrush _resultSelectionBrush = new(Palette.Selection);
     private readonly SolidBrush _resultHeaderBrush = new(Palette.SurfaceAlt);
@@ -39,7 +38,9 @@ public sealed class ComposerPanel : UserControl
     private readonly TabControl _editorTabs;
     private readonly Button _execute;
     private readonly Label _status;
-    private readonly ToolTip _historyToolTip = new();
+    // Also carries the search box's grammar examples, which need longer than the 5s default to
+    // read. Truncated history cells share the instance and simply stay up as long as the hover.
+    private readonly ToolTip _historyToolTip = new() { AutoPopDelay = 30000 };
     private string? _historyToolTipText;
     // Persisted Composer history belongs in this panel, not in SessionStore. The latter drives
     // the capture list, so restoring history there made an old composed request appear as the
@@ -61,20 +62,24 @@ public sealed class ComposerPanel : UserControl
         {
             Dock = DockStyle.Top,
             Font = Palette.Mono,
-            PlaceholderText = "Search requests you've sent...",
+            // Examples live in the tooltip below, not in a label under the box and not in this
+            // placeholder: a dim label flush under the box reads as a query already typed in, and
+            // this pane is narrow enough that a placeholder long enough to teach the grammar just
+            // gets clipped. Help > Search syntax remains the full reference.
+            PlaceholderText = "Search sent requests...",
         };
         _searchBox.TextChanged += (_, _) => RunSearch();
         _searchBox.KeyDown += OnSearchKeyDown;
+        _historyToolTip.SetToolTip(_searchBox, """
+            Filter your sent requests. Terms are ANDed.
 
-        _searchHint = new Label
-        {
-            Dock = DockStyle.Top,
-            Height = 32,
-            ForeColor = Palette.TextDim,
-            Font = new Font("Segoe UI", 7.5f),
-            Text = "method:POST  host:api  status:4xx  body:\"user_id\"  header:Authorization\r\n"
-                 + "size:>100kb  dur:>500  is:json  -is:image  /v[0-9]+\\/orders/",
-        };
+            method:POST   host:api   status:4xx
+            body:"user_id"   header:Authorization
+            size:>100kb   dur:>500
+            is:json   -is:image   /v[0-9]+\/orders/
+
+            Full grammar: Help > Search syntax
+            """.ReplaceLineEndings("\r\n"));
 
         _resultCount = new Label
         {
@@ -134,7 +139,6 @@ public sealed class ComposerPanel : UserControl
         var searchPane = new Panel { Dock = DockStyle.Fill, Padding = new Padding(4) };
         searchPane.Controls.Add(_results);
         searchPane.Controls.Add(_resultCount);
-        searchPane.Controls.Add(_searchHint);
         searchPane.Controls.Add(_searchBox);
 
         var searchHeader = new Label

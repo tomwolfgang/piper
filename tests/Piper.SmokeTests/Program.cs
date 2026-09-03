@@ -529,6 +529,7 @@ origin.Stop();
 // --------------------------------------------------------------------- HPACK
 
 await HostFilterTests.RunAsync(runner);
+await SearchQueryTests.RunAsync(runner);
 await WebFormParserTests.RunAsync(runner);
 await TextTransformsTests.RunAsync(runner);
 await TextTransformDetectorTests.RunAsync(runner);
