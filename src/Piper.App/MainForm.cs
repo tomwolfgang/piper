@@ -1161,9 +1161,11 @@ public sealed class MainForm : Form
         }
 
         _filterPanel.ApplySettings(settings);
+        // Reached both when the list had nothing ticked to begin with and when unticking the only
+        // entry that showed this host left nothing ticked, so the message states the effect only.
         if (wasShowOnly && settings.HostsMode == 1)
-            AppendLog("Hide this host: the Filters tab had no hosts ticked, so its Hosts list "
-                + "switched to \"Hide the following Hosts\".");
+            AppendLog("Hide this host: the Filters tab's Hosts list switched to "
+                + "\"Hide the following Hosts\".");
 
         if (settings.UseFilters)
         {
@@ -1180,10 +1182,15 @@ public sealed class MainForm : Form
     }
 
     /// <summary>Hides a host in the capture list only, for the rest of this session.</summary>
-    private void AppendTransientHideTerm(string host) =>
-        _sessionList.FilterText = string.IsNullOrWhiteSpace(_sessionList.FilterText)
-            ? $"-host:{host}"
-            : $"{_sessionList.FilterText} -host:{host}";
+    private void AppendTransientHideTerm(string host)
+    {
+        var term = $"-host:{host}";
+        var current = _sessionList.FilterText;
+        // Hiding an already hidden host is a no-op in the persisted list, so this path can be
+        // reached repeatedly; appending each time would grow the filter box without changing it.
+        if (current.Contains(term, StringComparison.OrdinalIgnoreCase)) return;
+        _sessionList.FilterText = string.IsNullOrWhiteSpace(current) ? term : $"{current} {term}";
+    }
 
     private void AppendLog(string message)
     {
