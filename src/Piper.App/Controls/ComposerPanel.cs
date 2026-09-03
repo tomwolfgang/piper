@@ -37,6 +37,8 @@ public sealed class ComposerPanel : UserControl
     private readonly TextBox _body;
     private readonly TextBox _rawEditor;
     private readonly TabControl _editorTabs;
+    /// <summary>Index of the Raw page in <see cref="_editorTabs"/>; see where the pages are added.</summary>
+    private const int RawTabIndex = 1;
     private readonly Button _execute;
     private readonly Label _status;
     private readonly ToolTip _historyToolTip = new();
@@ -195,7 +197,7 @@ public sealed class ComposerPanel : UserControl
 
         _editorTabs = new DarkTabControl { Dock = DockStyle.Fill, Font = Palette.UiFont };
         _editorTabs.TabPages.Add(NewPage("Headers", _headers));
-        _editorTabs.TabPages.Add(NewPage("Raw", _rawEditor));
+        _editorTabs.TabPages.Add(NewPage("Raw", _rawEditor)); // == RawTabIndex
         _editorTabs.Selecting += OnEditorTabSelecting;
         _editorTabs.Deselecting += OnEditorTabDeselecting;
 
@@ -483,20 +485,22 @@ public sealed class ComposerPanel : UserControl
 
         _rawEditor.Text = BuildRawText();
         _status.Text = $"Loaded #{session.Id} - edit and press Send (or Enter in the URL box).";
-        _editorTabs.SelectedIndex = 0;
+        // Raw shows the request line, headers and body at once, which is what you want when
+        // reviewing something already sent -- and it is what every caller here loads a session for.
+        _editorTabs.SelectedIndex = RawTabIndex;
         _url.Focus();
     }
 
     /// <summary>Keeps the Raw tab in sync when it is opened from the structured tabs.</summary>
     private void OnEditorTabSelecting(object? sender, TabControlCancelEventArgs e)
     {
-        if (e.TabPageIndex == 1) _rawEditor.Text = BuildRawText();
+        if (e.TabPageIndex == RawTabIndex) _rawEditor.Text = BuildRawText();
     }
 
     /// <summary>Parses the Raw tab back into the structured fields when leaving it.</summary>
     private void OnEditorTabDeselecting(object? sender, TabControlCancelEventArgs e)
     {
-        if (e.TabPageIndex != 1) return;
+        if (e.TabPageIndex != RawTabIndex) return;
         if (!RequestExecutor.TryParseRaw(_rawEditor.Text, out var parsed, out _)) return;
 
         _method.Text = parsed.Method;
@@ -509,15 +513,8 @@ public sealed class ComposerPanel : UserControl
         _body.Text = parsed.Body.Length > 0 ? Encoding.UTF8.GetString(parsed.Body) : string.Empty;
     }
 
-    private string BuildRawText()
-    {
-        var sb = new StringBuilder();
-        sb.Append(_method.Text.Trim().ToUpperInvariant()).Append(' ')
-          .Append(_url.Text.Trim()).Append(" HTTP/1.1\r\n");
-        sb.Append(_headers.Text.TrimEnd()).Append("\r\n\r\n");
-        sb.Append(_body.Text);
-        return sb.ToString();
-    }
+    private string BuildRawText() =>
+        RequestExecutor.BuildRawText(_method.Text, _url.Text, _headers.Text, _body.Text);
 
     private bool TryBuildRequest(out HttpRequestData request, out string error)
     {
