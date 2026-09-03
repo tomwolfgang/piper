@@ -1044,7 +1044,7 @@ public sealed class MainForm : Form
     {
         const string help = """
             The same query grammar works in the session filter and the Composer search.
-            Terms are combined with AND.
+            Terms are combined with AND. Ctrl+F focuses the session filter box.
 
               checkout               substring across URL, headers and text bodies
               "exact phrase"         quoted literal
@@ -1079,6 +1079,8 @@ public sealed class MainForm : Form
               is:slow  is:cached  is:body
 
               -host:cdn.example.com  negate any term with - or !
+
+            An unrecognised field is searched literally, so a pasted URL works as typed.
 
             Example:
               method:POST host:api status:>=400 -is:image body:"order"

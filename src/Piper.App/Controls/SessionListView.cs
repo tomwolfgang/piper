@@ -443,9 +443,25 @@ public sealed class SessionListView : UserControl
         _list.DoDragDrop(session, DragDropEffects.Copy);
     }
 
+    /// <summary>Puts the caret in the filter box with the query selected, so typing replaces it.</summary>
+    private void FocusFilter()
+    {
+        _filterBox.Focus();
+        _filterBox.SelectAll();
+    }
+
     private void OnListKeyDown(object? sender, KeyEventArgs e)
     {
-        if (e.Control && e.KeyCode == Keys.C)
+        // Bound here rather than on MainForm: the Composer's history list and the inspector's
+        // search tabs own Ctrl+F for themselves, and a form-level binding (KeyPreview or a menu
+        // accelerator) would fire first and take it from them.
+        if (e.Control && e.KeyCode == Keys.F)
+        {
+            FocusFilter();
+            e.Handled = true;
+            e.SuppressKeyPress = true;
+        }
+        else if (e.Control && e.KeyCode == Keys.C)
         {
             CopyUrls();
             e.Handled = true;
@@ -485,6 +501,7 @@ public sealed class SessionListView : UserControl
         var saveSessionsAsSaz = save.DropDownItems.Add("Selected sessions as &SAZ...", null, (_, _) => SaveSelectedSessionsAsSaz());
         menu.Items.Add(save);
         menu.Items.Add(new ToolStripSeparator());
+        menu.Items.Add("&Find in sessions\tCtrl+F", null, (_, _) => FocusFilter());
         menu.Items.Add("Filter to this &host", null, (_, _) =>
         {
             if (SelectedSession is { } session) FilterText = $"host:{session.Host}";
