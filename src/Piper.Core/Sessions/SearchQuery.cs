@@ -20,6 +20,7 @@ namespace Piper.Core.Sessions;
 /// <item><c>size:&gt;100kb</c>, <c>dur:&gt;500</c> (ms)</item>
 /// <item><c>is:https is:json -is:tunnel</c></item>
 /// <item><c>-host:cdn.example.com</c> - negation</item>
+/// <item><c>stat:200</c> - an unrecognised field is searched literally, not ignored</item>
 /// </list>
 /// </remarks>
 public sealed class SearchQuery
@@ -112,7 +113,10 @@ public sealed class SearchQuery
 
     // ---------------------------------------------------------------- tokenizer
 
-    private readonly record struct Token(string? Field, string Value, bool Negated, bool IsRegex, bool IsQuoted);
+    /// <summary><paramref name="Raw"/> is the term exactly as typed, minus any negation prefix. An
+    /// unrecognised field falls back to searching it literally, so nothing the user typed is lost.</summary>
+    private readonly record struct Token(
+        string? Field, string Value, bool Negated, bool IsRegex, bool IsQuoted, string Raw);
 
     private static List<Token> Tokenize(string query)
     {
@@ -131,6 +135,8 @@ public sealed class SearchQuery
                 i++;
             }
 
+            var tokenStart = i;
+
             // A field prefix is an unquoted run of letters followed by ':'.
             string? field = null;
             var fieldStart = i;
@@ -148,7 +154,7 @@ public sealed class SearchQuery
             var (value, isRegex, isQuoted) = ReadValue(query, ref i);
             if (value.Length == 0 && field is null) continue;
 
-            tokens.Add(new Token(field, value, negated, isRegex, isQuoted));
+            tokens.Add(new Token(field, value, negated, isRegex, isQuoted, query[tokenStart..i]));
         }
 
         return tokens;
@@ -200,9 +206,7 @@ public sealed class SearchQuery
                 var re = BuildRegex(token.Value);
                 return s => re.IsMatch(s.SearchIndex);
             }
-            if (!token.Negated) plainTerms.Add(token.Value);
-            var needle = token.Value.ToLowerInvariant();
-            return s => s.SearchIndex.Contains(needle, StringComparison.Ordinal);
+            return IndexSubstring(token.Value, token.Negated, plainTerms);
         }
 
         return token.Field switch
@@ -232,8 +236,19 @@ public sealed class SearchQuery
 
             "is" or "has" => CompileIs(token.Value),
 
-            _ => throw new ArgumentException($"unknown field '{token.Field}'"),
+            // Not a field we know. Search the term literally rather than discarding it: dropping it
+            // used to leave a one-term query with no predicates at all, and a query with no
+            // predicates matches every session -- so a typo silently showed the user all traffic.
+            _ => IndexSubstring(token.Raw, token.Negated, plainTerms),
         };
+    }
+
+    /// <summary>Substring match over the whole session haystack, the same as a bare word.</summary>
+    private static Func<Session, bool> IndexSubstring(string text, bool negated, List<string> plainTerms)
+    {
+        if (!negated) plainTerms.Add(text);
+        var needle = text.ToLowerInvariant();
+        return s => s.SearchIndex.Contains(needle, StringComparison.Ordinal);
     }
 
     private static Func<Session, bool> TextField(Token token, Func<Session, string> selector)
