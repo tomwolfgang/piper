@@ -47,6 +47,7 @@ internal static class SearchQueryTests
 
         var bogusIs = SearchQuery.Parse("is:notathing");
         runner.AreEqual(1, bogusIs.Warnings.Count, "an unknown 'is:' value is reported as a warning");
+        runner.IsTrue(bogusIs.IsEmpty, "an unknown 'is:' value contributes no predicate");
 
         return Task.CompletedTask;
     });
