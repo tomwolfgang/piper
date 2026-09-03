@@ -231,10 +231,16 @@ await runner.RunAsync("search query grammar", () =>
     // Quoted phrases keep their spaces.
     runner.AreEqual(0, Count("\"no such phrase anywhere\""), "quoted phrase that matches nothing");
 
-    // Bad input degrades instead of throwing.
+    // Bad input degrades instead of throwing. An unrecognised field is searched literally rather
+    // than dropped, so a typo narrows the list instead of quietly matching every session.
     var bad = SearchQuery.Parse("bogusfield:x");
-    runner.IsTrue(bad.Warnings.Count == 1, "unknown field reported as a warning");
-    runner.AreEqual(all.Length, bad.Filter(all).Count(), "bad term is ignored, not fatal");
+    runner.AreEqual(0, bad.Warnings.Count, "unknown field is not reported as a broken query");
+    runner.AreEqual(0, bad.Filter(all).Count(), "unknown field is searched literally, matching nothing here");
+
+    // A malformed value on a known field is still a warning, and that term is dropped.
+    var malformed = SearchQuery.Parse("status:abc");
+    runner.IsTrue(malformed.Warnings.Count == 1, "malformed value reported as a warning");
+    runner.AreEqual(all.Length, malformed.Filter(all).Count(), "bad term is ignored, not fatal");
 
     return Task.CompletedTask;
 });
@@ -532,6 +538,7 @@ await HostFilterTests.RunAsync(runner);
 await WebFormParserTests.RunAsync(runner);
 await TextTransformsTests.RunAsync(runner);
 await TextTransformDetectorTests.RunAsync(runner);
+await SearchQueryTests.RunAsync(runner);
 await FilterSettingsStoreTests.RunAsync(runner);
 await StatusBarSettingsStoreTests.RunAsync(runner);
 await ProxyConfigurationSettingsStoreTests.RunAsync(runner);
