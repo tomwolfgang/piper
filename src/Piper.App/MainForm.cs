@@ -1188,7 +1188,10 @@ public sealed class MainForm : Form
         var current = _sessionList.FilterText;
         // Hiding an already hidden host is a no-op in the persisted list, so this path can be
         // reached repeatedly; appending each time would grow the filter box without changing it.
-        if (current.Contains(term, StringComparison.OrdinalIgnoreCase)) return;
+        // Compare whole terms: "-host:a.example.com" is not already covered by a longer term that
+        // merely starts with it, such as "-host:a.example.com.example.net".
+        if (current.Split(' ', StringSplitOptions.RemoveEmptyEntries)
+            .Any(existing => string.Equals(existing, term, StringComparison.OrdinalIgnoreCase))) return;
         _sessionList.FilterText = string.IsNullOrWhiteSpace(current) ? term : $"{current} {term}";
     }
 
