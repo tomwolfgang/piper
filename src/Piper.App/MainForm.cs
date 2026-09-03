@@ -117,16 +117,15 @@ public sealed class MainForm : Form
         _captureStatusLabel.Click += (_, _) => ToggleCapture();
         _captureScopeLabel.Click += (_, _) => ShowCaptureScopeMenu();
         ApplyCaptureScope();
-        _rightTabs.AllowDrop = true;
-        _rightTabs.DragEnter += OnSessionDragEnter;
-        _rightTabs.DragOver += OnSessionDragOver;
-        _rightTabs.DragDrop += OnSessionDragDrop;
 
         Controls.Add(split);
         Controls.Add(toolbar);
         Controls.Add(BuildMenu());
         Controls.Add(statusBar);
-        EnableSazFileDrop(this);
+
+        // Must stay after the controls are added: it walks the whole tree, and it is the only
+        // thing that wires dropping, for both SAZ files and dragged sessions.
+        EnableDrop(this);
 
         _sessionList.SelectionChanged += (_, session) => _inspector.Show(session);
         _sessionList.SelectedSessionsChanged += (_, _) => QueueSessionsStatusUpdate();
@@ -291,61 +290,80 @@ public sealed class MainForm : Form
         return page;
     }
 
-    private void OnSessionDragEnter(object? sender, DragEventArgs e) => SetSessionDragEffect(e);
-
-    private void OnSessionDragOver(object? sender, DragEventArgs e) => SetSessionDragEffect(e);
-
-    private void SetSessionDragEffect(DragEventArgs e)
-    {
-        if (!HasCapturedRequest(e.Data) || SessionDropTarget(e) is not { } target)
-        {
-            e.Effect = DragDropEffects.None;
-            return;
-        }
-
-        // Selecting on hover makes the target clear even when it was not the active tab.
-        _rightTabs.SelectedTab = target;
-        e.Effect = DragDropEffects.Copy;
-    }
-
-    private void OnSessionDragDrop(object? sender, DragEventArgs e)
-    {
-        if (SessionDropTarget(e) is not { } target
-            || e.Data?.GetData(typeof(Session)) is not Session session
-            || session.Request is null)
-            return;
-
-        _rightTabs.SelectedTab = target;
-        if (target == _autoResponderPage) _autoResponder.AddRuleFromSession(session);
-        else _composer.LoadSession(session);
-    }
-
-    private static bool HasCapturedRequest(IDataObject? data) =>
-        data?.GetData(typeof(Session)) is Session { Request: not null };
-
-    private void EnableSazFileDrop(Control control)
+    /// <summary>
+    /// Every control in the window is a drop target so a SAZ file can be dropped anywhere. In
+    /// WinForms the innermost target under the pointer wins, so these handlers have to decide
+    /// for both payload kinds: a file-only handler attached here swallowed dragged sessions on
+    /// every control it touched, which is what stopped a session reaching the Composer body.
+    /// </summary>
+    private void EnableDrop(Control control)
     {
         control.AllowDrop = true;
-        control.DragEnter += OnSazFileDragEnter;
-        control.DragOver += OnSazFileDragEnter;
-        control.DragDrop += OnSazFileDragDrop;
-        foreach (Control child in control.Controls) EnableSazFileDrop(child);
+        control.DragEnter += OnDragOverAny;
+        control.DragOver += OnDragOverAny;
+        control.DragDrop += OnDragDropAny;
+        foreach (Control child in control.Controls) EnableDrop(child);
     }
+
+    private void OnDragOverAny(object? sender, DragEventArgs e)
+    {
+        switch (DropAction(e))
+        {
+            case DragDropAction.ImportSazFiles:
+                e.Effect = DragDropEffects.Copy;
+                break;
+            case DragDropAction.LoadIntoComposer:
+            case DragDropAction.AddAutoResponderRule:
+                // Selecting on hover makes the target clear even when it was not the active tab.
+                if (SessionDropTarget(e) is { } target) _rightTabs.SelectedTab = target;
+                e.Effect = DragDropEffects.Copy;
+                break;
+            default:
+                // Deliberately not DragDropEffects.None: an inner control may already have
+                // claimed this payload, and the default when nobody claims it is None anyway.
+                // Overwriting here would break the inspector's media drop.
+                break;
+        }
+    }
+
+    private void OnDragDropAny(object? sender, DragEventArgs e)
+    {
+        var session = DraggedSession(e.Data);
+        switch (DropAction(e))
+        {
+            case DragDropAction.ImportSazFiles:
+                ImportSazFiles(SazFilesFrom(e.Data));
+                break;
+            case DragDropAction.LoadIntoComposer when session is not null:
+                if (SessionDropTarget(e) is { } composerTab) _rightTabs.SelectedTab = composerTab;
+                _composer.LoadSession(session);
+                break;
+            case DragDropAction.AddAutoResponderRule when session is not null:
+                _rightTabs.SelectedTab = _autoResponderPage;
+                _autoResponder.AddRuleFromSession(session);
+                break;
+            default:
+                break;
+        }
+    }
+
+    private DragDropAction DropAction(DragEventArgs e) =>
+        DragDropRouting.Resolve(SazFilesFrom(e.Data).Length, DraggedSession(e.Data), DropZone(e));
+
+    /// <summary>The grid drags the <see cref="Session"/> object itself, not a serialised form.</summary>
+    private static Session? DraggedSession(IDataObject? data) =>
+        data?.GetData(typeof(Session)) as Session;
+
+    private SessionDropZone DropZone(DragEventArgs e) => SessionDropTarget(e) switch
+    {
+        null => SessionDropZone.None,
+        var target when target == _autoResponderPage => SessionDropZone.AutoResponder,
+        _ => SessionDropZone.Composer,
+    };
 
     private static string[] SazFilesFrom(IDataObject? data) => data?.GetData(DataFormats.FileDrop) is string[] paths
         ? paths.Where(SazFileRelay.IsSazFile).ToArray()
         : [];
-
-    private static void OnSazFileDragEnter(object? sender, DragEventArgs e)
-    {
-        if (SazFilesFrom(e.Data).Length > 0) e.Effect = DragDropEffects.Copy;
-    }
-
-    private void OnSazFileDragDrop(object? sender, DragEventArgs e)
-    {
-        var paths = SazFilesFrom(e.Data);
-        if (paths.Length > 0) ImportSazFiles(paths);
-    }
 
     /// <summary>
     /// The tab a dragged session would land on, or null where a drop means nothing. Composer and

@@ -543,6 +543,7 @@ await HttpWireFormatTests.RunAsync(runner);
 await JsonEditingTests.RunAsync(runner);
 await HostRemappingTests.RunAsync(runner);
 await SessionStoreAdmissionTests.RunAsync(runner);
+await DragDropRoutingTests.RunAsync(runner);
 await SazImporterTests.RunAsync(runner);
 await SazExporterTests.RunAsync(runner);
 await HpackTests.RunAsync(runner);

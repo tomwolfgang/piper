@@ -203,17 +203,9 @@ public sealed class AutoResponderPanel : UserControl
         Controls.Add(tester);
         Controls.Add(header);
 
-        // Accept sessions dropped anywhere on the panel, not just on the tab above it. Dropping onto
-        // the rules list is what Fiddler does and what people reach for; the tab strip alone is a
-        // 20px target nobody finds.
-        foreach (var target in new Control[] { this, _list })
-        {
-            target.AllowDrop = true;
-            target.DragEnter += OnSessionDragOver;
-            target.DragOver += OnSessionDragOver;
-            target.DragDrop += OnSessionDrop;
-        }
-
+        // Sessions dropped anywhere on this panel are wired by MainForm.EnableDrop, which owns
+        // the decision for both dragged sessions and SAZ files. Handling them here as well would
+        // add the rule twice.
         LoadSelectedRule();
         UpdateTestButton();
         Palette.Apply(this);
@@ -397,20 +389,6 @@ public sealed class AutoResponderPanel : UserControl
         var status = action.StartsWith('*') && int.TryParse(action[1..], out var code) ? code : 200;
         return HttpResponseData.Canned(status, []);
     }
-
-    private static void OnSessionDragOver(object? sender, DragEventArgs e)
-    {
-        if (DraggedSession(e) is not null) e.Effect = DragDropEffects.Copy;
-    }
-
-    private void OnSessionDrop(object? sender, DragEventArgs e)
-    {
-        if (DraggedSession(e) is { } session) AddRuleFromSession(session);
-    }
-
-    /// <summary>The grid drags the <see cref="Session"/> object itself, not a serialised form of it.</summary>
-    private static Session? DraggedSession(DragEventArgs e) =>
-        e.Data?.GetData(typeof(Session)) is Session { Request.Url: not null } session ? session : null;
 
     /// <summary>Refreshes the Hits and Last match columns from the live engine.</summary>
     public void RefreshStatistics()
