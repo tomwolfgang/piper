@@ -1158,6 +1158,7 @@ public sealed class MainForm : Form
 
         var settings = _filterPanel.Settings;
         var wasShowOnly = settings.HostsMode != 1;
+        var tickedBefore = settings.Hosts.Where(entry => entry.Enabled).Select(entry => entry.Pattern).ToArray();
         if (!settings.HideHost(host))
         {
             AppendLog($"Hide this host: the Filters tab is showing only specific hosts, so {host} "
@@ -1172,8 +1173,24 @@ public sealed class MainForm : Form
             AppendLog("Hide this host: the Filters tab's Hosts list switched to "
                 + "\"Hide the following Hosts\".");
 
-        AppendLog($"Hide this host: the Filters tab's Hosts list now hides {host}. It stays hidden "
-            + "here for this session; \"Use Filters\" there applies the list after a restart.");
+        // Under show-only, hiding a host means unticking whatever was showing it -- and a pattern
+        // broad enough to show this host (a "*.example.com", or a short one, since host patterns
+        // match as substrings) was also showing others. Say which entries went off rather than
+        // claiming only this host was hidden, because the rest disappear with them.
+        var stillTicked = settings.Hosts.Where(entry => entry.Enabled).Select(entry => entry.Pattern)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var switchedOff = tickedBefore.Where(pattern => !stillTicked.Contains(pattern)).ToArray();
+        AppendLog(switchedOff.Length switch
+        {
+            0 => $"Hide this host: the Filters tab's Hosts list now hides {host}. It stays hidden "
+                + "here for this session; \"Use Filters\" there applies the list after a restart.",
+            1 => $"Hide this host: {host} was shown by the Hosts entry {switchedOff[0]}, which is "
+                + "now unticked -- anything else it matched is hidden too. Re-tick it in the "
+                + "Filters tab to undo.",
+            _ => $"Hide this host: {host} was shown by the Hosts entries {string.Join(", ", switchedOff)}, "
+                + "which are now unticked -- anything else they matched is hidden too. Re-tick them "
+                + "in the Filters tab to undo.",
+        });
     }
 
     /// <summary>Hides a host in the capture list only, for the rest of this session.</summary>
