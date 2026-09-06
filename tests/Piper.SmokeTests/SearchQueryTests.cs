@@ -6,7 +6,7 @@ internal static class SearchQueryTests
 {
     public static async Task RunAsync(TestRunner runner)
     {
-    // The query examples the UI advertises, restated here. The smoke runner cannot reference
+        await runner.RunAsync("bare-word search reaches the URL, the request and the response", () =>
         {
             var session = Build(
                 url: "http://api.example.test/v1/Orders/checkout",
@@ -16,39 +16,33 @@ internal static class SearchQueryTests
                 responseBody: "{\"receipt\":\"R-90210\"}");
 
             runner.IsTrue(Hits("checkout", session), "a word in the URL matches");
-    // Piper.App, so these are copies of the strings in ComposerPanel's search tooltip,
-    // SessionListView's placeholder and MainForm's "Search syntax" dialog. If a field is renamed
+            runner.IsTrue(Hits("springsale", session), "a word only in the request body matches");
+            runner.IsTrue(Hits("abc123", session), "a value only in a request header matches");
             runner.IsTrue(Hits("x-trace", session), "a request header name matches");
             runner.IsTrue(Hits("r-90210", session), "a word only in the response body matches");
             runner.IsTrue(Hits("orders-eu-3", session), "a value only in a response header matches");
 
-    // in SearchQuery without updating those, this test fails and points at the ones the UI still
-    // promises.
-    private static readonly string[] Advertised =
+            runner.IsTrue(!Hits("invoices", session), "a word that appears nowhere does not match");
+            return Task.CompletedTask;
+        });
 
         await runner.RunAsync("bare-word search ignores case in both directions", () =>
-    [
-        // SessionListView filter box placeholder.
-        "status:4xx host:api  -is:image  body:\"order id\"",
-        // MainForm's worked example under Help > Search syntax.
-        "method:POST host:api status:>=400 -is:image body:\"order\"",
+        {
+            var session = Build(
+                url: "http://api.example.test/v1/Orders",
+                responseHeaders: [("X-Request-Id", "DEADBEEF")],
+                responseBody: "lowercase marker");
 
-        // Every token in ComposerPanel's search tooltip, individually.
-        "method:POST",
-        "host:api",
-        "status:4xx",
-        "body:\"user_id\"",
-        "header:Authorization",
-        "size:>100kb",
-        "dur:>500",
-        "is:json",
-        "-is:image",
-        "/v[0-9]+\\/orders/",
-    ];
+            runner.IsTrue(Hits("orders", session), "a lowercase query finds mixed-case session text");
+            runner.IsTrue(Hits("deadbeef", session), "a lowercase query finds an uppercase header value");
+            runner.IsTrue(Hits("MARKER", session), "an uppercase query finds lowercase session text");
+            runner.IsTrue(Hits("OrDeRs", session), "mixed case on both sides still matches");
+            return Task.CompletedTask;
+        });
 
-    public static Task RunAsync(TestRunner runner) => runner.RunAsync("advertised search examples parse", () =>
-    {
-        foreach (var example in Advertised)
+        await runner.RunAsync("negated bare terms exclude", () =>
+        {
+            var hit = Build(url: "http://api.example.test/v1/orders");
             var miss = Build(url: "http://cdn.example.test/logo.svg");
 
             runner.IsTrue(!Hits("-orders", hit), "a negated term rejects the session that contains it");
@@ -60,7 +54,7 @@ internal static class SearchQueryTests
 
         await runner.RunAsync("bare-word search skips bodies it cannot read as text", () =>
         {
-            var query = SearchQuery.Parse(example);
+            var declaredBinary = Build(
                 url: "http://cdn.example.test/logo.png",
                 responseHeaders: [("Content-Type", "image/png")],
                 responseBodyBytes: Encoding.ASCII.GetBytes("secretword"));
@@ -79,8 +73,8 @@ internal static class SearchQueryTests
 
         await runner.RunAsync("the search index is bounded, and body: reaches past the bound", () =>
         {
-            // Parse does not throw on a bad term: Compile's exception becomes a Warnings entry and
-            // the term is dropped. So an empty Warnings list is the only real proof of support.
+            // The index caps each message at 64,000 characters so one huge payload cannot dominate
+            // memory. A word past the cap is unreachable by bare word but still found by resp:.
             const string nearMarker = "startmarker";
             const string farMarker = "endmarker";
             var body = new StringBuilder(nearMarker).Append('x', 70_000).Append(farMarker).ToString();
@@ -92,7 +86,7 @@ internal static class SearchQueryTests
 
             runner.IsTrue(Hits(nearMarker, session), "a word inside the bound matches");
             runner.IsTrue(!Hits(farMarker, session), "a word past the 64,000-character bound does not");
-            runner.AreEqual(string.Empty, string.Join("; ", query.Warnings), $"no warnings for '{example}'");
+            runner.IsTrue(Hits($"resp:{farMarker}", session), "resp: reads the full body and finds it");
             return Task.CompletedTask;
         });
 
@@ -103,20 +97,20 @@ internal static class SearchQueryTests
 
             session.Response = TextResponse([("X-Late", "latecomer")], string.Empty);
             session.InvalidateSearchIndex();
-            runner.IsTrue(!query.IsEmpty, $"'{example}' compiles to at least one predicate");
+            runner.IsTrue(Hits("latecomer", session), "invalidating rebuilds the index and the word matches");
             return Task.CompletedTask;
-        }
+        });
 
         await runner.RunAsync("an unrecognised field is searched literally, never ignored", () =>
         {
-        // Guard the assertion above: an unsupported field must warn rather than pass silently.
+            // A dropped term used to leave the query with no predicates at all, which made a
             // mistyped filter match every captured session.
-        var bogus = SearchQuery.Parse("bogus:1");
+            var typo = SearchQuery.Parse("stat:200");
             runner.IsTrue(!typo.IsEmpty, "a mistyped field still produces a predicate");
-        runner.AreEqual(1, bogus.Warnings.Count, "an unknown field is reported as a warning");
+            runner.AreEqual(0, typo.Warnings.Count, "and is not reported as a broken query");
 
             var unrelated = Build(url: "http://api.example.test/v1/orders", responseStatus: 200);
-        runner.IsTrue(bogus.IsEmpty, "an unknown field contributes no predicate");
+            runner.IsTrue(!typo.Matches(unrelated), "a mistyped field does not match unrelated traffic");
 
             var literal = Build(
                 url: "http://api.example.test/v1/metrics",
@@ -126,22 +120,22 @@ internal static class SearchQueryTests
             runner.IsTrue(!Hits("-stat:200", literal), "and negates correctly");
             runner.IsTrue(Hits("-stat:200", unrelated), "including on a session without the text");
 
-        var bogusIs = SearchQuery.Parse("is:notathing");
-        runner.AreEqual(1, bogusIs.Warnings.Count, "an unknown 'is:' value is reported as a warning");
+            var pasted = SearchQuery.Parse("http://api.example.test/v1/orders");
+            runner.AreEqual(0, pasted.Warnings.Count, "pasting a URL is not a broken query");
             runner.IsTrue(pasted.Matches(unrelated), "a pasted URL matches the session it came from");
             runner.IsTrue(!pasted.Matches(Build(url: "http://cdn.example.test/v1/orders")),
                 "and does not match a different host");
             return Task.CompletedTask;
         });
 
-        runner.IsTrue(bogusIs.IsEmpty, "an unknown 'is:' value contributes no predicate");
-
+        await runner.RunAsync("malformed values on known fields are still reported", () =>
+        {
             runner.AreEqual(1, SearchQuery.Parse("status:abc").Warnings.Count, "a non-numeric status warns");
             runner.IsTrue(SearchQuery.Parse("status:abc").IsEmpty, "and contributes no predicate");
             runner.AreEqual(1, SearchQuery.Parse("is:bogus").Warnings.Count, "an unknown is: value warns");
             runner.AreEqual(1, SearchQuery.Parse("url:/[unclosed/").Warnings.Count, "a bad regex warns");
-        return Task.CompletedTask;
-    });
+            return Task.CompletedTask;
+        });
     }
 
     private static bool Hits(string query, Session session) => SearchQuery.Parse(query).Matches(session);
