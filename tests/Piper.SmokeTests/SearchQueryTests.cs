@@ -120,6 +120,13 @@ internal static class SearchQueryTests
             runner.IsTrue(!Hits("-stat:200", literal), "and negates correctly");
             runner.IsTrue(Hits("-stat:200", unrelated), "including on a session without the text");
 
+            // Quotes delimit the value, so they must not survive into the needle.
+            var quoted = SearchQuery.Parse("stat:\"200\"");
+            runner.AreEqual(0, quoted.Warnings.Count, "a quoted value on an unknown field is not a broken query");
+            runner.IsTrue(quoted.Matches(literal), "the quotes are grammar and do not reach the needle");
+            runner.IsTrue(!quoted.Matches(unrelated), "and the term still has to be present to match");
+            runner.IsTrue(!Hits("-stat:\"200\"", literal), "a negated quoted value still excludes");
+
             var pasted = SearchQuery.Parse("http://api.example.test/v1/orders");
             runner.AreEqual(0, pasted.Warnings.Count, "pasting a URL is not a broken query");
             runner.IsTrue(pasted.Matches(unrelated), "a pasted URL matches the session it came from");

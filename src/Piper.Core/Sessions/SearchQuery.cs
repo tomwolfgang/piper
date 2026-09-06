@@ -114,7 +114,9 @@ public sealed class SearchQuery
     // ---------------------------------------------------------------- tokenizer
 
     /// <summary><paramref name="Raw"/> is the term exactly as typed, minus any negation prefix. An
-    /// unrecognised field falls back to searching it literally, so nothing the user typed is lost.</summary>
+    /// unrecognised field falls back to searching it literally, so nothing the user typed is lost.
+    /// A quoted value is reassembled from <paramref name="Field"/> and <paramref name="Value"/>
+    /// instead, because the quotes delimit the value rather than belonging to it.</summary>
     private readonly record struct Token(
         string? Field, string Value, bool Negated, bool IsRegex, bool IsQuoted, string Raw);
 
@@ -239,7 +241,9 @@ public sealed class SearchQuery
             // Not a field we know. Search the term literally rather than discarding it: dropping it
             // used to leave a one-term query with no predicates at all, and a query with no
             // predicates matches every session -- so a typo silently showed the user all traffic.
-            _ => IndexSubstring(token.Raw, token.Negated, plainTerms),
+            // Quotes around the value are grammar, not content, so they do not reach the needle.
+            _ => IndexSubstring(
+                token.IsQuoted ? token.Field + ":" + token.Value : token.Raw, token.Negated, plainTerms),
         };
     }
 
