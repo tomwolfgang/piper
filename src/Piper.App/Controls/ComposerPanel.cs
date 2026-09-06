@@ -500,8 +500,19 @@ public sealed class ComposerPanel : UserControl
     /// <summary>Parses the Raw tab back into the structured fields when leaving it.</summary>
     private void OnEditorTabDeselecting(object? sender, TabControlCancelEventArgs e)
     {
-        if (e.TabPageIndex != RawTabIndex) return;
-        if (!RequestExecutor.TryParseRaw(_rawEditor.Text, out var parsed, out _)) return;
+        // Unparseable raw text leaves the structured fields alone rather than cancelling the
+        // switch, so a half-typed request never traps the user on the tab. Send is where a
+        // parse failure has to be reported (see TryBuildRequest).
+        if (e.TabPageIndex == RawTabIndex) TrySyncFieldsFromRaw(out _);
+    }
+
+    /// <summary>
+    /// Copies the Raw editor back into the structured fields. Raw is the authoritative view while
+    /// its tab is selected, so this runs both when leaving the tab and before sending from it.
+    /// </summary>
+    private bool TrySyncFieldsFromRaw(out string error)
+    {
+        if (!RequestExecutor.TryParseRaw(_rawEditor.Text, out var parsed, out error)) return false;
 
         _method.Text = parsed.Method;
         _url.Text = parsed.Url?.ToString() ?? parsed.RequestTarget;
@@ -511,6 +522,7 @@ public sealed class ComposerPanel : UserControl
             headerText.Append(header.Name).Append(": ").Append(header.Value).Append("\r\n");
         _headers.Text = headerText.ToString();
         _body.Text = parsed.Body.Length > 0 ? Encoding.UTF8.GetString(parsed.Body) : string.Empty;
+        return true;
     }
 
     private string BuildRawText() =>
@@ -518,6 +530,12 @@ public sealed class ComposerPanel : UserControl
 
     private bool TryBuildRequest(out HttpRequestData request, out string error)
     {
+        request = new HttpRequestData();
+
+        // Send never changes tabs, so edits made in the Raw editor would otherwise never reach the
+        // structured fields this builds from -- silently sending the request as it was before them.
+        if (_editorTabs.SelectedIndex == RawTabIndex && !TrySyncFieldsFromRaw(out error)) return false;
+
         request = new HttpRequestData
         {
             Method = _method.Text.Trim().ToUpperInvariant(),
