@@ -39,8 +39,10 @@ internal sealed class SazFileRelay : IDisposable
         return false;
     }
 
+    // Some Fiddler builds export the identical SAZ zip layout under a ".raz" extension.
     public static bool IsSazFile(string path) =>
-        path.EndsWith(".saz", StringComparison.OrdinalIgnoreCase) && File.Exists(path);
+        (path.EndsWith(".saz", StringComparison.OrdinalIgnoreCase) ||
+         path.EndsWith(".raz", StringComparison.OrdinalIgnoreCase)) && File.Exists(path);
 
     private async Task ListenAsync()
     {

@@ -20,7 +20,15 @@ public static class ComposerHistoryStore
     public static string DefaultPath => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Piper", "composer-history.json");
 
-    /// <summary>Saves the full current set of composed sessions (overwrite, not append).</summary>
+    /// <summary>
+    /// Cap on persisted entries, oldest dropped first. The Composer's own sends trickle in one at
+    /// a time, but importing a Fiddler request-only archive appends a whole archive's worth at
+    /// once, and this file is rewritten in full on every save and re-parsed on every start.
+    /// </summary>
+    public const int MaxEntries = 2_000;
+
+    /// <summary>Saves the current set of composed sessions (overwrite, not append), keeping at
+    /// most the newest <see cref="MaxEntries"/> of them.</summary>
     public static void Save(IReadOnlyCollection<Session> composedSessions, string? path = null)
     {
         path ??= DefaultPath;
@@ -29,6 +37,7 @@ public static class ComposerHistoryStore
         {
             var entries = composedSessions
                 .Where(s => s.Request is not null)
+                .TakeLast(MaxEntries)
                 .Select(s => new Entry
                 {
                     Raw = RequestExecutor.ToRawText(s.Request!),

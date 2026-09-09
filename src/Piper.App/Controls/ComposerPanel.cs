@@ -399,6 +399,32 @@ public sealed class ComposerPanel : UserControl
         _historyToolTip.SetToolTip(_results, text);
     }
 
+    /// <summary>Appends sessions (e.g. a Fiddler "request-only" archive import) to the persisted
+    /// Composer history, alongside whatever is already there. Each one is reduced to exactly what
+    /// a reload from disk would produce - a composed, request-only entry - so an imported row does
+    /// not read as a failed Composer send before the next restart and then change afterwards.</summary>
+    public void AppendToHistory(IEnumerable<Session> sessions)
+    {
+        var added = sessions
+            .Where(session => session.Request is not null)
+            .Select(session => new Session
+            {
+                Request = session.Request,
+                IsComposed = true,
+                Completed = session.Completed ?? session.Started,
+            })
+            .ToArray();
+        if (added.Length == 0) return;
+
+        _history.AddRange(added);
+        // Keep memory and the file in step: Save persists only the newest MaxEntries, so a large
+        // archive must not leave thousands of extra rows visible until the next restart.
+        if (_history.Count > ComposerHistoryStore.MaxEntries)
+            _history.RemoveRange(0, _history.Count - ComposerHistoryStore.MaxEntries);
+        ComposerHistoryStore.Save(_history);
+        _searchDirty = true;
+    }
+
     private ContextMenuStrip BuildHistoryMenu()
     {
         var menu = new ContextMenuStrip { Font = Palette.UiFont };
@@ -619,7 +645,7 @@ public sealed class ComposerPanel : UserControl
 
             if (session.State == SessionState.Failed)
             {
-                _status.Text = $"Failed: {session.Error}";
+                _status.Text = $"Failed: {session.Error}{CertificateFailureHint.For(session.Error)}";
                 _status.ForeColor = Palette.StatusServerError;
             }
             else

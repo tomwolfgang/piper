@@ -13,6 +13,7 @@ internal static class ProxyConfigurationSettingsStoreTests
                 EnableHttp2Downstream = false,
                 EnableHttp2Upstream = false,
                 EnableHttp3Upstream = true,
+                ValidateUpstreamCertificates = false,
                 GlobalUserAgent = "Piper smoke test",
                 HostRemapping = new HostRemappingSettings
                 {
@@ -28,6 +29,7 @@ internal static class ProxyConfigurationSettingsStoreTests
             runner.AreEqual(saved.EnableHttp2Downstream, restored.EnableHttp2Downstream, "downstream HTTP/2");
             runner.AreEqual(saved.EnableHttp2Upstream, restored.EnableHttp2Upstream, "upstream HTTP/2");
             runner.AreEqual(saved.EnableHttp3Upstream, restored.EnableHttp3Upstream, "upstream HTTP/3");
+            runner.AreEqual(saved.ValidateUpstreamCertificates, restored.ValidateUpstreamCertificates, "upstream certificate validation");
             runner.AreEqual(saved.GlobalUserAgent, restored.GlobalUserAgent, "global User-Agent");
             runner.AreEqual(saved.HostRemapping.Enabled, restored.HostRemapping.Enabled, "host remapping enabled");
             runner.AreEqual(saved.HostRemapping.Mappings, restored.HostRemapping.Mappings, "host remappings");
@@ -35,6 +37,8 @@ internal static class ProxyConfigurationSettingsStoreTests
             var options = new ProxyOptions();
             restored.ApplyTo(options);
             runner.AreEqual(saved.GlobalUserAgent, options.GlobalUserAgent, "User-Agent applies to proxy options");
+            runner.AreEqual(saved.ValidateUpstreamCertificates, options.ValidateUpstreamCertificates,
+                "certificate validation toggle applies to proxy options");
             runner.IsTrue(options.HostRemapping.Enabled, "host remapping applies to proxy options");
             runner.AreEqual("127.0.0.1", options.HostRemapping.Resolve("api.example.test"), "mapped host resolves to IP");
 

@@ -2,6 +2,7 @@ using System.Net.Security;
 using System.Net.Sockets;
 using System.Security.Authentication;
 using Piper.Core.Http;
+using Piper.Core.Security;
 
 namespace Piper.Core.Proxy;
 
@@ -83,8 +84,13 @@ internal sealed class UpstreamConnection : IDisposable
 
         if (isTls)
         {
-            var ssl = new SslStream(stream, leaveInnerStreamOpen: false, (_, _, _, errors) =>
-                options.ValidateUpstreamCertificates ? errors == SslPolicyErrors.None : true);
+            string? rejectionDetail = null;
+            var ssl = new SslStream(stream, leaveInnerStreamOpen: false, (_, _, chain, errors) =>
+            {
+                if (!options.ValidateUpstreamCertificates || errors == SslPolicyErrors.None) return true;
+                rejectionDetail = CertificateRejectionDetail.Describe(errors, chain);
+                return false;
+            });
 
             try
             {
@@ -99,6 +105,12 @@ internal sealed class UpstreamConnection : IDisposable
                         ? [SslApplicationProtocol.Http2, SslApplicationProtocol.Http11]
                         : null,
                 }, ct).ConfigureAwait(false);
+            }
+            catch (AuthenticationException ex) when (rejectionDetail is not null)
+            {
+                await ssl.DisposeAsync().ConfigureAwait(false);
+                client.Dispose();
+                throw new AuthenticationException($"{ex.Message} ({rejectionDetail})", ex);
             }
             catch
             {

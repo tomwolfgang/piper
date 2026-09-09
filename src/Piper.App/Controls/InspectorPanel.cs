@@ -67,7 +67,7 @@ public sealed class InspectorPanel : UserControl
         {
             _response.SetMessage(null, session.State switch
             {
-                SessionState.Failed => $"Response   FAILED - {session.Error}",
+                SessionState.Failed => $"Response   FAILED - {session.Error}{CertificateFailureHint.For(session.Error)}",
                 SessionState.Tunnel => "Response   (encrypted tunnel - not decrypted)",
                 _ => "Response   (waiting)",
             });

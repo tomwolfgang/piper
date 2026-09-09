@@ -10,8 +10,9 @@ Piper is a free, open-source HTTP(S) debugging proxy for Windows and a modern al
 Fiddler Classic. It lets developers capture, inspect, filter, replay, compose, and mock
 HTTP/HTTPS traffic, including TLS decryption, HTTP/1.1, HTTP/2, and upstream HTTP/3.
 
-Migrating from Fiddler Classic? Piper can import and export Fiddler SAZ archives, and its
-AutoResponder supports Fiddler-compatible rule syntax.
+Migrating from Fiddler Classic? Piper can import and export Fiddler SAZ archives (including the
+request-only `.raz` variant some Fiddler builds produce), and its AutoResponder supports
+Fiddler-compatible rule syntax.
 
 ## Why Piper instead of Fiddler Classic?
 
@@ -24,7 +25,7 @@ keeping familiar workflows and file formats.
 | Platform | Windows desktop app |
 | License | Open source (GPL-3.0-only) |
 | HTTPS debugging proxy | Capture, inspect, filter, replay, compose, and mock HTTP/HTTPS traffic |
-| Fiddler Classic migration | Import and export Fiddler SAZ archives; Fiddler-compatible AutoResponder rules |
+| Fiddler Classic migration | Import and export Fiddler SAZ archives (`.saz` full sessions, `.raz` request-only); Fiddler-compatible AutoResponder rules |
 | Protocols | HTTP/1.1, HTTP/2, and upstream HTTP/3 |
 | Developer tools | Composer, AutoResponder, search, and Copy as curl |
 
@@ -72,6 +73,13 @@ certificate**. Read the dialog before accepting: the private key sits unencrypte
 TLS site to your Windows account. **Tools > Remove trusted root certificate** reverses it.
 
 Nothing installs the root implicitly - it is only ever a deliberate menu action.
+
+Piper validates each origin server's certificate by default, the same as a browser would. If you
+need to reach a known origin whose certificate doesn't validate (self-signed, expired, or a
+hostname mismatch - e.g. hitting a raw load-balancer hostname that only its production domain's
+certificate covers), **Configurations > HTTPS > Verify origin server certificates** can be turned
+off. Leaving it off removes Piper's ability to detect a real attacker impersonating an origin, so
+turn it back on once you're done testing.
 
 ## Search grammar
 
@@ -128,7 +136,7 @@ method:POST host:api status:>=400 -is:image body:"order"
 | `Ctrl+X` | clear sessions |
 | `Ctrl+C` | copy selected URLs |
 | `Del` | remove selected sessions |
-| middle-click | send a session to the Composer |
+| middle-click / double-click | send a session to the Composer |
 | `Ctrl+MouseWheel` | resize the UI font |
 | `Ctrl++` / `Ctrl+-` | resize the UI font a step at a time |
 | `Ctrl+0` | reset the UI font to 100% |
@@ -181,7 +189,10 @@ targets, so `Invoke-WebRequest -Proxy` would never reach Piper.
 - Request and response inspectors: headers, decoded body, pretty-printed JSON, hex dump
 - Composer with search, raw-request editing, repeat-N, and verbatim header sending
 - Copy as curl, per-host filtering, dark theme
-- Importing and exporting Fiddler SAZ session archives
+- Importing and exporting Fiddler SAZ session archives, by drag-and-drop or **File > Open SAZ
+  capture...**; a request-only `.raz` capture is appended to the Composer's history (no responses
+  to inspect, but readily reloaded and resent) rather than the main request list. That history
+  keeps the 2,000 most recent requests and drops the oldest beyond that
 - AutoResponder: ordered rules that answer a request locally instead of sending it upstream -
   see below
 - TextWizard: encode, decode and hash a value without leaving Piper — see below

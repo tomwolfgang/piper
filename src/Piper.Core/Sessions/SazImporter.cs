@@ -26,28 +26,46 @@ public static partial class SazImporter
             foreach (var (requestEntry, match) in requests)
             {
                 var id = match.Groups[1].Value;
+                HttpRequestData request;
                 try
                 {
-                    var request = ParseRequest(ReadEntry(requestEntry));
-                    var responseEntry = archive.GetEntry($"raw/{id}_s.txt");
-                    var response = responseEntry is null ? null : ParseResponse(ReadEntry(responseEntry));
-                    var now = DateTimeOffset.Now;
-                    sessions.Add(new Session
-                    {
-                        Request = request,
-                        Response = response,
-                        IsHttps = request.Url?.Scheme.Equals("https", StringComparison.OrdinalIgnoreCase) == true,
-                        State = response is null ? SessionState.Failed : SessionState.Complete,
-                        Error = response is null ? "This SAZ session has no captured response." : null,
-                        ClientEndpoint = "SAZ import",
-                        ProcessName = "Fiddler SAZ",
-                        Completed = now,
-                    });
+                    request = ParseRequest(ReadEntry(requestEntry));
                 }
                 catch (Exception ex) when (ex is InvalidDataException or FormatException or HttpParseException)
                 {
                     warnings.Add($"Session {id}: {ex.Message}");
+                    continue;
                 }
+
+                // A response entry can exist but be empty or corrupt (e.g. a "request-only"
+                // capture with no response ever recorded). That must not discard an otherwise
+                // valid request, so a bad response degrades to "no response" instead of failing
+                // the whole session.
+                HttpResponseData? response = null;
+                var responseEntry = archive.GetEntry($"raw/{id}_s.txt");
+                if (responseEntry is not null)
+                {
+                    try
+                    {
+                        response = ParseResponse(ReadEntry(responseEntry));
+                    }
+                    catch (Exception ex) when (ex is InvalidDataException or FormatException or HttpParseException)
+                    {
+                        warnings.Add($"Session {id}: response not captured ({ex.Message})");
+                    }
+                }
+
+                sessions.Add(new Session
+                {
+                    Request = request,
+                    Response = response,
+                    IsHttps = request.Url?.Scheme.Equals("https", StringComparison.OrdinalIgnoreCase) == true,
+                    State = response is null ? SessionState.Failed : SessionState.Complete,
+                    Error = response is null ? "This SAZ session has no captured response." : null,
+                    ClientEndpoint = "SAZ import",
+                    ProcessName = "Fiddler SAZ",
+                    Completed = DateTimeOffset.Now,
+                });
             }
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException)

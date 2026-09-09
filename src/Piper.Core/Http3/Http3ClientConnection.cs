@@ -1,10 +1,12 @@
 using System.Net;
 using System.Net.Quic;
 using System.Net.Security;
+using System.Security.Authentication;
 using Piper.Core.Http;
 using Piper.Core.Http2;
 using Piper.Core.Http3.Qpack;
 using Piper.Core.Proxy;
+using Piper.Core.Security;
 
 // CA1416 flags System.Net.Quic as platform-specific (linux/macOS/windows). Every entry point here
 // is gated behind IsSupported -> QuicConnection.IsSupported, which is the runtime check the
@@ -52,21 +54,35 @@ public sealed class Http3ClientConnection : IAsyncDisposable
         EndPoint remoteEndPoint = IPAddress.TryParse(remapping.Host, out var address)
             ? new IPEndPoint(address, port)
             : new DnsEndPoint(remapping.Host, port);
-        var connection = await QuicConnection.ConnectAsync(new QuicClientConnectionOptions
+
+        string? rejectionDetail = null;
+        QuicConnection connection;
+        try
         {
-            RemoteEndPoint = remoteEndPoint,
-            DefaultStreamErrorCode = (long)Http3ErrorCode.RequestCancelled,
-            DefaultCloseErrorCode = (long)Http3ErrorCode.NoError,
-            MaxInboundUnidirectionalStreams = 8, // control + QPACK encoder/decoder, plus slack
-            MaxInboundBidirectionalStreams = 0,  // we never accept origin-initiated requests
-            ClientAuthenticationOptions = new SslClientAuthenticationOptions
+            connection = await QuicConnection.ConnectAsync(new QuicClientConnectionOptions
             {
-                TargetHost = remapping.RewritesAuthority ? remapping.Host : host,
-                ApplicationProtocols = [new SslApplicationProtocol("h3")],
-                RemoteCertificateValidationCallback = (_, _, _, errors) =>
-                    !options.ValidateUpstreamCertificates || errors == SslPolicyErrors.None,
-            },
-        }, ct).ConfigureAwait(false);
+                RemoteEndPoint = remoteEndPoint,
+                DefaultStreamErrorCode = (long)Http3ErrorCode.RequestCancelled,
+                DefaultCloseErrorCode = (long)Http3ErrorCode.NoError,
+                MaxInboundUnidirectionalStreams = 8, // control + QPACK encoder/decoder, plus slack
+                MaxInboundBidirectionalStreams = 0,  // we never accept origin-initiated requests
+                ClientAuthenticationOptions = new SslClientAuthenticationOptions
+                {
+                    TargetHost = remapping.RewritesAuthority ? remapping.Host : host,
+                    ApplicationProtocols = [new SslApplicationProtocol("h3")],
+                    RemoteCertificateValidationCallback = (_, _, chain, errors) =>
+                    {
+                        if (!options.ValidateUpstreamCertificates || errors == SslPolicyErrors.None) return true;
+                        rejectionDetail = CertificateRejectionDetail.Describe(errors, chain);
+                        return false;
+                    },
+                },
+            }, ct).ConfigureAwait(false);
+        }
+        catch (AuthenticationException ex) when (rejectionDetail is not null)
+        {
+            throw new AuthenticationException($"{ex.Message} ({rejectionDetail})", ex);
+        }
 
         var client = new Http3ClientConnection(connection);
         try

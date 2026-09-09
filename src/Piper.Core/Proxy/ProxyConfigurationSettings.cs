@@ -9,6 +9,7 @@ public sealed class ProxyConfigurationSettings
     public bool EnableHttp2Downstream { get; set; } = true;
     public bool EnableHttp2Upstream { get; set; } = true;
     public bool EnableHttp3Upstream { get; set; }
+    public bool ValidateUpstreamCertificates { get; set; } = true;
     public string? GlobalUserAgent { get; set; }
     public HostRemappingSettings HostRemapping { get; set; } = new();
 
@@ -18,6 +19,7 @@ public sealed class ProxyConfigurationSettings
         EnableHttp2Downstream = options.EnableHttp2Downstream,
         EnableHttp2Upstream = options.EnableHttp2Upstream,
         EnableHttp3Upstream = options.EnableHttp3Upstream,
+        ValidateUpstreamCertificates = options.ValidateUpstreamCertificates,
         GlobalUserAgent = options.GlobalUserAgent,
         HostRemapping = options.HostRemapping.Export(),
     };
@@ -29,6 +31,7 @@ public sealed class ProxyConfigurationSettings
         options.EnableHttp2Downstream = EnableHttp2Downstream;
         options.EnableHttp2Upstream = EnableHttp2Upstream;
         options.EnableHttp3Upstream = EnableHttp3Upstream;
+        options.ValidateUpstreamCertificates = ValidateUpstreamCertificates;
         options.GlobalUserAgent = string.IsNullOrWhiteSpace(GlobalUserAgent) ? null : GlobalUserAgent.Trim();
         options.HostRemapping.Apply(HostRemapping);
     }

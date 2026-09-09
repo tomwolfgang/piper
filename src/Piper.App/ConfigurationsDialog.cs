@@ -14,6 +14,7 @@ public sealed class ConfigurationsDialog : Form
     private CheckBox _http2Downstream = null!;
     private CheckBox _http2Upstream = null!;
     private CheckBox _http3Upstream = null!;
+    private CheckBox _validateUpstreamCertificates = null!;
 
     public ConfigurationsDialog(ProxyOptions options, bool captureOnStartup, string captureScope,
         bool wheelZoom,
@@ -71,6 +72,7 @@ public sealed class ConfigurationsDialog : Form
         options.EnableHttp2Downstream = _http2Downstream.Checked;
         options.EnableHttp2Upstream = _http2Upstream.Checked;
         options.EnableHttp3Upstream = _http3Upstream.Checked;
+        options.ValidateUpstreamCertificates = _validateUpstreamCertificates.Checked;
     }
 
     private TabPage CreateGeneralPage(bool captureOnStartup, string captureScope, bool wheelZoom)
@@ -181,6 +183,11 @@ public sealed class ConfigurationsDialog : Form
             "Applies to new origin connections.");
         _http3Upstream = AddOption(panel, "Attempt HTTP/3 with origin servers (QUIC)", options.EnableHttp3Upstream,
             "Origins are tried over QUIC only after advertising HTTP/3 through Alt-Svc.");
+        _validateUpstreamCertificates = AddOption(panel, "Verify origin server certificates",
+            options.ValidateUpstreamCertificates,
+            "Off accepts any origin certificate (self-signed, expired, hostname mismatch) -- only for "
+            + "testing a known origin. It also hides a real attacker impersonating that origin.",
+            Palette.StatusServerError, descriptionMaxWidth: 560);
 
         var certificates = new GroupBox
         {
@@ -205,10 +212,18 @@ public sealed class ConfigurationsDialog : Form
         return page;
     }
 
-    private static CheckBox AddOption(FlowLayoutPanel panel, string text, bool value, string description)
+    private static CheckBox AddOption(FlowLayoutPanel panel, string text, bool value, string description,
+        Color? descriptionColor = null, int? descriptionMaxWidth = null)
     {
         var option = new CheckBox { Text = text, Checked = value, AutoSize = true, Margin = new Padding(0, 0, 0, 0) };
-        var note = new Label { Text = description, AutoSize = true, ForeColor = Palette.TextDim, Margin = new Padding(22, 0, 0, 10) };
+        var note = new Label
+        {
+            Text = description,
+            AutoSize = true,
+            ForeColor = descriptionColor ?? Palette.TextDim,
+            Margin = new Padding(22, 0, 0, 10),
+            MaximumSize = descriptionMaxWidth is { } width ? new Size(width, 0) : Size.Empty,
+        };
         panel.Controls.Add(option);
         panel.Controls.Add(note);
         return option;

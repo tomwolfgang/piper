@@ -79,6 +79,33 @@ internal static class Http2Tests
                 runner.AreEqual($"GET /item/{i}", body, $"request {i} got exactly its own response");
         });
 
+        await runner.RunAsync("an untrusted upstream certificate reports why, not just that it was rejected", async () =>
+        {
+            // Deliberately not setting ValidateUpstreamCertificates = false: the origin's leaf is
+            // signed by this test's own throwaway CA, never installed in the real trust store, so
+            // strict (default) validation is expected to reject it -- exactly what's under test.
+            var strictOptions = new ProxyOptions { Port = 0, DecryptHttps = true };
+            var strictStore = new SessionStore();
+            await using var strictProxy = new ProxyServer(strictOptions, ca, strictStore);
+            strictProxy.Start();
+
+            using var strictClient = new HttpClient(new HttpClientHandler
+            {
+                Proxy = new WebProxy($"http://127.0.0.1:{strictProxy.Endpoint!.Port}"),
+                UseProxy = true,
+                ServerCertificateCustomValidationCallback = (_, cert, _, _) => TrustsRoot(ca.RootCertificate, cert),
+            })
+            { DefaultRequestVersion = HttpVersion.Version11, DefaultVersionPolicy = HttpVersionPolicy.RequestVersionExact };
+
+            var response = await strictClient.GetAsync($"{originBase}/hello");
+            runner.AreEqual(HttpStatusCode.BadGateway, response.StatusCode, "proxy reports the upstream TLS failure as a 502");
+
+            var session = await WaitForSessionAsync(strictStore, s => s.Path == "/hello");
+            runner.AreEqual(SessionState.Failed, session.State, "session marked failed");
+            runner.IsTrue(session.Error is not null && session.Error.Contains("RemoteCertificate", StringComparison.Ordinal),
+                $"failure names the actual SslPolicyErrors flag, not just \"rejected\" (was: {session.Error})");
+        });
+
         // ---------------------------------------------------- upstream leg negotiates h2 too
 
         await using var h2Origin = new TestHttp2Origin(ca.GetCertificateFor("127.0.0.1"), EchoHandler);

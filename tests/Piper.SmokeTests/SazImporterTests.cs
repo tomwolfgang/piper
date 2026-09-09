@@ -34,6 +34,35 @@ internal static class SazImporterTests
         return Task.CompletedTask;
     });
 
+    /// <summary>Regression test: a "request-only" capture (present but empty response entries,
+    /// as produced by some Fiddler request-archive exports) must still import the requests.</summary>
+    public static Task RunEmptyResponseAsync(TestRunner runner) => runner.RunAsync(
+        "Fiddler SAZ import keeps the request when its response entry is empty", () =>
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"piper-saz-{Guid.NewGuid():N}.saz");
+        try
+        {
+            using (var archive = ZipFile.Open(path, ZipArchiveMode.Create))
+            {
+                Write(archive, "raw/1_c.txt", "GET https://api.example.test/v1/items HTTP/1.1\r\nHost: api.example.test\r\n\r\n");
+                archive.CreateEntry("raw/1_s.txt"); // present but empty, e.g. no response ever captured
+            }
+
+            var result = SazImporter.Import(path);
+            runner.AreEqual(1, result.Sessions.Count, "request imported despite the empty response entry");
+            runner.AreEqual(1, result.Warnings.Count, "empty response entry is reported as a warning");
+            runner.AreEqual("GET", result.Sessions[0].Method, "request method imported");
+            runner.IsTrue(result.Sessions[0].Response is null, "no response attached");
+            runner.AreEqual(SessionState.Failed, result.Sessions[0].State, "session marked as response-less");
+        }
+        finally
+        {
+            if (File.Exists(path)) File.Delete(path);
+        }
+
+        return Task.CompletedTask;
+    });
+
     private static void Write(ZipArchive archive, string name, string text)
     {
         var entry = archive.CreateEntry(name);

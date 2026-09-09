@@ -170,7 +170,11 @@ public sealed class MainForm : Form, IMessageFilter
             _composer.LoadSession(session);
         };
         _sessionList.ResendRequested += (_, session) => _ = _composer.ResendAsync(session);
-        _sessionList.SessionActivated += (_, _) => _rightTabs.SelectedIndex = 0;
+        _sessionList.SessionActivated += (_, session) =>
+        {
+            _rightTabs.SelectedIndex = 1;
+            _composer.LoadSession(session);
+        };
 
         // The filterset gets its own visibility slot rather than the grid's ad-hoc filter box.
         // Writing it into FilterText destroyed whatever the user had typed there, and worse, let
@@ -239,6 +243,11 @@ public sealed class MainForm : Form, IMessageFilter
         AppendLog(TrustStore.IsTrusted(_ca.RootCertificate)
             ? "Root CA is trusted by the current user. HTTPS decryption will work."
             : "Root CA is NOT trusted. HTTPS sites will fail until you use Tools > Configurations > HTTPS.");
+        // The toggle persists across restarts, so say so on every start rather than leaving a
+        // disabled origin-certificate check to be remembered.
+        if (!_options.ValidateUpstreamCertificates)
+            AppendLog("Origin server certificate verification is OFF (Configurations > HTTPS). Piper cannot "
+                + "tell a real origin from something impersonating it.");
 
         // Capture starts in OnShown, not here: anything that blocks in the constructor -
         // a dialog in particular - runs before Application.Run shows the window, and the
@@ -629,6 +638,9 @@ public sealed class MainForm : Form, IMessageFilter
         FontScale.WheelEnabled = dialog.WheelZoom;
         SaveFontScaleSettings();
         AppendLog("Configurations saved. HTTPS protocol changes apply to new connections.");
+        if (!_options.ValidateUpstreamCertificates)
+            AppendLog("Origin server certificate verification is OFF. Piper cannot tell a real origin from "
+                + "something impersonating it. Turn it back on when you are done testing.");
     }
 
     private void ShowHosts()
@@ -664,13 +676,15 @@ public sealed class MainForm : Form, IMessageFilter
         using var dialog = new OpenFileDialog
         {
             Title = "Open Fiddler SAZ capture",
-            Filter = "Fiddler SAZ captures (*.saz)|*.saz|All files (*.*)|*.*",
+            Filter = "Fiddler capture archives (*.saz;*.raz)|*.saz;*.raz|All files (*.*)|*.*",
             Multiselect = true,
         };
         if (dialog.ShowDialog(this) == DialogResult.OK) ImportSazFiles(dialog.FileNames);
     }
 
-    /// <summary>Imports SAZ files on a worker thread, then adds their completed sessions to the UI store.</summary>
+    /// <summary>Imports SAZ/RAZ files on a worker thread. A ".saz" (full session capture) adds its
+    /// sessions to the main request list; a ".raz" (request-only capture, no responses) instead
+    /// appends its requests to the Composer's persisted history, alongside what's already there.</summary>
     public async void ImportSazFiles(IEnumerable<string> filePaths)
     {
         var paths = filePaths.Where(SazFileRelay.IsSazFile).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
@@ -680,16 +694,27 @@ public sealed class MainForm : Form, IMessageFilter
         if (WindowState == FormWindowState.Minimized) WindowState = FormWindowState.Normal;
         Activate();
 
+        var importedToComposer = false;
         foreach (var path in paths)
         {
             var result = await Task.Run(() => SazImporter.Import(path));
-            foreach (var session in result.Sessions) _store.Add(session);
+            var isComposerImport = path.EndsWith(".raz", StringComparison.OrdinalIgnoreCase);
+            if (isComposerImport)
+            {
+                _composer.AppendToHistory(result.Sessions);
+                importedToComposer = true;
+            }
+            else
+            {
+                foreach (var session in result.Sessions) _store.Add(session);
+            }
 
-            AppendLog($"Imported {result.Sessions.Count:N0} session(s) from {Path.GetFileName(path)}.");
+            AppendLog($"Imported {result.Sessions.Count:N0} session(s) from {Path.GetFileName(path)}" +
+                (isComposerImport ? " into Composer History." : "."));
             foreach (var warning in result.Warnings)
                 AppendLog($"SAZ import warning ({Path.GetFileName(path)}): {warning}");
         }
-        _rightTabs.SelectedIndex = 0;
+        _rightTabs.SelectedIndex = importedToComposer ? 1 : 0;
     }
 
     private ToolStrip BuildToolbar()

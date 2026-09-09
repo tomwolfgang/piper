@@ -556,6 +556,8 @@ await JsonEditingTests.RunAsync(runner);
 await HostRemappingTests.RunAsync(runner);
 await SessionStoreAdmissionTests.RunAsync(runner);
 await SazImporterTests.RunAsync(runner);
+await SazImporterTests.RunEmptyResponseAsync(runner);
+await ComposerHistoryStoreTests.RunAsync(runner);
 await SazExporterTests.RunAsync(runner);
 await HpackTests.RunAsync(runner);
 await Http2FrameTests.RunAsync(runner);
