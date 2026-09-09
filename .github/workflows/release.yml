@@ -117,7 +117,7 @@ jobs:
           Get-ChildItem -Path $artifacts -File |
             Get-FileHash -Algorithm SHA256 |
             ForEach-Object { "$($_.Hash.ToLowerInvariant())  $($_.Path | Split-Path -Leaf)" } |
-            Set-Content -Path $checksums -NoNewline
+            Set-Content -Path $checksums
 
       - name: Create GitHub release
         shell: pwsh
