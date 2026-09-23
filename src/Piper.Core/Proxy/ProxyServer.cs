@@ -180,8 +180,13 @@ public sealed class ProxyServer : IAsyncDisposable
         catch (HttpParseException)
         {
             var reply = HttpResponseData.Simple(400, "Bad Request", "Piper could not parse this request.");
-            try { await clientStream.WriteAsync(reply.ToBytes(), ct).ConfigureAwait(false); }
-            catch (IOException) { /* client gone; the parse error is still what gets logged */ }
+            // Bounded by the same idle deadline as the read, so a client that never drains its
+            // receive window cannot hold the handler open until shutdown.
+            try { await clientStream.WriteAsync(reply.ToBytes(), idle.Token).ConfigureAwait(false); }
+            catch (Exception ex) when (ex is IOException or ObjectDisposedException or OperationCanceledException)
+            {
+                /* client gone or stalled; the parse error is still what gets logged */
+            }
             throw;
         }
     }
