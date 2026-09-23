@@ -15,7 +15,8 @@ namespace Piper.Core.Http2;
 /// frames. Null when the body is already in <paramref name="Head"/>. Throwing resets the stream
 /// rather than ending it, so a body that failed part-way is not reported as complete. Always run
 /// once handed over -- with an already-cancelled token when the head could not be sent -- so it
-/// can release whatever it owns.
+/// can release whatever it owns. It must honour a cancelled token promptly rather than await
+/// anything first: the stream's task, and the connection's teardown behind it, wait on it.
 /// </param>
 public sealed record Http2StreamResponse(HttpResponseData Head, Func<Stream, CancellationToken, Task>? RelayBody = null)
 {
@@ -431,17 +432,23 @@ public sealed class Http2Connection(Stream stream, Func<HttpRequestData, Cancell
             // Nothing has gone out, so the stream is reset rather than left waiting forever. A relay
             // still runs, with nowhere to write and a token already cancelled: it owns wherever its
             // body was coming from, and only it can let go of that.
-            EnqueueRstStream(streamId, Http2ErrorCode.InternalError);
-            if (response.RelayBody is { } unsent)
+            try
             {
-                try
+                EnqueueRstStream(streamId, Http2ErrorCode.InternalError);
+            }
+            finally
+            {
+                if (response.RelayBody is { } unsent)
                 {
-                    await unsent(Stream.Null, new CancellationToken(canceled: true)).ConfigureAwait(false);
-                }
-                catch (Exception)
-                {
-                    // Expected: it was told to stop. The stream is already reset, so there is no one
-                    // left to report to.
+                    try
+                    {
+                        await unsent(Stream.Null, new CancellationToken(canceled: true)).ConfigureAwait(false);
+                    }
+                    catch (Exception)
+                    {
+                        // Expected: it was told to stop. The stream is already reset, so there is no
+                        // one left to report to.
+                    }
                 }
             }
             return;
