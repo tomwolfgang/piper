@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.Net;
 using System.Net.Security;
 using System.Net.Sockets;
+using System.Runtime.CompilerServices;
 using System.Security.Authentication;
 using System.Text;
 using Piper.Core.Http;
@@ -316,7 +317,7 @@ public sealed class ProxyServer : IAsyncDisposable
             await WriteAsciiAsync(clientStream, "HTTP/1.1 200 Connection Established\r\n\r\n", ct).ConfigureAwait(false);
 
             var serverStream = server.GetStream();
-            await RelayBothWaysAsync(clientStream, clientSocket, serverStream, server.Client, ct).ConfigureAwait(false);
+            await RelayBothWaysAsync(clientStream, clientSocket, serverStream, server.Client, _options.UpstreamIdleTimeout, ct).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -350,23 +351,49 @@ public sealed class ProxyServer : IAsyncDisposable
     /// the transfer the connection existed for, mid-body. Each direction instead passes its close
     /// on, so the peer learns no more data is coming and can finish its own half in its own time.
     /// </remarks>
+    /// <param name="idleAfterHalfClose">
+    /// Once one direction has ended and its close has been passed on, how long the other may go
+    /// without a byte before the pair is ended anyway. Idle rather than absolute, so a download
+    /// still flowing after the client half-closed is left alone; only a peer that has gone silent
+    /// without closing its own half is cut off.
+    /// </param>
     internal static async Task RelayBothWaysAsync(
-        Stream first, Socket? firstSocket, Stream second, Socket? secondSocket, CancellationToken ct)
+        Stream first, Socket? firstSocket, Stream second, Socket? secondSocket,
+        TimeSpan idleAfterHalfClose, CancellationToken ct)
     {
         using var both = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        var forward = PumpAsync(first, second, secondSocket, both.Token);
-        var backward = PumpAsync(second, first, firstSocket, both.Token);
+        var progress = new StrongBox<long>();
+        var forward = PumpAsync(first, second, secondSocket, progress, both.Token);
+        var backward = PumpAsync(second, first, firstSocket, progress, both.Token);
 
         // A direction ending toward a leg that cannot be half-closed (a TLS one) has no way to tell
         // that peer, which would then hold the other direction open for ever. End both instead.
         var ended = await Task.WhenAny(forward, backward).ConfigureAwait(false);
-        if ((ended == forward ? secondSocket : firstSocket) is null) await both.CancelAsync().ConfigureAwait(false);
+        var remaining = ended == forward ? backward : forward;
+        if ((ended == forward ? secondSocket : firstSocket) is null)
+        {
+            await both.CancelAsync().ConfigureAwait(false);
+        }
+        else
+        {
+            var seen = Volatile.Read(ref progress.Value);
+            while (await Task.WhenAny(remaining, Task.Delay(idleAfterHalfClose, ct)).ConfigureAwait(false) != remaining)
+            {
+                var now = Volatile.Read(ref progress.Value);
+                if (now == seen || ct.IsCancellationRequested)
+                {
+                    await both.CancelAsync().ConfigureAwait(false);
+                    break;
+                }
+                seen = now;
+            }
+        }
 
         await Task.WhenAll(forward, backward).ConfigureAwait(false);
     }
 
     /// <summary>Copies bytes one way, then passes the end of the stream on to the destination.</summary>
-    private static async Task PumpAsync(Stream from, Stream to, Socket? toSocket, CancellationToken ct)
+    private static async Task PumpAsync(Stream from, Stream to, Socket? toSocket, StrongBox<long> progress, CancellationToken ct)
     {
         var buffer = ArrayPool<byte>.Shared.Rent(32 * 1024);
         try
@@ -382,6 +409,7 @@ public sealed class ProxyServer : IAsyncDisposable
                 try { await to.WriteAsync(buffer.AsMemory(0, read), ct).ConfigureAwait(false); }
                 catch (IOException) { break; }
                 catch (OperationCanceledException) { break; }
+                Interlocked.Add(ref progress.Value, read);
             }
         }
         finally
@@ -602,7 +630,7 @@ public sealed class ProxyServer : IAsyncDisposable
                 // to read as a truncation attack; those legs end naturally instead.
                 await RelayBothWaysAsync(
                     clientStream, isHttps ? null : clientSocket,
-                    upgraded.Stream, upgraded.IsTls ? null : upgraded.Client.Client, ct).ConfigureAwait(false);
+                    upgraded.Stream, upgraded.IsTls ? null : upgraded.Client.Client, _options.UpstreamIdleTimeout, ct).ConfigureAwait(false);
                 return false;
             }
 

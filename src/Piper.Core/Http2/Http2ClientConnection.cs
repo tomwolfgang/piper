@@ -50,9 +50,18 @@ public sealed class Http2ClientConnection(Stream stream)
     private bool _sawEndStreamOnHeaders;
     private bool _responseComplete;
 
-    // The payload of the last DATA frame read, not yet handed to the body's reader. Frames are read
-    // only when the reader asks for more, so this never holds more than one.
-    private ReadOnlyMemory<byte> _pendingData;
+    // Response DATA read off the wire but not yet handed to the body's reader. Once the body is
+    // being read, a frame is read only when the reader asks for more, so this rarely holds more
+    // than one. While the request body is still being sent, though, the origin may already be
+    // answering, and those frames queue here.
+    private readonly Queue<ReadOnlyMemory<byte>> _pendingData = new();
+    private ReadOnlyMemory<byte> _currentData;
+    private long _pendingBytes;
+
+    // Credit for response DATA held back from the origin while too much is queued, so that what an
+    // origin can make Piper hold is bounded by flow control rather than by its own restraint.
+    private long _withheldCredit;
+    private const long MaxPendingBytes = 1024 * 1024;
 
     /// <summary>
     /// Sends the request and returns once the response head has arrived, leaving the body to be
@@ -84,23 +93,33 @@ public sealed class Http2ClientConnection(Stream stream)
     }
 
     /// <summary>
-    /// The response body, read frame by frame on demand, ending at END_STREAM. Only one DATA frame
-    /// is read ahead of the reader, so an origin sending faster than the body is consumed is held
-    /// back by TCP rather than buffered here.
+    /// The response body, read frame by frame on demand, ending at END_STREAM. Frames are read only
+    /// as the reader asks for more, so an origin sending faster than the body is consumed is held
+    /// back by TCP rather than buffered here; what arrives early, while the request is still being
+    /// sent, is capped by withholding flow-control credit.
     /// </summary>
     public Stream ResponseBody => new BodyStream(this);
 
     private async ValueTask<int> ReadBodyAsync(Memory<byte> destination, CancellationToken ct)
     {
-        while (_pendingData.IsEmpty)
+        while (_currentData.IsEmpty)
         {
+            if (_pendingData.TryDequeue(out var next)) { _currentData = next; continue; }
             if (_responseComplete) return 0;
             await ReadAndProcessFrameAsync(ct).ConfigureAwait(false);
         }
 
-        var take = Math.Min(destination.Length, _pendingData.Length);
-        _pendingData[..take].CopyTo(destination);
-        _pendingData = _pendingData[take..];
+        var take = Math.Min(destination.Length, _currentData.Length);
+        _currentData[..take].CopyTo(destination);
+        _currentData = _currentData[take..];
+        _pendingBytes -= take;
+
+        if (_withheldCredit > 0 && _pendingBytes <= MaxPendingBytes)
+        {
+            var credit = _withheldCredit;
+            _withheldCredit = 0;
+            await AcknowledgeDataAsync(StreamId, credit, ct).ConfigureAwait(false);
+        }
         return take;
     }
 
@@ -133,9 +152,7 @@ public sealed class Http2ClientConnection(Stream stream)
     private async Task SendBodyAsync(byte[] body, CancellationToken ct)
     {
         var offset = 0;
-        // Stops as well once a response DATA frame is waiting to be read: taking another frame
-        // would overwrite it. The origin has already answered, so the rest of the upload is moot.
-        while (offset < body.Length && !_responseComplete && _pendingData.IsEmpty)
+        while (offset < body.Length && !_responseComplete)
         {
             var available = (int)Math.Max(0, Math.Min(
                 Math.Min(_peerStreamWindow, _peerConnectionWindow),
@@ -195,10 +212,15 @@ public sealed class Http2ClientConnection(Stream stream)
 
             case Http2FrameType.Data:
                 if (frame.StreamId == StreamId) HandleResponseData(frame);
+
                 // Credit is returned for every DATA frame, including ones on streams we are not
                 // tracking: the connection-level window is consumed regardless of which stream
-                // the bytes belonged to, so skipping those would leak the connection window.
-                await AcknowledgeDataAsync(frame, ct).ConfigureAwait(false);
+                // the bytes belonged to, so skipping those would leak the connection window. It is
+                // held back only while too much of our own response is queued unread.
+                if (frame.StreamId == StreamId && _pendingBytes > MaxPendingBytes)
+                    _withheldCredit += frame.Payload.Length;
+                else
+                    await AcknowledgeDataAsync(frame.StreamId, frame.Payload.Length, ct).ConfigureAwait(false);
                 break;
 
             default:
@@ -220,9 +242,8 @@ public sealed class Http2ClientConnection(Stream stream)
     /// <summary>Returns flow-control credit for received DATA so the origin can keep sending.
     /// Credit goes back as each frame is read, and a frame is read only when the body's reader
     /// wants more, so how fast the body is consumed is what paces the origin.</summary>
-    private async Task AcknowledgeDataAsync(Http2Frame frame, CancellationToken ct)
+    private async Task AcknowledgeDataAsync(int streamId, long length, CancellationToken ct)
     {
-        var length = frame.Payload.Length;
         if (length == 0) return;
 
         _connectionBytesToAck += length;
@@ -232,7 +253,7 @@ public sealed class Http2ClientConnection(Stream stream)
             _connectionBytesToAck = 0;
         }
 
-        if (frame.StreamId != StreamId) return;
+        if (streamId != StreamId) return;
 
         _streamBytesToAck += length;
         if (_streamBytesToAck >= WindowUpdateThreshold)
@@ -288,7 +309,11 @@ public sealed class Http2ClientConnection(Stream stream)
             throw new HttpParseException("HTTP/2 DATA arrived before the response headers.");
 
         // Each frame's payload is its own freshly allocated array, so it can be held as it is.
-        _pendingData = frame.DataPayload;
+        if (!frame.DataPayload.IsEmpty)
+        {
+            _pendingData.Enqueue(frame.DataPayload);
+            _pendingBytes += frame.DataPayload.Length;
+        }
         if (frame.HasFlag(Http2FrameFlags.EndStream)) _responseComplete = true;
     }
 }

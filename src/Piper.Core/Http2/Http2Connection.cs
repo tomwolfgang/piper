@@ -417,9 +417,21 @@ public sealed class Http2Connection(Stream stream, Func<HttpRequestData, Cancell
     private async Task SendResponseAsync(Http2Stream http2Stream, Http2StreamResponse response, CancellationToken ct)
     {
         var head = response.Head;
-        var fields = Http2MessageAdapter.ToHeaderFields(head);
-        var block = HpackEncoder.Encode(fields); // stateless encoder: safe to call from any task
         var streamId = http2Stream.Id;
+
+        byte[] block;
+        try
+        {
+            block = HpackEncoder.Encode(Http2MessageAdapter.ToHeaderFields(head)); // stateless encoder: safe to call from any task
+        }
+        catch when (response.RelayBody is { } abandoned)
+        {
+            // A relay owns what it reads from -- the upstream connection -- and lets it go only in
+            // its own cleanup. Run it already cancelled so that cleanup still happens.
+            try { await abandoned(Stream.Null, new CancellationToken(canceled: true)).ConfigureAwait(false); }
+            catch (OperationCanceledException) { }
+            throw;
+        }
 
         // A relayed body has no length yet, so the headers must not claim there is no body.
         var hasBody = response.RelayBody is not null || head.Body.Length > 0;
@@ -428,7 +440,7 @@ public sealed class Http2Connection(Stream stream, Func<HttpRequestData, Cancell
 
         if (response.RelayBody is { } relay)
         {
-            var data = new Http2DataStream(this, http2Stream, ct);
+            var data = new Http2DataStream(this, http2Stream);
             try
             {
                 await relay(data, ct).ConfigureAwait(false);
@@ -460,21 +472,33 @@ public sealed class Http2Connection(Stream stream, Func<HttpRequestData, Cancell
     /// while the caller is free to reuse its buffer for the next read -- which a relay reading into
     /// a pooled buffer certainly will, and the frame would then carry whatever happened to be there
     /// by the time it was written.
+    ///
+    /// Because they are copies, what waits in the outbox costs memory, and the peer's flow-control
+    /// window is no bound on it: a client can grant a vast window and then stop reading. So a write
+    /// first waits for the previous write's frames to reach the wire, which holds each stream to
+    /// one write's worth queued however fast the origin sends.
     /// </remarks>
-    private sealed class Http2DataStream(Http2Connection connection, Http2Stream http2Stream, CancellationToken ct)
-        : Stream
+    private sealed class Http2DataStream(Http2Connection connection, Http2Stream http2Stream) : Stream
     {
+        private Task _previousWritten = Task.CompletedTask;
+
         public override async ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken token = default)
         {
+            if (buffer.IsEmpty) return;
+            await _previousWritten.WaitAsync(token).ConfigureAwait(false);
+
+            var written = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             var offset = 0;
             while (offset < buffer.Length)
             {
                 var take = await connection
-                    .ReserveSendWindowAsync(http2Stream, buffer.Length - offset, ct).ConfigureAwait(false);
+                    .ReserveSendWindowAsync(http2Stream, buffer.Length - offset, token).ConfigureAwait(false);
 
-                connection.EnqueueDataFrame(http2Stream.Id, buffer.Slice(offset, take).ToArray());
+                var last = offset + take >= buffer.Length;
+                connection.EnqueueDataFrame(http2Stream.Id, buffer.Slice(offset, take).ToArray(), last ? written : null);
                 offset += take;
             }
+            _previousWritten = written.Task;
         }
 
         public override Task FlushAsync(CancellationToken token) => Task.CompletedTask;
@@ -491,9 +515,13 @@ public sealed class Http2Connection(Stream stream, Func<HttpRequestData, Cancell
         public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
     }
 
-    private void EnqueueDataFrame(int streamId, ReadOnlyMemory<byte> payload) =>
-        EnqueueWrite(ct2 => Http2FrameWriter.WriteAsync(
-            stream, Http2FrameType.Data, Http2FrameFlags.None, streamId, payload, ct2));
+    private void EnqueueDataFrame(int streamId, ReadOnlyMemory<byte> payload, TaskCompletionSource? written) =>
+        EnqueueWrite(async ct2 =>
+        {
+            await Http2FrameWriter.WriteAsync(
+                stream, Http2FrameType.Data, Http2FrameFlags.None, streamId, payload, ct2).ConfigureAwait(false);
+            written?.TrySetResult();
+        });
 
     /// <summary>
     /// Takes as much send window as is available, up to <paramref name="wanted"/> and one frame,

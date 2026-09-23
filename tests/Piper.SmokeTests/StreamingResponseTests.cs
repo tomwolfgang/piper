@@ -309,7 +309,7 @@ internal static class StreamingResponseTests
             using var originPair = await SocketPair.CreateAsync();
 
             var relay = ProxyServer.RelayBothWaysAsync(
-                clientPair.Far, null, originPair.Near, null, CancellationToken.None);
+                clientPair.Far, null, originPair.Near, null, TimeSpan.FromMinutes(5), CancellationToken.None);
 
             originPair.Far.Dispose();   // the origin ends; the client never sends another byte
 
@@ -326,6 +326,30 @@ internal static class StreamingResponseTests
             catch (Exception ex) { outcome = $"faulted with {ex.GetType().Name}"; }
 
             runner.AreEqual("completed", outcome, "the relay ends cleanly when one side does");
+        });
+
+        await runner.RunAsync("a half-closed relay ends once the other side goes silent", async () =>
+        {
+            // Both legs plaintext, so the origin's close is passed on as a FIN. A client that takes
+            // the FIN and never closes its own half would otherwise hold the pair open for ever.
+            using var clientPair = await SocketPair.CreateAsync();
+            using var originPair = await SocketPair.CreateAsync();
+
+            var relay = ProxyServer.RelayBothWaysAsync(
+                clientPair.Far, clientPair.Far.Socket, originPair.Near, originPair.Near.Socket,
+                TimeSpan.FromMilliseconds(200), CancellationToken.None);
+
+            originPair.Far.Socket.Shutdown(SocketShutdown.Send);   // the origin is done sending
+
+            string outcome;
+            try
+            {
+                await relay.WaitAsync(TimeSpan.FromSeconds(10));
+                outcome = "completed";
+            }
+            catch (TimeoutException) { outcome = "still held open by the silent client"; }
+
+            runner.AreEqual("completed", outcome, "the relay gives up on the silent direction");
         });
     }
 
