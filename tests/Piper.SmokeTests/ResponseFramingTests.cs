@@ -64,25 +64,32 @@ internal static class ResponseFramingTests
             // (RFC 9110 5.5), so " 5" is genuinely the length 5 and is not listed here.
             // A response is refused outright (RFC 9112 6.3 rule 5) rather than read until close: a
             // relayed response carries its headers on, so the client would be handed the very
-            // length Piper had decided not to believe.
+            // length Piper had decided not to believe. A request is refused too (rule 6): read as
+            // having no body, its body bytes would be parsed as a second, smuggled request.
             foreach (var bad in new[] { "+5", "0x5", "abc", "5.0", "-5", "", "5, 5" })
             {
                 runner.IsTrue(Rejects($"Content-Length: {bad}"),
                     $"a response with Content-Length '{bad}' is rejected");
-                runner.AreEqual(HttpBodyFraming.None,
-                    HttpParser.DescribeRequestBody(HeaderCollection.Parse($"Content-Length: {bad}")).Framing,
-                    $"a request with Content-Length '{bad}' carries no body");
+                runner.IsTrue(RejectsRequest($"Content-Length: {bad}"),
+                    $"a request with Content-Length '{bad}' is rejected");
             }
 
             // A value too large for Int64 is likewise not a length.
             runner.IsTrue(Rejects("Content-Length: 99999999999999999999999"),
                 "an overflowing Content-Length is rejected");
+            runner.IsTrue(RejectsRequest("Content-Length: 99999999999999999999999"),
+                "an overflowing request Content-Length is rejected");
 
             // Two copies are one length only when they agree; otherwise each hop may pick a
             // different one.
             runner.IsTrue(Rejects("Content-Length: 5\r\nContent-Length: 7"), "conflicting copies are rejected");
+            runner.IsTrue(RejectsRequest("Content-Length: 5\r\nContent-Length: 7"),
+                "conflicting copies on a request are rejected");
             runner.AreEqual(HttpBodyDescriptor.OfLength(5),
                 Describe("Content-Length: 5\r\nContent-Length: 5", "GET", 200), "identical copies are one length");
+            runner.AreEqual(HttpBodyDescriptor.OfLength(5),
+                HttpParser.DescribeRequestBody(HeaderCollection.Parse("Content-Length: 5\r\nContent-Length: 5")),
+                "and identical copies on a request are one length too");
             runner.AreEqual(HttpBodyFraming.None,
                 Describe("Content-Length: abc", "HEAD", 200).Framing, "and a bodiless response is never judged on it");
 
@@ -247,11 +254,16 @@ internal static class ResponseFramingTests
     private static HttpBodyDescriptor Describe(string headerBlock, string method, int status) =>
         HttpParser.DescribeResponseBody(HeaderCollection.Parse(headerBlock), method, status);
 
-    private static bool Rejects(string headerBlock)
+    private static bool Rejects(string headerBlock) => Throws(() => Describe(headerBlock, "GET", 200));
+
+    private static bool RejectsRequest(string headerBlock) =>
+        Throws(() => HttpParser.DescribeRequestBody(HeaderCollection.Parse(headerBlock)));
+
+    private static bool Throws(Func<HttpBodyDescriptor> describe)
     {
         try
         {
-            Describe(headerBlock, "GET", 200);
+            describe();
             return false;
         }
         catch (HttpParseException)

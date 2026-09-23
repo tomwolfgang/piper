@@ -136,7 +136,7 @@ public sealed class ProxyServer : IAsyncDisposable
         {
             while (!ct.IsCancellationRequested)
             {
-                var request = await ReadRequestWithIdleTimeoutAsync(reader, ct).ConfigureAwait(false);
+                var request = await ReadRequestWithIdleTimeoutAsync(reader, clientStream, ct).ConfigureAwait(false);
                 if (request is null) break;
 
                 if (string.Equals(request.Method, "CONNECT", StringComparison.OrdinalIgnoreCase))
@@ -159,7 +159,13 @@ public sealed class ProxyServer : IAsyncDisposable
         catch (HttpParseException ex) { Log?.Invoke(this, $"Protocol error from {clientEndpoint}: {ex.Message}"); }
     }
 
-    private async Task<HttpRequestData?> ReadRequestWithIdleTimeoutAsync(HttpStreamReader reader, CancellationToken ct)
+    /// <remarks>
+    /// A request that cannot be parsed is answered with a 400 on <paramref name="clientStream"/>
+    /// before the exception is rethrown, and the caller then closes the connection (RFC 9112 6.3
+    /// rule 6). Nothing further can be read from it: where the malformed request ends is unknown.
+    /// </remarks>
+    private async Task<HttpRequestData?> ReadRequestWithIdleTimeoutAsync(
+        HttpStreamReader reader, Stream clientStream, CancellationToken ct)
     {
         using var idle = CancellationTokenSource.CreateLinkedTokenSource(ct);
         idle.CancelAfter(_options.IdleTimeout);
@@ -170,6 +176,13 @@ public sealed class ProxyServer : IAsyncDisposable
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {
             return null; // idle keep-alive socket timed out - close it quietly
+        }
+        catch (HttpParseException)
+        {
+            var reply = HttpResponseData.Simple(400, "Bad Request", "Piper could not parse this request.");
+            try { await clientStream.WriteAsync(reply.ToBytes(), ct).ConfigureAwait(false); }
+            catch (IOException) { /* client gone; the parse error is still what gets logged */ }
+            throw;
         }
     }
 
@@ -241,7 +254,7 @@ public sealed class ProxyServer : IAsyncDisposable
         {
             while (!ct.IsCancellationRequested)
             {
-                var request = await ReadRequestWithIdleTimeoutAsync(tlsReader, ct).ConfigureAwait(false);
+                var request = await ReadRequestWithIdleTimeoutAsync(tlsReader, ssl, ct).ConfigureAwait(false);
                 if (request is null) break;
 
                 // Inside a tunnel the target is origin-form; rebuild the absolute URL as https.
