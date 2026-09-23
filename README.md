@@ -323,7 +323,8 @@ The exceptions are the cases where passing the framing on would be wrong. A `Con
 beside chunked coding is dropped, since chunked wins and the length describes nothing that is
 relayed. An HTTP/1.0 client, which has no chunked coding, gets a chunked body de-chunked and ended by
 the connection closing. A response whose `Content-Length` is unreadable or contradicts itself is
-refused with a 502 rather than relayed. If the origin fails once the body has started, the client's
+refused with a 502 rather than relayed; a request with one is answered with a 400 and its connection
+closed, since there is no telling where its body ends. If the origin fails once the body has started, the client's
 connection is reset (an HTTP/2 stream gets `RST_STREAM`), so a cut-off download is never mistaken
 for a finished one.
 

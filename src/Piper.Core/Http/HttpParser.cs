@@ -122,9 +122,7 @@ public static class HttpParser
         // RFC 9112 6.3 rule 5: a length that is unreadable, or that differs between two copies of
         // the header, is an error rather than a response to be read until close. Falling back would
         // relay the header Piper had just distrusted to a client that may well frame on it.
-        if (headers.GetValues("Content-Length").Distinct(StringComparer.Ordinal).Count() == 1
-            && TryReadContentLength(headers, out var length))
-            return HttpBodyDescriptor.OfLength(length);
+        if (TryReadContentLength(headers, out var length)) return HttpBodyDescriptor.OfLength(length);
 
         throw new HttpParseException("Response has an invalid or conflicting Content-Length.");
     }
@@ -151,21 +149,27 @@ public static class HttpParser
     {
         if (headers.HasToken("Transfer-Encoding", "chunked")) return HttpBodyDescriptor.Chunked;
 
+        if (!headers.Contains("Content-Length")) return HttpBodyDescriptor.None;
+
+        // RFC 9112 6.3 rule 6: an unreadable or conflicting length is a 400, never "no body". Read
+        // as no body, the bytes the client meant as its body would be parsed as the next request
+        // on the connection -- a request Piper would see and a front proxy would not.
         if (TryReadContentLength(headers, out var length)) return HttpBodyDescriptor.OfLength(length);
 
-        return HttpBodyDescriptor.None;
+        throw new HttpParseException("Request has an invalid or conflicting Content-Length.");
     }
 
     /// <summary>
-    /// Reads the Content-Length. <c>NumberStyles.None</c> refuses a sign, whitespace and the other
-    /// leniencies that would let "+5" or " 5 " mean one length here and another to the next hop.
+    /// Reads the Content-Length, which counts only when every copy of the header agrees.
+    /// <c>NumberStyles.None</c> refuses a sign, whitespace and the other leniencies that would let
+    /// "+5" or " 5 " mean one length here and another to the next hop.
     /// </summary>
     private static bool TryReadContentLength(HeaderCollection headers, out long length)
     {
         length = 0;
-        var value = headers["Content-Length"];
-        return value is not null
-               && long.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out length);
+        var values = headers.GetValues("Content-Length").Distinct(StringComparer.Ordinal).ToList();
+        return values.Count == 1
+               && long.TryParse(values[0], NumberStyles.None, CultureInfo.InvariantCulture, out length);
     }
 
     private static async Task<HeaderCollection> ReadHeadersAsync(HttpStreamReader reader, CancellationToken ct)

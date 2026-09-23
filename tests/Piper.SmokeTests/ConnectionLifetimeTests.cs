@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Net;
+using System.Net.Security;
 using System.Net.Sockets;
 using System.Text;
 using Piper.Core.Http;
@@ -103,6 +104,76 @@ internal static class ConnectionLifetimeTests
             runner.IsTrue(session.Error?.Contains("stalled", StringComparison.OrdinalIgnoreCase) == true,
                 $"with a reason naming the stall (got: {session.Error})");
         });
+
+        await runner.RunAsync("a request with an unreadable Content-Length gets a 400 and a closed connection", async () =>
+        {
+            // RFC 9112 6.3 rule 6. Taken as "no body", the bytes after such a head would be parsed
+            // as a second request that a front proxy never saw -- so nothing may reach the origin.
+            await using var origin = new TestRawOrigin(async (_, stream, ct) =>
+            {
+                await TestRawOrigin.WriteAsync(stream, "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n", ct);
+                return false;
+            });
+            using var harness = new ProxyHarness();
+            var authority = $"127.0.0.1:{origin.Port}";
+
+            // Plain HTTP, then the same request inside a decrypted CONNECT tunnel: the two read
+            // requests in separate loops, and each has to answer on its own stream.
+            foreach (var tunnelled in new[] { false, true })
+            foreach (var framing in new[] { "Content-Length: +5", "Content-Length: 5\r\nContent-Length: 7" })
+            {
+                using var raw = new TcpClient();
+                await raw.ConnectAsync(IPAddress.Loopback, harness.Port);
+                Stream toProxy = raw.GetStream();
+                var target = $"http://{authority}/smuggle";
+
+                if (tunnelled)
+                {
+                    await TestRawOrigin.WriteAsync(raw.GetStream(),
+                        $"CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\n\r\n", CancellationToken.None);
+                    await ReadUntilAsync(raw.GetStream(), "\r\n\r\n");
+
+                    // Trust is not what this test is about; the peer is Piper itself, on loopback.
+                    var ssl = new SslStream(toProxy, leaveInnerStreamOpen: false, (_, _, _, _) => true);
+                    await ssl.AuthenticateAsClientAsync("127.0.0.1");
+                    toProxy = ssl;
+                    target = "/smuggle";
+                }
+
+                // No body bytes follow the head: bytes left unread when the proxy closes would make
+                // the close a reset, which can discard the 400 before this test reads it.
+                await toProxy.WriteAsync(Encoding.Latin1.GetBytes(
+                    $"POST {target} HTTP/1.1\r\nHost: {authority}\r\n{framing}\r\n\r\n"));
+
+                var (reply, closed) = await ReadToCloseAsync(toProxy);
+                var what = (tunnelled ? "tunnelled " : "") + framing.Replace("\r\n", " + ", StringComparison.Ordinal);
+                runner.IsTrue(reply.StartsWith("HTTP/1.1 400 ", StringComparison.Ordinal),
+                    $"'{what}' is answered with a 400 (got: {reply.Split('\r')[0]})");
+                runner.IsTrue(reply.Contains("\r\nConnection: close\r\n", StringComparison.OrdinalIgnoreCase),
+                    $"which tells the client the connection will not be reused after '{what}'");
+                runner.IsTrue(closed, $"and the connection is closed rather than left hanging after '{what}'");
+                await toProxy.DisposeAsync();
+            }
+
+            runner.AreEqual(0, origin.ConnectionCount, "the origin is never contacted");
+        });
+    }
+
+    /// <summary>Reads until the peer closes, or gives up after 10 seconds. The flag says which.</summary>
+    private static async Task<(string Text, bool Closed)> ReadToCloseAsync(Stream stream)
+    {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var text = new StringBuilder();
+        var buffer = new byte[1024];
+        while (true)
+        {
+            int n;
+            try { n = await stream.ReadAsync(buffer, timeout.Token); }
+            catch (OperationCanceledException) { return (text.ToString(), false); }
+            catch (IOException) { return (text.ToString(), true); } // closed with a reset
+            if (n == 0) return (text.ToString(), true);
+            text.Append(Encoding.Latin1.GetString(buffer, 0, n));
+        }
     }
 
     private sealed class ProxyHarness : IDisposable
