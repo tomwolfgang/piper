@@ -152,11 +152,21 @@ public sealed class Session
 
     public string StatusText => State switch
     {
-        SessionState.Failed => "ERR",
-        SessionState.Tunnel => "CONNECT",
+        SessionState.Failed => FailedStatusText,
+        SessionState.Tunnel => TunnelStatusText,
         _ when Response is not null => Response.StatusCode.ToString(),
-        _ => "-",
+        _ => NoStatusText,
     };
+
+    private const string FailedStatusText = "ERR";
+    private const string TunnelStatusText = "CONNECT";
+    private const string NoStatusText = "-";
+
+    /// <summary>
+    /// Every word <see cref="StatusText"/> can show in place of a status code, so the grid can size
+    /// its Result column to the longest of them.
+    /// </summary>
+    public static IReadOnlyList<string> StatusWords { get; } = [FailedStatusText, TunnelStatusText, NoStatusText];
 
     /// <summary>Cached lowercase haystack for substring search. Built once, on demand.</summary>
     private string? _searchIndex;

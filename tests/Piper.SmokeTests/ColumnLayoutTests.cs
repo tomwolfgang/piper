@@ -36,7 +36,7 @@ internal static class ColumnLayoutTests
         // the right, so a download's progress could not be seen. The compact columns here are the
         // widths SessionListView measures at 100% for its samples; the long ones are its floors.
         int[] oldMinimums = [52, 55, 62, 170, 300, 130, 110, 112, 88];
-        int[] newMinimums = [59, 66, 66, 80, 100, 56, 56, 129, 101];
+        int[] newMinimums = [59, 66, 66, 72, 100, 56, 56, 129, 108];
         int[] growth = [0, 0, 0, 3, 6, 2, 2, 0, 0];
         runner.IsTrue(ColumnLayout.Fit(720, oldMinimums, growth).Sum() > 720, "the old minimums scroll Size and Time off a 720 px list");
         runner.AreEqual(720, ColumnLayout.Fit(720, newMinimums, growth).Sum(), "the new ones keep every column on a 720 px list");

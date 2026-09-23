@@ -1,5 +1,6 @@
 using System.Text.RegularExpressions;
 using Piper.App;
+using Piper.Core.Sessions;
 
 /// <summary>
 /// Guards the rules that keep <c>Locales/en.json</c> usable as the string catalogue: every key the
@@ -132,13 +133,28 @@ internal static partial class UiStringTests
             $"no size up to 999.99 GB is wider than the Size column's sample (longest: \"{longestSizeText}\")");
 
         var widestDuration = Piper.App.Controls.Format.WidestDurationTexts().Max(text => text.Length);
-        var longestDuration = new[] { 0, 9, 999, 1_000, 59_999, 999_999, 3_600_000, 9_999_999 }
+        var longestDuration = new[] { 0, 9, 999, 1_000, 59_999, 999_999, 3_600_000, 9_999_999, 86_400_000, 99_999_999 }
             .Max(ms => Strings.SessionList.Duration(ms).Length);
-        runner.IsTrue(longestDuration <= widestDuration, "no duration under 9,999,999 ms is wider than the Time column's sample");
+        runner.IsTrue(longestDuration <= widestDuration,
+            "no duration up to 99,999,999 ms, a tunnel open for a day, is wider than the Time column's sample");
 
+        // Checked against what sessions actually show, so a longer word added to StatusText cannot
+        // quietly outgrow the column the way CONNECT once did.
         var widestResult = Piper.App.Controls.Format.WidestResultTexts().Max(text => text.Length);
-        runner.IsTrue(Strings.SessionList.ReceivingResult("200").Length <= widestResult && "CONNECT".Length <= widestResult,
-            "the Result column's sample covers a tunnel and a body still arriving");
+        var longestResult = string.Empty;
+        foreach (var state in Enum.GetValues<SessionState>())
+        {
+            foreach (var response in new[] { null, new Piper.Core.Http.HttpResponseData { StatusCode = 599 } })
+            {
+                var session = new Session { State = state, Response = response };
+                var text = state == SessionState.ReceivingBody
+                    ? Strings.SessionList.ReceivingResult(session.StatusText)
+                    : session.StatusText;
+                if (text.Length > longestResult.Length) longestResult = text;
+            }
+        }
+        runner.IsTrue(longestResult.Length <= widestResult,
+            $"no session's Result is wider than the column's sample (longest: \"{longestResult}\")");
 
         // A narrow Path drops its middle, not the file name at its end.
         const string download = "/files/5120/338/All-the-Mods.zip";

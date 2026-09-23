@@ -21,7 +21,7 @@ public sealed class SessionListView : UserControl
     // scaling and zoom are covered. The long ones give up width first, down to these unscaled
     // floors, and share any surplus by weight, so all nine stay on screen in a list about 720 px
     // wide at 100% -- the progress in Size and Time is no use scrolled off to the right.
-    private static readonly int[] FlexibleColumnFloors = [0, 0, 0, 80, 100, 56, 56, 0, 0];
+    private static readonly int[] FlexibleColumnFloors = [0, 0, 0, 72, 100, 56, 56, 0, 0];
     private static readonly int[] ColumnGrowthWeights = [0, 0, 0, 3, 6, 2, 2, 0, 0];
     private const int PathColumn = 4;
     private const int SizeColumn = 7;

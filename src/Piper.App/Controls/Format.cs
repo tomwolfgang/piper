@@ -47,15 +47,19 @@ internal static class Format
         Size(99_999 * (long)Megabyte),
     ];
 
-    /// <summary>Longest a Time cell gets before a body has been arriving for hours: 9,999,999 ms.</summary>
+    /// <summary>
+    /// Longest a Time cell gets before a session has been open for more than a day: 99,999,999 ms.
+    /// A tunnel or a WebSocket can stay open for hours.
+    /// </summary>
     public static string[] WidestDurationTexts() =>
-        [Strings.SessionList.Duration(9_999_999), Strings.SessionList.PendingDuration];
+        [Strings.SessionList.Duration(99_999_999), Strings.SessionList.PendingDuration];
 
     /// <summary>
-    /// The widest Result texts: <see cref="Piper.Core.Sessions.Session.StatusText"/>'s words and a
-    /// status code marked as still arriving.
+    /// The widest Result texts: every word <see cref="Piper.Core.Sessions.Session.StatusText"/> can
+    /// show, and a three-digit status code marked as still arriving.
     /// </summary>
-    public static string[] WidestResultTexts() => ["CONNECT", "ERR", Strings.SessionList.ReceivingResult("999")];
+    public static string[] WidestResultTexts() =>
+        [.. Piper.Core.Sessions.Session.StatusWords, Strings.SessionList.ReceivingResult("999")];
 
     /// <summary>"3.02 MB of 8.00 MB (37%)", or just what has arrived when the total is unknown.</summary>
     public static string ProgressDetail(long received, long total) => total > 0
