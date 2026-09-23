@@ -85,6 +85,12 @@ internal static class ResponseFramingTests
             runner.IsTrue(Rejects("Content-Length: 5\r\nContent-Length: 7"), "conflicting copies are rejected");
             runner.IsTrue(RejectsRequest("Content-Length: 5\r\nContent-Length: 7"),
                 "conflicting copies on a request are rejected");
+
+            // Header names are case-insensitive (RFC 9110 5.1). A case-sensitive presence check
+            // would quietly read a lower-case "content-length: +5" as no body again.
+            runner.IsTrue(RejectsRequest("content-length: +5"), "a lower-case request Content-Length is still judged");
+            runner.IsTrue(RejectsRequest("Content-Length: 5\r\ncontent-length: 7"),
+                "and copies differing only in name case are still compared");
             runner.AreEqual(HttpBodyDescriptor.OfLength(5),
                 Describe("Content-Length: 5\r\nContent-Length: 5", "GET", 200), "identical copies are one length");
             runner.AreEqual(HttpBodyDescriptor.OfLength(5),
