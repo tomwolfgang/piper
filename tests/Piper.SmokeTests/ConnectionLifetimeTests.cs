@@ -149,6 +149,8 @@ internal static class ConnectionLifetimeTests
                 var what = (tunnelled ? "tunnelled " : "") + framing.Replace("\r\n", " + ", StringComparison.Ordinal);
                 runner.IsTrue(reply.StartsWith("HTTP/1.1 400 ", StringComparison.Ordinal),
                     $"'{what}' is answered with a 400 (got: {reply.Split('\r')[0]})");
+                runner.IsTrue(reply.Contains("\r\nConnection: close\r\n", StringComparison.OrdinalIgnoreCase),
+                    $"which tells the client the connection will not be reused after '{what}'");
                 runner.IsTrue(closed, $"and the connection is closed rather than left hanging after '{what}'");
                 await toProxy.DisposeAsync();
             }
