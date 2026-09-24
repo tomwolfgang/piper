@@ -81,5 +81,45 @@ internal static class HttpWireFormatTests
 
             return Task.CompletedTask;
         });
+
+        await runner.RunAsync("editing a response keeps every character of a non-ASCII body", () =>
+        {
+            // The editor shows the body decoded with its charset, and saving pushed that text back
+            // through Latin1: é came back as two mojibake characters and 日本 as "??", on disk.
+            const string body = "{\"city\":\"Zürich\",\"name\":\"日本\",\"ok\":\"✓\"}\r\n";
+            var stored = HttpResponseData.Canned(200, Encoding.UTF8.GetBytes(body), "application/json; charset=utf-8");
+            stored.Headers.Add("X-Latin1", "café");
+
+            var text = HttpWireFormat.ToEditableText(stored);
+            runner.IsTrue(text.Contains("Zürich") && text.Contains("日本") && text.Contains("✓"),
+                "the editor shows the body as it was");
+
+            runner.IsTrue(HttpWireFormat.TryParseEditableText(text, out var shown, out var shownError),
+                $"the editor text parses back ({shownError})");
+            runner.AreEqual(body, shown.BodyAsText(), "the body the dialog displays is the stored one");
+
+            runner.IsTrue(HttpWireFormat.TryParseEditedResponse(text, out var raw, out var error), $"saving succeeds ({error})");
+            runner.IsTrue(HttpWireFormat.TryParseResponse(raw, out var saved, out _), "and writes a real response");
+            runner.AreEqual(Convert.ToHexString(Encoding.UTF8.GetBytes(body)), Convert.ToHexString(saved.Body),
+                "the saved body is byte-for-byte the original UTF-8");
+            runner.AreEqual(saved.Body.Length.ToString(), saved.Headers["Content-Length"], "and framed to its byte length");
+            runner.AreEqual("café", saved.Headers["X-Latin1"], "a Latin1 header value still round-trips");
+
+            // A body in another declared charset is written back in that charset, not in UTF-8.
+            var latin = HttpResponseData.Canned(200, Encoding.Latin1.GetBytes("déjà vu"), "text/plain; charset=iso-8859-1");
+            runner.IsTrue(HttpWireFormat.TryParseEditedResponse(HttpWireFormat.ToEditableText(latin), out var latinRaw, out _),
+                "a Latin1 body saves");
+            runner.IsTrue(HttpWireFormat.TryParseResponse(latinRaw, out var latinSaved, out _), "and parses");
+            runner.AreEqual(Convert.ToHexString(Encoding.Latin1.GetBytes("déjà vu")), Convert.ToHexString(latinSaved.Body),
+                "in its own charset");
+
+            // A body with CRLFs of its own keeps them; only the head is normalised.
+            var multiline = "HTTP/1.1 200 OK\nContent-Type: text/plain\n\nline one\r\nline two\nline three";
+            runner.IsTrue(HttpWireFormat.TryParseEditedResponse(multiline, out var multilineRaw, out _), "mixed line endings parse");
+            runner.IsTrue(HttpWireFormat.TryParseResponse(multilineRaw, out var multilineSaved, out _), "and produce a response");
+            runner.AreEqual("line one\r\nline two\nline three", Encoding.UTF8.GetString(multilineSaved.Body),
+                "the body's own line endings are kept");
+            return Task.CompletedTask;
+        });
     }
 }

@@ -18,7 +18,6 @@ namespace Piper.App.Controls;
 /// </remarks>
 public sealed class ComposerPanel : UserControl
 {
-    private readonly SessionStore _store;
     private readonly RequestExecutor _executor;
 
     // History pane
@@ -45,9 +44,8 @@ public sealed class ComposerPanel : UserControl
 
     private CancellationTokenSource? _inFlight;
 
-    public ComposerPanel(SessionStore store, RequestExecutor executor)
+    public ComposerPanel(RequestExecutor executor)
     {
-        _store = store;
         _executor = executor;
 
         _history.AddRange(ComposerHistoryStore.Load());
@@ -105,6 +103,34 @@ public sealed class ComposerPanel : UserControl
         _editorTabs.TabPages.Add(NewPage(Strings.Composer.TabRaw, _rawEditor)); // == RawTabIndex
         _editorTabs.Selecting += OnEditorTabSelecting;
         _editorTabs.Deselecting += OnEditorTabDeselecting;
+        // Typing in Raw updates the fields once the typing pauses, so the last edit wins whichever
+        // box it was made in. Parsing on every keystroke re-read the whole buffer and reset all four
+        // editors each time, which a captured multi-megabyte body made unusable. Text that does not
+        // parse stays marked dirty, and Send or a tab switch then refuses it rather than sending the
+        // fields; both read it back themselves, so neither waits for the pause.
+        _rawSyncTimer.Tick += (_, _) =>
+        {
+            _rawSyncTimer.Stop();
+            if (_rawDirty) TrySyncFromRaw(out _);
+        };
+        _rawEditor.TextChanged += (_, _) =>
+        {
+            if (_syncingEditors) return;
+            _rawDirty = true;
+            _rawSyncTimer.Stop();
+            if (_rawEditor.TextLength <= MaxLiveRawSyncLength) _rawSyncTimer.Start();
+        };
+        // Moving to another box ends the burst: bring the fields up to date first, so the edit made
+        // there is applied on top of the Raw text rather than overwritten by it when the pause comes.
+        _rawEditor.Leave += (_, _) =>
+        {
+            _rawSyncTimer.Stop();
+            if (_rawDirty) TrySyncFromRaw(out _);
+        };
+        _method.TextChanged += (_, _) => OnStructuredEdit();
+        _url.TextChanged += (_, _) => OnStructuredEdit();
+        _headers.TextChanged += (_, _) => OnStructuredEdit();
+        _body.TextChanged += (_, _) => OnStructuredEdit();
 
         _status = new Label
         {
@@ -171,10 +197,11 @@ public sealed class ComposerPanel : UserControl
 
         _split = split;
 
-        _store.SessionAdded += (_, _) => _searchDirty = true;
-        _store.SessionUpdated += (_, _) => _searchDirty = true;
-        _store.Cleared += (_, _) => _searchDirty = true;
-
+        // Deliberately not driven by SessionStore events: history is this panel's own list, and
+        // rebuilding the tree for every captured session reset the selection several times a
+        // second. Everything that changes _history marks the tree dirty itself, and a send is only
+        // added once it has completed (ExecuteRequestAsync awaits the response first), so no
+        // history row ever needs repainting when a response arrives later.
         _searchTimer = new System.Windows.Forms.Timer { Interval = 400 };
         _searchTimer.Tick += (_, _) =>
         {
@@ -253,6 +280,22 @@ public sealed class ComposerPanel : UserControl
     private bool _responseSplitPositioned;
     private readonly System.Windows.Forms.Timer _searchTimer;
     private volatile bool _searchDirty;
+
+    // The Raw tab and the structured fields (method, URL, headers, body) are two views of one
+    // request, and both are on screen at once, so each edit is copied to the other view. The fields
+    // are what a send is built from. _rawDirty means the Raw text has been typed in and not read
+    // back yet, either because the typing has not paused or because it does not read as a request:
+    // the fields are then stale, and a send or a tab switch reads it back first, or stops and says
+    // why rather than send them.
+    private bool _rawDirty;
+    private bool _syncingEditors;
+    private readonly System.Windows.Forms.Timer _rawSyncTimer = new() { Interval = 300 };
+
+    /// <summary>
+    /// Above this many characters Raw text is read back only on leaving the box, a tab switch or a
+    /// send, not after each pause in typing: a pasted or captured body that size is not typed by hand.
+    /// </summary>
+    private const int MaxLiveRawSyncLength = 256 * 1024;
 
     protected override void OnHandleCreated(EventArgs e)
     {
@@ -343,26 +386,39 @@ public sealed class ComposerPanel : UserControl
     {
         if (session.Request is not { } request) return;
 
-        _method.Text = request.Method;
-        _url.Text = session.Url;
-
-        var headerText = new StringBuilder();
-        foreach (var header in request.Headers)
+        _syncingEditors = true;
+        try
         {
-            // Content-Length is recalculated at send time; keeping a stale one is a footgun.
-            // Host is always re-derived from the URL box at send time too (see
-            // RequestExecutor.PrepareHeaders) -- showing a stale one here would be misleading.
-            if (header.Name.Equals("Content-Length", StringComparison.OrdinalIgnoreCase)) continue;
-            if (header.Name.Equals("Host", StringComparison.OrdinalIgnoreCase)) continue;
-            headerText.Append(header.Name).Append(": ").Append(header.Value).Append("\r\n");
+            _method.Text = request.Method;
+            _url.Text = session.Url;
+
+            var headerText = new StringBuilder();
+            foreach (var header in request.Headers)
+            {
+                // Content-Length is recalculated at send time; keeping a stale one is a footgun.
+                // Host is always re-derived from the URL box at send time too (see
+                // RequestExecutor.PrepareHeaders) -- showing a stale one here would be misleading.
+                if (header.Name.Equals("Content-Length", StringComparison.OrdinalIgnoreCase)) continue;
+                if (header.Name.Equals("Host", StringComparison.OrdinalIgnoreCase)) continue;
+                // The body below is shown decoded, and it goes out exactly as it is shown, so the
+                // encoding and framing that described the captured bytes no longer apply. Keeping
+                // Content-Encoding sent plain bytes labelled gzip, which the origin failed to decode.
+                if (header.Name.Equals("Content-Encoding", StringComparison.OrdinalIgnoreCase)) continue;
+                if (header.Name.Equals("Transfer-Encoding", StringComparison.OrdinalIgnoreCase)) continue;
+                headerText.Append(header.Name).Append(": ").Append(header.Value).Append("\r\n");
+            }
+            _headers.Text = headerText.ToString();
+
+            _body.Text = request.Body.Length > 0 && ContentCodec.LooksTextual(request.ContentType, request.DecodedBody)
+                ? request.BodyAsText()
+                : string.Empty;
         }
-        _headers.Text = headerText.ToString();
+        finally
+        {
+            _syncingEditors = false;
+        }
 
-        _body.Text = request.Body.Length > 0 && ContentCodec.LooksTextual(request.ContentType, request.DecodedBody)
-            ? request.BodyAsText()
-            : string.Empty;
-
-        _rawEditor.Text = BuildRawText();
+        SetRawText(BuildRawText());
         // History is persisted as raw request text only, so a loaded entry has no response of its
         // own. Leaving the previous send's body on screen beside it would read as this request's.
         ShowResponse(null, Strings.Composer.ResponseNotSent);
@@ -376,23 +432,97 @@ public sealed class ComposerPanel : UserControl
     /// <summary>Keeps the Raw tab in sync when it is opened from the structured tabs.</summary>
     private void OnEditorTabSelecting(object? sender, TabControlCancelEventArgs e)
     {
-        if (e.TabPageIndex == RawTabIndex) _rawEditor.Text = BuildRawText();
+        if (e.TabPageIndex == RawTabIndex) SetRawText(BuildRawText());
     }
 
-    /// <summary>Parses the Raw tab back into the structured fields when leaving it.</summary>
+    /// <summary>
+    /// Reads the Raw tab back into the structured fields when leaving it. Text that is not a request
+    /// keeps the Raw tab open with the reason, rather than being thrown away without a word.
+    /// </summary>
     private void OnEditorTabDeselecting(object? sender, TabControlCancelEventArgs e)
     {
         if (e.TabPageIndex != RawTabIndex) return;
-        if (!RequestExecutor.TryParseRaw(_rawEditor.Text, out var parsed, out _)) return;
 
-        _method.Text = parsed.Method;
-        _url.Text = parsed.Url?.ToString() ?? parsed.RequestTarget;
+        // Blank Raw text is nothing typed rather than a broken request. Refusing it left no way off
+        // the tab after clearing the box; the fields stay as they were, and Raw is rebuilt from them
+        // the next time it is opened. Send still refuses an empty request.
+        _rawSyncTimer.Stop();
+        if (string.IsNullOrWhiteSpace(_rawEditor.Text))
+        {
+            _rawDirty = false;
+            return;
+        }
 
-        var headerText = new StringBuilder();
-        foreach (var header in parsed.Headers)
-            headerText.Append(header.Name).Append(": ").Append(header.Value).Append("\r\n");
-        _headers.Text = headerText.ToString();
-        _body.Text = parsed.Body.Length > 0 ? Encoding.UTF8.GetString(parsed.Body) : string.Empty;
+        if (TrySyncFromRaw(out var error)) return;
+
+        e.Cancel = true;
+        ShowRawError(error);
+    }
+
+    /// <summary>
+    /// An edit to the method, URL, headers or body while the Raw tab is showing. The Raw text
+    /// mirrors those fields, so it never shows a request other than the one Send would build. Raw
+    /// text that does not parse is left alone, since regenerating it would throw away what the user
+    /// is in the middle of typing; Send refuses to go until it is fixed.
+    /// </summary>
+    private void OnStructuredEdit()
+    {
+        if (_syncingEditors || _rawDirty || _editorTabs.SelectedIndex != RawTabIndex) return;
+        SetRawText(BuildRawText());
+    }
+
+    private void SetRawText(string text)
+    {
+        _syncingEditors = true;
+        try
+        {
+            _rawEditor.Text = text;
+        }
+        finally
+        {
+            _syncingEditors = false;
+        }
+
+        _rawSyncTimer.Stop();
+        _rawDirty = false;
+    }
+
+    /// <summary>
+    /// Copies typed Raw text into the structured fields, which are what a send is built from.
+    /// Succeeds without doing anything when the Raw text has not been edited.
+    /// </summary>
+    private bool TrySyncFromRaw(out string error)
+    {
+        error = string.Empty;
+        if (!_rawDirty) return true;
+        if (!RequestExecutor.TryParseRaw(_rawEditor.Text, out var parsed, out error)) return false;
+
+        _syncingEditors = true;
+        try
+        {
+            _method.Text = parsed.Method;
+            _url.Text = parsed.Url?.ToString() ?? parsed.RequestTarget;
+
+            var headerText = new StringBuilder();
+            foreach (var header in parsed.Headers)
+                headerText.Append(header.Name).Append(": ").Append(header.Value).Append("\r\n");
+            _headers.Text = headerText.ToString();
+            _body.Text = parsed.Body.Length > 0 ? Encoding.UTF8.GetString(parsed.Body) : string.Empty;
+        }
+        finally
+        {
+            _syncingEditors = false;
+        }
+
+        _rawDirty = false;
+        UpdateBodyWarning();
+        return true;
+    }
+
+    private void ShowRawError(string error)
+    {
+        _status.Text = Strings.Composer.RawNotApplied(error);
+        _status.ForeColor = Palette.StatusServerError;
     }
 
     private string BuildRawText() =>
@@ -444,6 +574,14 @@ public sealed class ComposerPanel : UserControl
         if (_inFlight is not null)
         {
             await _inFlight.CancelAsync();
+            return;
+        }
+
+        // A send is built from the structured fields, so typed Raw text has to reach them first.
+        // Loading a session opens the Raw tab, and Send used to ignore every edit made there.
+        if (_editorTabs.SelectedIndex == RawTabIndex && !TrySyncFromRaw(out var rawError))
+        {
+            ShowRawError(rawError);
             return;
         }
 
@@ -560,6 +698,7 @@ public sealed class ComposerPanel : UserControl
         if (disposing)
         {
             _searchTimer.Dispose();
+            _rawSyncTimer.Dispose();
             _inFlight?.Dispose();
         }
         base.Dispose(disposing);

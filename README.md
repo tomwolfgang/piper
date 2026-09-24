@@ -104,9 +104,10 @@ Terms are ANDed. Prefix any term with `-` or `!` to negate it.
 | quoted | `"order id"` | literal phrase |
 | regex | `/orders\/[0-9]+/` | regular expression |
 | `method:` `m:` | `method:GET\|POST` | alternatives with `\|` |
-| `host:` `h:` | `host:api.example.com` | |
+| `host:` `h:` | `host:api.example.com` | substring of the host |
+| `domain:` `d:` | `domain:example.com` | that host and its subdomains, never a lookalike such as `evil-example.com`; a fragment such as `curseforge` or `api.` matches any host containing it |
 | `path:` `query:` `url:` | `path:/v2/users` | |
-| `status:` `s:` | `status:404`, `status:4xx`, `status:>=400`, `status:200..299` | |
+| `status:` `s:` | `status:404`, `status:4xx`, `status:>=400`, `status:200..299`, `status:4xx\|5xx` | |
 | `ct:` | `ct:json` | content type |
 | `header:` | `header:Authorization`, `header:Accept=json` | request or response |
 | `reqheader:` `respheader:` | | one side only |
@@ -138,11 +139,13 @@ method:POST host:api status:>=400 -is:image body:"order"
 | `Ctrl+E` | send the selected session to the Composer |
 | `Ctrl+T` | open the TextWizard |
 | `Ctrl+S` | save selected sessions as a Fiddler SAZ archive |
-| `Ctrl+X` | clear sessions |
+| `Ctrl+X` | clear sessions (outside text boxes, where it cuts text as usual) |
 | `Ctrl+C` | copy selected URLs |
 | `Del` | remove selected sessions |
 | double-click a session | show it in the Inspectors tab |
 | middle-click a session | send it to the Composer |
+| click a session list column header | sort by that column; click it again to reverse, or sort by `#` for capture order |
+| **Follow new sessions** button | appears over the session list whenever the newest row is not being followed (scrolled up, or sorted); click it to return to capture order and keep the newest session in view |
 | drag a session | drop it anywhere on the Composer or AutoResponder, or onto its tab |
 | `Ctrl+MouseWheel` | resize the UI font |
 | `Ctrl++` / `Ctrl+-` | resize the UI font a step at a time |

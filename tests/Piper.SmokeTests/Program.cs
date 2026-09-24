@@ -543,6 +543,7 @@ await WebFormParserTests.RunAsync(runner);
 await TextTransformsTests.RunAsync(runner);
 await TextTransformDetectorTests.RunAsync(runner);
 await SearchQueryTests.RunAsync(runner);
+await SessionSortTests.RunAsync(runner);
 await FilterSettingsStoreTests.RunAsync(runner);
 await FilterQueryTests.RunAsync(runner);
 await HostFilterHideTests.RunAsync(runner);

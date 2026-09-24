@@ -581,11 +581,17 @@ public sealed class AutoResponderPanel : UserControl
 
     private void OnListMouseDown(object? sender, MouseEventArgs e)
     {
+        // Only a left click toggles. A right click is how the context menu opens, and it used to
+        // flip (and immediately save) whichever rule it landed on.
+        if (e.Button != MouseButtons.Left) return;
+
         var hit = _list.HitTest(e.Location);
         if (hit.Item?.Tag is not AutoResponderRule rule) return;
 
-        // Column 0 is the enable checkbox; anywhere else is an ordinary selection.
-        if (e.X > _list.Columns[0].Width) return;
+        // Column 0 is the enable checkbox; anywhere else is an ordinary selection. Ask the hit test
+        // which cell was clicked rather than comparing e.X to the column width, which ignores
+        // horizontal scrolling and toggled a rule whose checkbox was scrolled out of view.
+        if (!ReferenceEquals(hit.SubItem, hit.Item.SubItems[0])) return;
 
         rule.Enabled = !rule.Enabled;
         _list.Invalidate(hit.Item.Bounds);

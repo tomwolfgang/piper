@@ -641,28 +641,52 @@ public sealed class ComposerHistoryTree : UserControl
     /// Row identities to restore after a rebuild. Rows are re-created from scratch every time, so
     /// a plain index would drift the selection whenever a group above it folds or unfolds.
     /// </summary>
-    private List<string> SelectedKeys() => SelectedRows()
+    /// <remarks>
+    /// A single send is remembered as that send, with its group as the fallback. Remembering only
+    /// the group moved the selection from one send up to its "xN" row on the next rebuild, so
+    /// Delete then removed every send of the request instead of the one the user picked.
+    /// </remarks>
+    private List<SelectedRow> SelectedKeys() => SelectedRows()
         .Select(row => row.Kind == ComposerRowKind.Send
-            ? ComposerHistoryView.ExpandKey(row.Host, ComposerHistoryView.RequestKey(row.Session))
-            : row.Key)
+            ? new SelectedRow(ComposerHistoryView.ExpandKey(row.Host, ComposerHistoryView.RequestKey(row.Session)), row.Session)
+            : new SelectedRow(row.Key, null))
         .ToList();
 
-    private void Reselect(List<string> keys)
+    private void Reselect(List<SelectedRow> selection)
     {
-        if (keys.Count == 0) return;
+        if (selection.Count == 0) return;
 
-        var wanted = new HashSet<string>(keys, StringComparer.Ordinal);
+        var wantedSends = selection.Where(row => row.Send is not null).Select(row => row.Send!).ToHashSet();
+        var visibleSends = _rows.Where(row => row.Kind == ComposerRowKind.Send && wantedSends.Contains(row.Session))
+            .Select(row => row.Session)
+            .ToHashSet();
+
+        // A send that is no longer listed (its group was folded, or a search hides it) falls back
+        // to the group row that now stands for it.
+        var wantedKeys = selection
+            .Where(row => row.Send is null || !visibleSends.Contains(row.Send))
+            .Select(row => row.Key)
+            .ToHashSet(StringComparer.Ordinal);
+
         _list.SelectedIndices.Clear();
         var focused = false;
         for (var i = 0; i < _rows.Count; i++)
         {
-            if (_rows[i].Kind == ComposerRowKind.Send || !wanted.Contains(_rows[i].Key)) continue;
+            var row = _rows[i];
+            var wanted = row.Kind == ComposerRowKind.Send
+                ? visibleSends.Contains(row.Session)
+                : wantedKeys.Contains(row.Key);
+            if (!wanted) continue;
+
             _list.SelectedIndices.Add(i);
             if (focused) continue;
             _list.Items[i].Focused = true;
             focused = true;
         }
     }
+
+    /// <summary>A selected row: its key, and for a single send, the send itself.</summary>
+    private readonly record struct SelectedRow(string Key, Session? Send);
 
     protected override void Dispose(bool disposing)
     {

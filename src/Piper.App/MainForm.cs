@@ -114,7 +114,7 @@ public sealed class MainForm : Form, IMessageFilter
 
         _sessionList = new SessionListView(_store) { Dock = DockStyle.Fill };
         _inspector = new InspectorPanel { Dock = DockStyle.Fill };
-        _composer = new ComposerPanel(_store, _executor) { Dock = DockStyle.Fill };
+        _composer = new ComposerPanel(_executor) { Dock = DockStyle.Fill };
         _filterPanel = new FilterPanel { Dock = DockStyle.Fill };
         _autoResponder = new AutoResponderPanel(_options.AutoResponder) { Dock = DockStyle.Fill };
 
@@ -202,9 +202,22 @@ public sealed class MainForm : Form, IMessageFilter
             // would come back applied on the next start.
             FilterSettingsStore.Save(_filterPanel.Settings);
             _rightTabs.SetTabChecked(filtersPage, !admissionQuery.IsEmpty);
+            // Running or stopping the filterset makes it the authority on what is hidden, so the
+            // "Hide this host" previews give way to it: a running hide-mode list keeps hiding them,
+            // and Show all sessions shows them again.
+            ClearSessionHiddenHosts();
         };
-        _filterPanel.SettingsChanged += (_, _) => FilterSettingsStore.Save(_filterPanel.Settings);
+        _filterPanel.SettingsChanged += (_, _) =>
+        {
+            FilterSettingsStore.Save(_filterPanel.Settings);
+            PruneSessionHiddenHosts();
+        };
         _sessionList.HideHostRequested += (_, host) => HideHost(host);
+        _sessionList.ShowSessionHiddenHostsRequested += (_, _) =>
+        {
+            ClearSessionHiddenHosts();
+            AppendLog(Strings.Log.SessionHiddenHostsShown);
+        };
 
         // Restore the editable settings and then apply their saved enabled state so a restart
         // returns to the same filtered capture view.
@@ -247,6 +260,7 @@ public sealed class MainForm : Form, IMessageFilter
         Application.AddMessageFilter(this);
 
         Palette.Apply(this);
+        RefreshStatusColours();
         UpdateZoomStatus();
         AppendLog(DescribeEnvironment());
         // Windows refuses drags from an unelevated Explorer to an elevated window and reports
@@ -577,6 +591,10 @@ public sealed class MainForm : Form, IMessageFilter
         file.DropDownItems.Add(Strings.Menu.Exit, null, (_, _) => Close());
         file.DropDownOpening += (_, _) =>
             saveSaz.Enabled = _sessionList.SelectedSessions.Any(session => session.Request is not null);
+        // A disabled item ignores its ShortcutKeys, so leaving it disabled after the menu closes made
+        // Ctrl+S do nothing until the File menu happened to be opened again with a selection.
+        // SaveSelectedSessionsAsSaz already does nothing when there is nothing to save.
+        file.DropDownClosed += (_, _) => saveSaz.Enabled = true;
 
         var tools = new ToolStripMenuItem(Strings.Menu.Tools);
         tools.DropDownItems.Add(Strings.Menu.Configurations, null, (_, _) => ShowConfigurations());
@@ -955,13 +973,23 @@ public sealed class MainForm : Form, IMessageFilter
         _captureScopeLabel.Image = ScopeIcon;
         _breakpointsLabel.Image = BreakpointIcon;
         _sessionsLabel.Image = SessionsIcon;
-        UpdateCaptureStatus();
+        RefreshStatusColours();
 
         oldCaptureOn.Dispose();
         oldCaptureOff.Dispose();
         oldScope.Dispose();
         oldBreakpoints.Dispose();
         oldSessions.Dispose();
+    }
+
+    /// <summary>
+    /// Puts back the status labels' meaning colours, which every <see cref="Palette.Apply"/> walk
+    /// resets to the plain text colour. Call after each walk over this form.
+    /// </summary>
+    private void RefreshStatusColours()
+    {
+        UpdateCaptureStatus();
+        _selectedSessionDetailsLabel.ForeColor = Palette.TextDim;
     }
 
     private static void InvalidateTheme(Control control)
@@ -1275,6 +1303,11 @@ public sealed class MainForm : Form, IMessageFilter
             menu.Items.Add(item);
         }
 
+        // Built per click, so it is themed here rather than by the form's walk, and released once it
+        // closes: a menu shown without an owner control is never disposed by anything else. Deferred,
+        // because Closed is raised before the clicked item's Click handler runs.
+        Palette.Apply(menu);
+        menu.Closed += (_, _) => BeginInvoke(menu.Dispose);
         menu.Show(Cursor.Position);
     }
 
@@ -1472,12 +1505,16 @@ public sealed class MainForm : Form, IMessageFilter
             _composer.FocusSearch();
             e.Handled = true;
         }
-        else if (e.Control && e.KeyCode == Keys.R && _sessionList.ResendSelected())
+        // KeyPreview hands this form every key before the focused control sees it, so a chord that
+        // means something inside a text box has to leave it alone there: Ctrl+X cut the selected text
+        // and cleared the whole capture with it, and Ctrl+R replayed a captured request while the
+        // user was typing in the Composer.
+        else if (e.Control && e.KeyCode == Keys.R && !IsTextInputFocused() && _sessionList.ResendSelected())
         {
             e.Handled = true;
             e.SuppressKeyPress = true;
         }
-        else if (e.Control && e.KeyCode == Keys.X)
+        else if (e.Control && e.KeyCode == Keys.X && !IsTextInputFocused())
         {
             _store.Clear();
             e.Handled = true;
@@ -1502,6 +1539,27 @@ public sealed class MainForm : Form, IMessageFilter
             e.Handled = true;
             e.SuppressKeyPress = true;
         }
+    }
+
+    /// <summary>
+    /// Whether keyboard focus is in a control that edits text, where Ctrl+X, Ctrl+R and friends
+    /// belong to the control. <see cref="ContainerControl.ActiveControl"/> stops at the nearest
+    /// container (every panel here is a UserControl), so walk down to the control that has focus.
+    /// </summary>
+    private bool IsTextInputFocused()
+    {
+        Control? focused = ActiveControl;
+        while (focused is ContainerControl { ActiveControl: { } inner } and not UpDownBase) focused = inner;
+
+        // Read-only boxes count too: someone reading a body in the inspector who reaches for Ctrl+X
+        // expects nothing, or at most a copy, not an empty capture.
+        return focused switch
+        {
+            TextBoxBase => true,
+            ComboBox { DropDownStyle: not ComboBoxStyle.DropDownList } => true,
+            UpDownBase => true,
+            _ => false,
+        };
     }
 
     /// <summary>
@@ -1550,6 +1608,7 @@ public sealed class MainForm : Form, IMessageFilter
 
         Palette.RescaleFonts();
         Palette.Apply(this);
+        RefreshStatusColours();
         _sessionList.RefitColumns();
         UpdateZoomStatus();
         UpdateZoomMenu();
@@ -1595,10 +1654,16 @@ public sealed class MainForm : Form, IMessageFilter
 
     /// <summary>
     /// Routes the capture list's "Hide this host" into the Filters tab's persisted Hosts list, so
-    /// the choice is still there after a restart. Following Fiddler Classic, this records the host
-    /// but never ticks "Use Filters" for the user: running a filterset stays their explicit action,
-    /// which is why the grid also gets an immediate transient term while the filterset is inactive.
+    /// the choice is still there after a restart, and hides the host in the grid straight away.
+    /// Following Fiddler Classic, this records the host but never ticks "Use Filters" for the user:
+    /// running a filterset stays their explicit action.
     /// </summary>
+    /// <remarks>
+    /// The immediate hide lives in the grid's own session slot (<see cref="SessionListView.SessionHiddenHostsFilter"/>),
+    /// not in the filter box. Writing a term into the box took the box away from the user, and gave
+    /// one hide two places to undo it: unticking the entry in the Filters tab, as the help says to,
+    /// left the host hidden by the term.
+    /// </remarks>
     private void HideHost(string host)
     {
         // Session.Host is the raw Host header whenever the request line had no parseable URL, so it
@@ -1610,39 +1675,72 @@ public sealed class MainForm : Form, IMessageFilter
             return;
         }
 
-        // Hide it here and now, but leave the filterset staged rather than running it: recomposing
-        // would start dropping this host at admission (SessionStore.CompletedSessionFilter), which
-        // unticking the entry later cannot undo. As in Fiddler Classic, running a filterset stays
-        // an explicit action.
-        AppendTransientHideTerm(host);
-
+        // Leave the filterset staged rather than running it: recomposing would start dropping this
+        // host at admission (SessionStore.CompletedSessionFilter), which unticking the entry later
+        // cannot undo. As in Fiddler Classic, running a filterset stays an explicit action.
         var settings = _filterPanel.Settings;
         var wasShowOnly = settings.HostsMode != 1;
-        if (!settings.HideHost(host))
+        var recorded = settings.HideHost(host);
+        if (recorded) _filterPanel.ApplySettings(settings);
+
+        // After ApplySettings, whose SettingsChanged would otherwise prune the new entry as unlisted.
+        _sessionHiddenHosts[host] = recorded;
+        ApplySessionHiddenHosts();
+
+        if (!recorded)
         {
             AppendLog(Strings.Log.HideHostShowOnlyConflict(host));
             return;
         }
 
-        _filterPanel.ApplySettings(settings);
         if (wasShowOnly && settings.HostsMode == 1)
             AppendLog(Strings.Log.HideHostSwitchedToHideMode);
 
         AppendLog(Strings.Log.HideHostAdded(host));
     }
 
-    /// <summary>Hides a host in the capture list only, for the rest of this session.</summary>
-    private void AppendTransientHideTerm(string host)
+    /// <summary>
+    /// Hosts hidden with "Hide this host" since the filterset last ran, and whether the Filters tab
+    /// list is what records each one. A recorded host stays hidden only while an enabled hide entry
+    /// in that list still covers it; one the list could not take (it was showing only specific
+    /// hosts) is hidden for the session alone.
+    /// </summary>
+    private readonly Dictionary<string, bool> _sessionHiddenHosts = new(StringComparer.OrdinalIgnoreCase);
+
+    private void ApplySessionHiddenHosts()
     {
-        var term = $"-host:{host}";
-        var current = _sessionList.FilterText;
-        // Hiding an already hidden host is a no-op in the persisted list, so this path can be
-        // reached repeatedly; appending each time would grow the filter box without changing it.
-        // Compare whole terms: "-host:a.example.com" is not already covered by a longer term that
-        // merely starts with it, such as "-host:a.example.com.example.net".
-        if (current.Split(' ', StringSplitOptions.RemoveEmptyEntries)
-            .Any(existing => string.Equals(existing, term, StringComparison.OrdinalIgnoreCase))) return;
-        _sessionList.FilterText = string.IsNullOrWhiteSpace(current) ? term : $"{current} {term}";
+        var hidden = _sessionHiddenHosts.Keys.ToArray();
+        _sessionList.SessionHiddenHostsFilter = hidden.Length == 0
+            ? null
+            : session => !hidden.Any(pattern => HostFilterTerm.Covers(pattern, session.Host));
+    }
+
+    /// <summary>
+    /// Shows a recorded host again once the Filters tab no longer hides it: its entry was unticked or
+    /// removed, or the list switched to showing only specific hosts. That is the undo the Filters
+    /// help promises, and it has to work before the filterset is ever run.
+    /// </summary>
+    private void PruneSessionHiddenHosts()
+    {
+        if (_sessionHiddenHosts.Count == 0) return;
+
+        var settings = _filterPanel.Settings;
+        var released = _sessionHiddenHosts
+            .Where(pair => pair.Value && !settings.Hides(pair.Key))
+            .Select(pair => pair.Key)
+            .ToArray();
+        if (released.Length == 0) return;
+
+        foreach (var host in released) _sessionHiddenHosts.Remove(host);
+        ApplySessionHiddenHosts();
+    }
+
+    /// <summary>Forgets every session-only hide, for the grid's "show hidden hosts" command and a filterset run.</summary>
+    private void ClearSessionHiddenHosts()
+    {
+        if (_sessionHiddenHosts.Count == 0) return;
+        _sessionHiddenHosts.Clear();
+        ApplySessionHiddenHosts();
     }
 
     /// <summary>

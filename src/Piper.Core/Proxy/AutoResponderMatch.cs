@@ -60,7 +60,7 @@ public sealed class AutoResponderMatch
     /// <summary>Query fields that describe the request, and so can be answered before one is sent.</summary>
     private static readonly HashSet<string> RequestTimeFields = new(StringComparer.OrdinalIgnoreCase)
     {
-        "method", "m", "host", "h", "path", "p", "query", "qs", "url", "u",
+        "method", "m", "host", "h", "domain", "d", "path", "p", "query", "qs", "url", "u",
         "header", "hdr", "reqheader", "rh", "req", "reqbody", "reqsize", "id", "is", "has",
     };
 

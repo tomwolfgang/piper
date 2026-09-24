@@ -35,11 +35,17 @@ public sealed class SessionListView : UserControl
     private const int ProgressFillAlpha = 70;
     private const int ProgressEdgeHeight = 2;
 
+    /// <summary>Room a header loses to its text inset, plus the sort glyph beside it.</summary>
+    private const int HeaderPadding = 12 + SortGlyphRoom;
+    private const int SortGlyphRoom = 14;
+
     /// <summary>Ceiling on how many matches a find selects. Marking is unlimited.</summary>
     private const int MaxSelectedMatches = 2_000;
 
     private readonly ListView _list;
     private readonly TextBox _filterBox;
+    private readonly Button _followButton;
+    private readonly ToolTip _filterToolTip = new();
     private readonly SessionStore _store;
     private readonly SolidBrush _surfaceBrush = new(Palette.Surface);
     private readonly SolidBrush _selectionBrush = new(Palette.Selection);
@@ -58,7 +64,13 @@ public sealed class SessionListView : UserControl
     private FindSessionsRequest _lastFind = FindSessionsRequest.Default;
     private Func<Session, bool>? _visibilityFilter;
     private Func<Session, bool>? _filtersetFilter;
+    private Func<Session, bool>? _sessionHiddenHostsFilter;
     private bool _autoScroll = true;
+
+    // Null keeps the store's own order, which is what the grid has always shown. A header click
+    // picks a column; clicking the same one again reverses it.
+    private SessionSortColumn? _sortColumn;
+    private bool _sortDescending;
 
     public event EventHandler<Session?>? SelectionChanged;
 
@@ -89,6 +101,9 @@ public sealed class SessionListView : UserControl
     /// </summary>
     public event EventHandler<string>? HideHostRequested;
 
+    /// <summary>Raised when the user asks to see again every host hidden this session.</summary>
+    public event EventHandler? ShowSessionHiddenHostsRequested;
+
     public SessionListView(SessionStore store)
     {
         _store = store;
@@ -104,7 +119,7 @@ public sealed class SessionListView : UserControl
         var filterRow = new Panel { Dock = DockStyle.Top, Height = 26, Padding = new Padding(2) };
         filterRow.Controls.Add(_filterBox);
 
-        _list = new ListView
+        _list = new SteadyListView
         {
             Dock = DockStyle.Fill,
             View = View.Details,
@@ -114,7 +129,7 @@ public sealed class SessionListView : UserControl
             HideSelection = false,
             MultiSelect = true,
             OwnerDraw = true,
-            HeaderStyle = ColumnHeaderStyle.Nonclickable,
+            HeaderStyle = ColumnHeaderStyle.Clickable,
         };
         DarkListView.EnableDoubleBuffering(_list);
 
@@ -134,6 +149,7 @@ public sealed class SessionListView : UserControl
         _list.DpiChangedAfterParent += (_, _) => RefitColumns();
 
         _list.RetrieveVirtualItem += OnRetrieveVirtualItem;
+        _list.ColumnClick += OnColumnClick;
         _list.DrawColumnHeader += OnDrawColumnHeader;
         _list.DrawSubItem += OnDrawSubItem;
         _list.SelectedIndexChanged += (_, _) => OnSelectionChanged();
@@ -148,8 +164,26 @@ public sealed class SessionListView : UserControl
 
         BuildContextMenu();
 
+        // Floats over the grid's bottom-right corner whenever new rows are not being followed, so a
+        // paused tail is visible and one click away from resuming.
+        _followButton = new Button
+        {
+            Text = Strings.SessionList.FollowTail,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            Visible = false,
+            TabStop = false,
+            Cursor = Cursors.Hand,
+        };
+        _followButton.Click += (_, _) => ResumeFollowTail();
+        _followButton.SizeChanged += (_, _) => PositionFollowButton();
+        _filterToolTip.SetToolTip(_followButton, Strings.SessionList.FollowTailTooltip);
+        _list.ClientSizeChanged += (_, _) => PositionFollowButton();
+
         Controls.Add(_list);
         Controls.Add(filterRow);
+        Controls.Add(_followButton);
+        _followButton.BringToFront();
 
         ExpandColumnsToView();
 
@@ -166,6 +200,12 @@ public sealed class SessionListView : UserControl
             {
                 _refreshPending = false;
                 Rebuild();
+            }
+            else
+            {
+                // The ListView raises no scroll event, so a user scrolling away from the newest row
+                // with no traffic arriving is noticed here. One item-rect message per tick.
+                UpdateFollowButton();
             }
 
             // A body's progress is read here rather than announced by the relay: a download raises
@@ -185,6 +225,10 @@ public sealed class SessionListView : UserControl
     private bool _progressTick;
     private bool _suppressSelectionChanged;
     private bool _expandingColumns;
+
+    /// <summary>Set when the search box or a visibility filter changed, so the next rebuild may
+    /// scroll back to the top. A store refresh (a new row, a deleted row) must keep the position.</summary>
+    private bool _filterChanged;
     private int[] _columnMinimums = [];
 
     // One character of the grid font, and the padding TextRenderer adds around a run of them.
@@ -216,8 +260,9 @@ public sealed class SessionListView : UserControl
     /// <summary>Master switch for keeping the newest session in view as rows arrive. Named to
     /// avoid colliding with <see cref="ScrollableControl.AutoScroll"/>. Even when true, a
     /// refresh only scrolls to the newest row if the view was already showing it -- see
-    /// <see cref="IsScrolledToBottom"/> -- so scrolling up to review earlier rows pauses
-    /// following until you scroll back down to the bottom yourself.</summary>
+    /// <see cref="IsScrolledToBottom"/> -- so scrolling up to review earlier rows, or sorting by a
+    /// column, pauses following until you scroll back down to the bottom yourself or click the
+    /// follow button that appears while it is paused. A selected row does not pause it.</summary>
     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     public bool FollowTail
     {
@@ -251,6 +296,7 @@ public sealed class SessionListView : UserControl
         set
         {
             _visibilityFilter = value;
+            _filterChanged = true;
             Rebuild();
         }
     }
@@ -269,6 +315,24 @@ public sealed class SessionListView : UserControl
         set
         {
             _filtersetFilter = value;
+            _filterChanged = true;
+            Rebuild();
+        }
+    }
+
+    /// <summary>
+    /// Hosts hidden with "Hide this host" for this session, in a slot of their own for the same
+    /// reason as <see cref="FiltersetFilter"/>: the search box is the user's. The form owns what is
+    /// in it and takes a host back out when its Filters tab entry is unticked or removed. Unlike a
+    /// filter change this keeps the scroll position, since it removes a few rows, not most of them.
+    /// </summary>
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    public Func<Session, bool>? SessionHiddenHostsFilter
+    {
+        get => _sessionHiddenHostsFilter;
+        set
+        {
+            _sessionHiddenHostsFilter = value;
             Rebuild();
         }
     }
@@ -332,8 +396,11 @@ public sealed class SessionListView : UserControl
         {
             for (var index = 0; index < minimums.Length; index++)
             {
+                // A compact column also has to fit its own header with the sort glyph beside it,
+                // or sorting by Size or Time squeezes the heading into an ellipsis.
                 minimums[index] = FixedColumnSamples(index) is { } samples
-                    ? MeasureWidest(graphics, samples)
+                    ? Math.Max(MeasureWidest(graphics, samples),
+                        TextRenderer.MeasureText(graphics, _list.Columns[index].Text, Palette.UiFont).Width + HeaderPadding)
                     : (int)Math.Round(LogicalToDeviceUnits(FlexibleColumnFloors[index]) * zoom);
             }
 
@@ -395,7 +462,44 @@ public sealed class SessionListView : UserControl
     {
         _query = SearchQuery.Parse(_filterBox.Text);
         _filterBox.ForeColor = _query.Warnings.Count > 0 ? Palette.StatusClientError : Palette.Text;
+        _filterToolTip.SetToolTip(_filterBox, null);
+        _filterChanged = true;
         Rebuild();
+    }
+
+    /// <summary>True while rows are in the order they were captured, where following the tail makes sense.</summary>
+    private bool IsCaptureOrder => _sortColumn is null || (_sortColumn == SessionSortColumn.Id && !_sortDescending);
+
+    /// <summary>
+    /// Sorts by the clicked column, or reverses the current sort when it is clicked again. The
+    /// selection is kept by session id and scrolled back into view; with nothing selected the view
+    /// goes to the top, where the smallest (or largest) value now sits.
+    /// </summary>
+    private void OnColumnClick(object? sender, ColumnClickEventArgs e)
+    {
+        // Only the real columns sort; the unlabelled filler past them does not. Checked against the
+        // enum itself, so a column added later cannot reach SessionSort as an undefined value.
+        if (e.Column < 0 || !Enum.IsDefined((SessionSortColumn)e.Column)) return;
+
+        var column = (SessionSortColumn)e.Column;
+        if (_sortColumn == column)
+        {
+            _sortDescending = !_sortDescending;
+        }
+        else
+        {
+            _sortColumn = column;
+            _sortDescending = false;
+        }
+
+        Rebuild();
+
+        var index = SelectedSession is { } session ? _visible.IndexOf(session) : -1;
+        if (index >= 0) _list.EnsureVisible(index);
+        else if (_visible.Count > 0) _list.EnsureVisible(0);
+
+        // The header is a native child window, so repainting the glyphs needs the children too.
+        _list.Invalidate(invalidateChildren: true);
     }
 
     /// <summary>
@@ -491,6 +595,8 @@ public sealed class SessionListView : UserControl
         if (_findQuery.Warnings.Count > 0)
             message += Environment.NewLine + Environment.NewLine
                 + string.Join(Environment.NewLine, _findQuery.Warnings);
+        if (_findQuery.RegexTimedOut)
+            message += Environment.NewLine + Environment.NewLine + Strings.SessionList.RegexTimedOut;
 
         MessageBox.Show(FindForm(), message, Strings.SessionList.FindCaption,
             MessageBoxButtons.OK, MessageBoxIcon.Information);
@@ -568,10 +674,24 @@ public sealed class SessionListView : UserControl
         // this is "was the user already looking at the bottom", independent of how many new
         // rows are about to arrive.
         var wasAtBottom = IsScrolledToBottom();
-        var previousTop = _list.IsHandleCreated ? _list.TopItem?.Index ?? 0 : 0;
+        var previousTop = TopIndex();
+        // The session at the top of the view, read before _visible is rebuilt, so the rows the user
+        // is looking at can be held still below.
+        var anchor = previousTop >= 0 && previousTop < _visible.Count ? _visible[previousTop] : null;
+        var filterChanged = _filterChanged;
+        _filterChanged = false;
         _store.CopyTo(_visible);
         PruneMarks(_visible);
         ApplyVisibilityFiltersInPlace();
+        // A pattern that ran past its timeout fails the whole query closed, so the list empties.
+        // Say why in the box's colour and tooltip rather than leave an unexplained blank grid.
+        if (_query.RegexTimedOut && _filterBox.ForeColor != Palette.StatusClientError)
+        {
+            _filterBox.ForeColor = Palette.StatusClientError;
+            _filterToolTip.SetToolTip(_filterBox, Strings.SessionList.RegexTimedOut);
+        }
+        if (_sortColumn is { } sortColumn)
+            SessionSort.Sort(_visible, sortColumn, _sortDescending);
 
         _list.BeginUpdate();
         try
@@ -580,14 +700,11 @@ public sealed class SessionListView : UserControl
             var previousCount = _list.VirtualListSize;
             _list.VirtualListSize = _visible.Count;
 
-            // A virtual ListView keeps its scroll offset when the row count changes underneath it.
-            // Clearing the grid, or typing a filter that matches far fewer rows, leaves the view
-            // parked past the last row: the rows are there, but nothing paints until a click happens
-            // to scroll it back into range. Pull it to the top first whenever the old offset can no
-            // longer be meaningful, then let the rules below decide where to leave it.
-            var offsetReset = _visible.Count > 0 && (_visible.Count < previousCount || previousCount == 0);
-            if (offsetReset)
-                _list.EnsureVisible(0);
+            // Following depends on where the view is, not on whether a row is selected: a selection
+            // used to stop it for good, so scrolling back to the bottom after clicking a row never
+            // resumed it. Sorted by anything but capture order, the bottom row is not the newest one,
+            // so chasing it would drag the view around as rows land in the middle.
+            var following = _autoScroll && wasAtBottom && _visible.Count > 0 && IsCaptureOrder;
 
             if (previousIds is { Count: > 0 })
             {
@@ -596,14 +713,23 @@ public sealed class SessionListView : UserControl
                     if (previousIds.Contains(_visible[index].Id)) _list.SelectedIndices.Add(index);
             }
 
-            // Follow the tail whether or not a row is selected: selecting a session to inspect it
-            // must not freeze the list. Scrolling up is what pauses following, not selection.
-            if (_autoScroll && wasAtBottom && _visible.Count > 0)
+            // A virtual ListView keeps its scroll offset when the row count changes underneath it.
+            // Clearing the grid, or typing a filter that matches far fewer rows, leaves the view
+            // parked past the last row: the rows are there, but nothing paints until a click happens
+            // to scroll it back into range. A new list or a narrower filter starts again from the
+            // top. Anything else keeps the user's place. This runs after the selection is restored,
+            // since reselecting rows can drag the view toward them.
+            if (following)
+            {
                 _list.EnsureVisible(_visible.Count - 1);
-            // Otherwise the user has scrolled away from the tail: reselecting the rows above drags
-            // the view toward the selection, so put the first row they were reading back on top.
-            else if (!offsetReset && previousTop < _visible.Count && _list.TopItem?.Index != previousTop)
-                _list.TopItem = _list.Items[previousTop];
+            }
+            else if (_visible.Count > 0)
+            {
+                if (previousCount == 0 || (filterChanged && _visible.Count < previousCount))
+                    _list.EnsureVisible(0);
+                else
+                    HoldAnchorInView(anchor, previousTop);
+            }
         }
         finally
         {
@@ -625,11 +751,82 @@ public sealed class SessionListView : UserControl
             SelectedSessionsChanged?.Invoke(this, EventArgs.Empty);
 
         _list.Invalidate();
+        UpdateFollowButton();
     }
+
+    /// <summary>
+    /// Shows the follow button whenever new rows would not come into view on their own: the user
+    /// scrolled away from the newest row, or a sort put the rows in another order.
+    /// </summary>
+    private void UpdateFollowButton()
+    {
+        var show = _autoScroll && _visible.Count > 0 && !(IsCaptureOrder && IsScrolledToBottom());
+        if (_followButton.Visible == show) return;
+        if (show) PositionFollowButton();
+        _followButton.Visible = show;
+    }
+
+    /// <summary>Keeps the follow button in the grid's bottom-right corner, clear of its scroll bars.</summary>
+    private void PositionFollowButton()
+    {
+        var client = _list.ClientRectangle;
+        _followButton.Location = new Point(
+            _list.Left + Math.Max(0, client.Right - _followButton.Width - 16),
+            _list.Top + Math.Max(0, client.Bottom - _followButton.Height - 12));
+    }
+
+    /// <summary>
+    /// Goes back to following new sessions: capture order again if a sort is on, and the newest row
+    /// in view. From there each refresh keeps it in view until the user scrolls away or sorts.
+    /// </summary>
+    private void ResumeFollowTail()
+    {
+        if (!IsCaptureOrder)
+        {
+            _sortColumn = null;
+            _sortDescending = false;
+            Rebuild();
+            _list.Invalidate(invalidateChildren: true);
+        }
+
+        if (_visible.Count > 0) _list.EnsureVisible(_visible.Count - 1);
+        UpdateFollowButton();
+    }
+
+    /// <summary>
+    /// Keeps the session that was at the top of the view at the top after a rebuild.
+    /// </summary>
+    /// <remarks>
+    /// The grid scrolls by row index, so whenever rows are added or dropped above the view the same
+    /// index shows a different session and every visible row appears to jump. That happens on every
+    /// new session once the store is at capacity (the oldest is dropped from the top), and whenever a
+    /// sort puts new sessions above the view. Pinning the top session keeps what the user is reading
+    /// still; rows below an insertion inside the view still move, which a live sorted list cannot
+    /// avoid. With the anchor gone (trimmed, hidden or deleted), only an offset now past the last
+    /// row is pulled back.
+    /// </remarks>
+    private void HoldAnchorInView(Session? anchor, int previousTop)
+    {
+        var index = anchor is null ? -1
+            : previousTop < _visible.Count && ReferenceEquals(_visible[previousTop], anchor) ? previousTop
+            : _visible.IndexOf(anchor);
+
+        if (index < 0)
+        {
+            if (previousTop >= _visible.Count) _list.EnsureVisible(_visible.Count - 1);
+            return;
+        }
+
+        if (index != TopIndex()) _list.TopItem = _list.Items[index];
+    }
+
+    /// <summary>Index of the first row in view, or -1 when there is none.</summary>
+    private int TopIndex() =>
+        _list.IsHandleCreated && _list.VirtualListSize > 0 ? _list.TopItem?.Index ?? -1 : -1;
 
     private void ApplyVisibilityFiltersInPlace()
     {
-        if (_query.IsEmpty && _visibilityFilter is null && _filtersetFilter is null) return;
+        if (_query.IsEmpty && _visibilityFilter is null && _filtersetFilter is null && _sessionHiddenHostsFilter is null) return;
 
         var writeIndex = 0;
         for (var readIndex = 0; readIndex < _visible.Count; readIndex++)
@@ -640,6 +837,7 @@ public sealed class SessionListView : UserControl
             if (!session.IsUpdateCheck && !_query.IsEmpty && !_query.Matches(session)) continue;
             if (!session.IsUpdateCheck && _visibilityFilter is not null && !_visibilityFilter(session)) continue;
             if (!session.IsUpdateCheck && _filtersetFilter is not null && !_filtersetFilter(session)) continue;
+            if (!session.IsUpdateCheck && _sessionHiddenHostsFilter is not null && !_sessionHiddenHostsFilter(session)) continue;
             _visible[writeIndex++] = session;
         }
 
@@ -689,13 +887,61 @@ public sealed class SessionListView : UserControl
 
     private void OnDrawColumnHeader(object? sender, DrawListViewColumnHeaderEventArgs e)
     {
-        if (_headerBrush.Color != Palette.SurfaceAlt) _headerBrush.Color = Palette.SurfaceAlt;
+        // Pressed (and, where the header reports it, hovered) headers tint, so a clickable header
+        // looks like one.
+        var background = (e.State & (ListViewItemStates.Hot | ListViewItemStates.Selected)) != 0
+            ? Palette.Border
+            : Palette.SurfaceAlt;
+        if (_headerBrush.Color != background) _headerBrush.Color = background;
         if (_headerBorderPen.Color != Palette.Border) _headerBorderPen.Color = Palette.Border;
         e.Graphics.FillRectangle(_headerBrush, e.Bounds);
         e.Graphics.DrawLine(_headerBorderPen, e.Bounds.Right - 1, e.Bounds.Top, e.Bounds.Right - 1, e.Bounds.Bottom);
+
+        var textBounds = Rectangle.Inflate(e.Bounds, -6, 0);
+        if (_sortColumn is { } sorted && e.ColumnIndex == (int)sorted)
+        {
+            DrawSortGlyph(e.Graphics, e.Bounds, _sortDescending);
+            textBounds.Width = Math.Max(0, textBounds.Width - SortGlyphRoom);
+        }
+
+        // Aligned like the column's values, so the right-aligned numbers sit under their heading.
+        var alignment = e.Header?.TextAlign switch
+        {
+            HorizontalAlignment.Right => TextFormatFlags.Right,
+            HorizontalAlignment.Center => TextFormatFlags.HorizontalCenter,
+            _ => TextFormatFlags.Left,
+        };
         TextRenderer.DrawText(e.Graphics, e.Header?.Text ?? string.Empty, Palette.UiFont,
-            Rectangle.Inflate(e.Bounds, -6, 0), Palette.TextDim,
-            TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+            textBounds, Palette.TextDim,
+            TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | alignment);
+    }
+
+    /// <summary>A small up (ascending) or down (descending) triangle at the right of a header.</summary>
+    private static void DrawSortGlyph(Graphics graphics, Rectangle header, bool descending)
+    {
+        var halfWidth = Math.Max(3, header.Height / 6);
+        var halfHeight = Math.Max(2, halfWidth / 2);
+        var centreX = header.Right - 6 - SortGlyphRoom / 2;
+        var centreY = header.Top + header.Height / 2;
+        Point[] triangle = descending
+            ?
+            [
+                new(centreX - halfWidth, centreY - halfHeight),
+                new(centreX + halfWidth, centreY - halfHeight),
+                new(centreX, centreY + halfHeight),
+            ]
+            :
+            [
+                new(centreX - halfWidth, centreY + halfHeight),
+                new(centreX + halfWidth, centreY + halfHeight),
+                new(centreX, centreY - halfHeight),
+            ];
+
+        var smoothing = graphics.SmoothingMode;
+        graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+        using var brush = new SolidBrush(Palette.TextDim);
+        graphics.FillPolygon(brush, triangle);
+        graphics.SmoothingMode = smoothing;
     }
 
     private void OnDrawSubItem(object? sender, DrawListViewSubItemEventArgs e)
@@ -896,6 +1142,8 @@ public sealed class SessionListView : UserControl
         {
             if (SelectedSession is { } session) HideHostRequested?.Invoke(this, session.Host);
         });
+        var showHiddenHosts = menu.Items.Add(Strings.SessionList.ShowHiddenHosts, null,
+            (_, _) => ShowSessionHiddenHostsRequested?.Invoke(this, EventArgs.Empty));
         menu.Items.Add(new ToolStripSeparator());
         var textWizard = new ToolStripMenuItem(Strings.SessionList.SendUrlToTextWizard, null,
             (_, _) => TextWizardDialog.Open(FindForm(), SelectedSession?.Url));
@@ -910,6 +1158,7 @@ public sealed class SessionListView : UserControl
             save.Enabled = saveResponseBody.Enabled || saveSessionsAsSaz.Enabled;
             resend.Enabled = SelectedSession is { IsTunnel: false, Request: not null };
             clearMarks.Enabled = _marks.Count > 0;
+            showHiddenHosts.Enabled = _sessionHiddenHostsFilter is not null;
             autoResponder.Enabled = SelectedSession is { IsTunnel: false, Request.Url: not null };
         };
 
@@ -919,7 +1168,7 @@ public sealed class SessionListView : UserControl
     private void CopyUrls()
     {
         var urls = SelectedSessions.Select(s => s.Url).Where(u => u.Length > 0).ToArray();
-        if (urls.Length > 0) Clipboard.SetText(string.Join(Environment.NewLine, urls));
+        if (urls.Length > 0) ClipboardText.TrySet(string.Join(Environment.NewLine, urls));
     }
 
     private void CopyFullSession()
@@ -937,7 +1186,7 @@ public sealed class SessionListView : UserControl
             sb.Append(session.Response.HeadAsText());
             if (session.Response.Body.Length > 0) sb.AppendLine(session.Response.BodyAsText());
         }
-        Clipboard.SetText(sb.ToString());
+        ClipboardText.TrySet(sb.ToString());
     }
 
     private void SaveResponseBody()
@@ -1105,7 +1354,7 @@ public sealed class SessionListView : UserControl
         if (request.Body.Length > 0)
             sb.Append(" \\\r\n  --data-raw \"").Append(request.BodyAsText().Replace("\"", "\\\"")).Append('"');
 
-        Clipboard.SetText(sb.ToString());
+        ClipboardText.TrySet(sb.ToString());
     }
 
     private void RemoveSelected()
@@ -1115,11 +1364,69 @@ public sealed class SessionListView : UserControl
         _store.RemoveAll(s => ids.Contains(s.Id));
     }
 
+    /// <summary>
+    /// The session grid's ListView, with two native behaviours switched off that made every refresh
+    /// visibly jump.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Changing the row count (<c>VirtualListSize</c>, on every refresh while traffic flows) sends
+    /// LVM_SETITEMCOUNT with no flags, and the native list answers by scrolling the focused row into
+    /// view. WinForms then scrolls back to the old top row in two more steps. After a row had been
+    /// clicked and the user had scrolled away from it, each refresh therefore flew to that row and
+    /// back. LVSICF_NOSCROLL leaves the scroll position alone instead.
+    /// </para>
+    /// <para>
+    /// The list also handles WM_SETREDRAW itself without clearing its window's visible bit, so a
+    /// scroll made inside BeginUpdate/EndUpdate still reaches the screen at once. Passing the message
+    /// on to the default window procedure as well does clear it, so the scrolls that do belong to a
+    /// refresh (following the tail, holding the top row in place) show only as the one repaint that
+    /// EndUpdate asks for. This is only done while the window is actually showing, so a refresh of a
+    /// hidden grid can never make it visible.
+    /// </para>
+    /// </remarks>
+    private sealed class SteadyListView : ListView
+    {
+        private const int WmSetRedraw = 0x000B;
+        private const int LvmSetItemCount = 0x1000 + 47;
+        private const int LvsicfNoScroll = 0x0002;
+
+        private bool _redrawSuspended;
+
+        protected override void WndProc(ref Message m)
+        {
+            if (m.Msg == LvmSetItemCount) m.LParam |= LvsicfNoScroll;
+
+            base.WndProc(ref m);
+
+            if (m.Msg != WmSetRedraw) return;
+            if (m.WParam == 0)
+            {
+                if (!IsWindowVisible(Handle)) return;
+                _redrawSuspended = true;
+                DefWindowProc(Handle, WmSetRedraw, 0, 0);
+            }
+            else if (_redrawSuspended)
+            {
+                _redrawSuspended = false;
+                DefWindowProc(Handle, WmSetRedraw, 1, 0);
+            }
+        }
+
+        [System.Runtime.InteropServices.DllImport("user32.dll", EntryPoint = "DefWindowProcW")]
+        private static extern nint DefWindowProc(nint hwnd, int msg, nint wParam, nint lParam);
+
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
+        private static extern bool IsWindowVisible(nint hwnd);
+    }
+
     protected override void Dispose(bool disposing)
     {
         if (disposing)
         {
             _refreshTimer.Dispose();
+            _filterToolTip.Dispose();
             _surfaceBrush.Dispose();
             _selectionBrush.Dispose();
             _markBrush.Dispose();

@@ -253,6 +253,11 @@ public static class Palette
                 break;
         }
 
+        // A context menu is attached to a control, not parented by it, so the walk below never
+        // reaches it: every right-click menu stayed system-light in dark mode and kept the font size
+        // it was built with after a zoom change.
+        if (control.ContextMenuStrip is { } contextMenu) ApplyToolStrip(contextMenu);
+
         foreach (Control child in control.Controls) Apply(child);
     }
 
@@ -365,7 +370,12 @@ public static class Palette
 
         protected override void OnRenderItemText(ToolStripItemTextRenderEventArgs e)
         {
-            e.TextColor = e.Item.Enabled ? Text : TextDim;
+            // A status label's colour is its meaning (Capturing is green, Not Capturing red, the
+            // timing summary dimmed), set by its owner on the item. Forcing the palette text colour
+            // here painted every one of them the same. Menus and toolbars keep the palette colour.
+            e.TextColor = !e.Item.Enabled ? TextDim
+                : e.Item is ToolStripStatusLabel ? e.Item.ForeColor
+                : Text;
             base.OnRenderItemText(e);
         }
     }

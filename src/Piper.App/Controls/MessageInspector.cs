@@ -115,7 +115,7 @@ public sealed class MessageInspector : UserControl
             if (!e.Control || e.KeyCode != Keys.C) return;
             var lines = _headersView.SelectedItems.Cast<ListViewItem>()
                 .Select(i => $"{i.Text}: {i.SubItems[1].Text}");
-            Clipboard.SetText(string.Join(Environment.NewLine, lines));
+            ClipboardText.TrySet(string.Join(Environment.NewLine, lines));
             e.Handled = true;
         };
         _headersView.ContextMenuStrip = BuildHeadersMenu();
@@ -286,7 +286,7 @@ public sealed class MessageInspector : UserControl
                 if (!e.Control || e.KeyCode != Keys.C) return;
                 var lines = _webFormsView.SelectedItems.Cast<ListViewItem>()
                     .Select(item => $"{item.SubItems[1].Text}={item.SubItems[2].Text}");
-                Clipboard.SetText(string.Join(Environment.NewLine, lines));
+                ClipboardText.TrySet(string.Join(Environment.NewLine, lines));
                 e.Handled = true;
             };
 
@@ -691,7 +691,7 @@ public sealed class MessageInspector : UserControl
     private void CopySelectedHeader(bool valueOnly)
     {
         if (SelectedHeader is not { } header) return;
-        Clipboard.SetText(valueOnly ? header.Value : $"{header.Name}: {header.Value}");
+        ClipboardText.TrySet(valueOnly ? header.Value : $"{header.Name}: {header.Value}");
     }
 
     private static void OpenInDefaultBrowser(string? value)
@@ -751,7 +751,7 @@ public sealed class MessageInspector : UserControl
     private void CopySelectedJson(bool valueOnly)
     {
         if (SelectedJsonValue is not { } value) return;
-        Clipboard.SetText(valueOnly ? value.RawValue : _jsonTree.SelectedNode?.Text ?? string.Empty);
+        ClipboardText.TrySet(valueOnly ? value.RawValue : _jsonTree.SelectedNode?.Text ?? string.Empty);
     }
 
     public void SetMessage(HttpMessage? message, string summary)
@@ -928,7 +928,7 @@ public sealed class MessageInspector : UserControl
     private void CopySelectedWebForm(bool valueOnly)
     {
         if (SelectedWebFormField is not { } field) return;
-        Clipboard.SetText(valueOnly ? field.Value : $"{field.Name}={field.Value}");
+        ClipboardText.TrySet(valueOnly ? field.Value : $"{field.Name}={field.Value}");
     }
 
     private void OnWebFormsMouseDown(object? sender, MouseEventArgs e)

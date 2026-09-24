@@ -88,24 +88,61 @@ public static class HttpWireFormat
     }
 
     /// <summary>
+    /// Parses the text an editor shows (see <see cref="ToEditableText"/>) back into a response.
+    /// </summary>
+    /// <remarks>
+    /// The head and the body are encoded differently, the same way <see cref="ToEditableText"/>
+    /// decoded them. The head is Latin1, which keeps every header byte recoverable. The body is text
+    /// in the charset its Content-Type names (UTF-8 by default), so it is encoded with that charset:
+    /// pushing it through Latin1 as well turned every character above U+00FF into '?' and every
+    /// UTF-8 sequence into mojibake. Head line endings are normalised to CRLF, since an editor will
+    /// happily hand back lone newlines; the body keeps the ones it was typed with.
+    /// </remarks>
+    public static bool TryParseEditableText(string? text, out HttpResponseData response, out string error)
+    {
+        text ??= string.Empty;
+        var (headEnd, bodyStart) = FindBlankLine(text);
+        var head = text[..headEnd].TrimEnd('\r').ReplaceLineEndings("\r\n");
+
+        if (!TryParseResponse(Encoding.Latin1.GetBytes(head + "\r\n\r\n"), out response, out error)) return false;
+
+        var body = text[bodyStart..];
+        response.Body = body.Length == 0 ? [] : ContentCodec.CharsetFor(response.ContentType).GetBytes(body);
+        return true;
+    }
+
+    /// <summary>
     /// Turns edited text back into response bytes, or explains why it is not a response.
     /// </summary>
     /// <remarks>
-    /// Line endings are normalised to CRLF first: an editor will happily hand back lone newlines,
-    /// and a bare LF on the blank line would fold the body into the header block. Content-Length is
-    /// restated so an edited body is framed correctly however the user left the header.
+    /// Content-Length is restated so an edited body is framed correctly however the user left the
+    /// header.
     /// </remarks>
     public static bool TryParseEditedResponse(string? text, out byte[] raw, out string error)
     {
         raw = [];
-
-        // Latin1 round-trips every byte value a text editor can hold, matching how raw messages read.
-        var bytes = Encoding.Latin1.GetBytes((text ?? string.Empty).ReplaceLineEndings("\r\n"));
-        if (!TryParseResponse(bytes, out var parsed, out error)) return false;
+        if (!TryParseEditableText(text, out var parsed, out error)) return false;
 
         parsed.Headers.Set("Content-Length", parsed.Body.Length.ToString());
         raw = parsed.ToBytes();
         return true;
+    }
+
+    /// <summary>
+    /// Finds the blank line that ends a head typed as text, accepting CRLF or bare LF line endings.
+    /// Returns the index of the newline ending the last head line and the index the body starts at,
+    /// or the end of the text for both when there is no blank line.
+    /// </summary>
+    internal static (int HeadEnd, int BodyStart) FindBlankLine(string text)
+    {
+        for (var newline = text.IndexOf('\n'); newline >= 0; newline = text.IndexOf('\n', newline + 1))
+        {
+            var next = newline + 1;
+            if (next < text.Length && text[next] == '\r') next++;
+            if (next < text.Length && text[next] == '\n') return (newline, next + 1);
+        }
+
+        return (text.Length, text.Length);
     }
 
     /// <summary>Locates the blank line ending the head, tolerating LF-only files a text editor may produce.</summary>

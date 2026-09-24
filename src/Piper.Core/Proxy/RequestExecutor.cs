@@ -136,6 +136,10 @@ public sealed class RequestExecutor(ProxyOptions options, SessionStore store)
     /// Parses a raw "METHOD url HTTP/1.1" + headers + blank line + body block, so a request
     /// can be pasted in whole from logs, curl output or another tool.
     /// </summary>
+    /// <remarks>
+    /// Line endings are normalised in the head only. The body is sent exactly as typed: a multipart
+    /// body needs its CRLFs, and flattening them to LF broke its framing on the way out.
+    /// </remarks>
     public static bool TryParseRaw(string raw, out HttpRequestData request, out string error)
     {
         request = new HttpRequestData();
@@ -147,10 +151,9 @@ public sealed class RequestExecutor(ProxyOptions options, SessionStore store)
             return false;
         }
 
-        var normalised = raw.Replace("\r\n", "\n");
-        var split = normalised.IndexOf("\n\n", StringComparison.Ordinal);
-        var head = split >= 0 ? normalised[..split] : normalised;
-        var body = split >= 0 ? normalised[(split + 2)..] : string.Empty;
+        var (headEnd, bodyStart) = HttpWireFormat.FindBlankLine(raw);
+        var head = raw[..headEnd].TrimEnd('\r').Replace("\r\n", "\n");
+        var body = raw[bodyStart..];
 
         var lines = head.Split('\n');
         var startLine = lines[0].Trim();

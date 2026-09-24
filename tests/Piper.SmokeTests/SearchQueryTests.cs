@@ -231,6 +231,177 @@ internal static class SearchQueryTests
             runner.AreEqual(-1, SearchQuery.Empty.NextMatchIndex(rows, -1), "an empty query reports no row");
             return Task.CompletedTask;
         });
+
+        await runner.RunAsync("status alternatives accept the full status syntax", () =>
+        {
+            var ok = Build(url: "http://api.example.test/ok", responseBody: string.Empty, responseStatus: 200);
+            var found = Build(url: "http://api.example.test/moved", responseBody: string.Empty, responseStatus: 302);
+            var notFound = Build(url: "http://api.example.test/missing", responseBody: string.Empty, responseStatus: 404);
+            var unavailable = Build(url: "http://api.example.test/down", responseBody: string.Empty, responseStatus: 503);
+
+            // Each alternative used to go through int.TryParse alone, so a class shorthand became an
+            // unmatched -1 and "status:4xx|5xx" quietly matched nothing at all.
+            runner.IsTrue(Hits("status:4xx|5xx", notFound), "status:4xx|5xx matches a 404");
+            runner.IsTrue(Hits("status:4xx|5xx", unavailable), "and a 503");
+            runner.IsTrue(!Hits("status:4xx|5xx", ok), "but not a 200");
+            runner.IsTrue(Hits("status:200|3xx", found), "a code and a class mix");
+            runner.IsTrue(Hits("status:200|3xx", ok), "either side matches");
+            runner.IsTrue(!Hits("status:200|3xx", notFound), "and nothing else does");
+            runner.IsTrue(Hits("status:>=500|404", notFound), "comparisons work as alternatives");
+            runner.IsTrue(Hits("status:>=500|404", unavailable), "on both sides");
+            runner.IsTrue(Hits("-status:4xx|5xx", ok) && !Hits("-status:4xx|5xx", notFound),
+                "a negated alternative list is the complement");
+            runner.IsTrue(Hits("status:404|", notFound), "an empty alternative is ignored");
+
+            // An alternative that cannot be read is reported, the same as status:abc on its own,
+            // instead of dropping out of the list without a word.
+            runner.AreEqual(1, SearchQuery.Parse("status:abc|def").Warnings.Count, "unreadable alternatives warn");
+            runner.AreEqual(1, SearchQuery.Parse("status:200|abc").Warnings.Count, "even next to a good one");
+            return Task.CompletedTask;
+        });
+
+        await runner.RunAsync("domain: matches a host and its subdomains", () =>
+        {
+            var apex = Build(url: "http://example.com/");
+            var sub = Build(url: "http://api.Example.com/");
+            var lookalike = Build(url: "http://evil-example.com/");
+            var suffixed = Build(url: "http://example.com.attacker.net/");
+
+            runner.IsTrue(Hits("domain:example.com", apex), "the domain itself");
+            runner.IsTrue(Hits("domain:example.com", sub), "a subdomain, in any case");
+            runner.IsTrue(!Hits("domain:example.com", lookalike), "not a host that merely ends in the text");
+            runner.IsTrue(!Hits("domain:example.com", suffixed), "not a host that merely contains it");
+            runner.IsTrue(Hits("d:*.example.com", sub), "d: is an alias, and a *. wildcard is accepted");
+            runner.IsTrue(Hits("domain:other.test|example.com", apex), "alternatives with |");
+            runner.IsTrue(Hits("-domain:example.com", lookalike) && !Hits("-domain:example.com", sub),
+                "negation hides the domain and nothing else");
+            runner.AreEqual(1, SearchQuery.Parse("domain:*").Warnings.Count, "a pattern with no domain in it warns");
+
+            // Session.Host is the raw Host header when the request line had no parseable URL, so it
+            // can carry a port. A domain must still match it, or a show-only list saved as
+            // "example.com" would discard those sessions at admission.
+            static Session RawHost(string hostHeader)
+            {
+                var request = new HttpRequestData { Method = "GET", RequestTarget = "/" };
+                request.Headers.Add("Host", hostHeader);
+                return new Session { Request = request, State = SessionState.Complete };
+            }
+
+            runner.AreEqual("example.com:8443", RawHost("example.com:8443").Host, "precondition: the host keeps its port");
+            runner.IsTrue(Hits("domain:example.com", RawHost("example.com:8443")), "a host with a port matches its domain");
+            runner.IsTrue(Hits("domain:example.com", RawHost("api.example.com:443")), "and so does a subdomain with one");
+            runner.IsTrue(!Hits("domain:example.com", RawHost("evil-example.com:8443")), "a lookalike with a port still does not");
+            runner.IsTrue(Hits("domain:10.0.0.1", RawHost("10.0.0.1:8080")), "an IPv4 address with a port matches the address");
+            runner.IsTrue(Hits("domain:[::1]", RawHost("[::1]:8080")), "a bracketed IPv6 literal with a port matches it");
+            runner.IsTrue(!Hits("domain:example.com", RawHost("example.com:notaport")), "a colon that is not a port is not stripped");
+            runner.IsTrue(!Hits("-domain:example.com", RawHost("example.com:8443")), "hiding the domain hides its hosts with a port too");
+            return Task.CompletedTask;
+        });
+
+        await runner.RunAsync("domain: keeps matching fragments the way saved host lists expect", () =>
+        {
+            // Saved filtersets hold patterns written when every host pattern was a substring. A
+            // fragment must keep that meaning, or a show-only list of them would match nothing after
+            // an upgrade and discard all traffic at admission.
+            var api = Build(url: "http://api.curseforge.com/");
+            var lan = Build(url: "http://192.168.1.20/");
+            var local = Build(url: "http://localhost:8080/");
+
+            runner.IsTrue(Hits("domain:curseforge", api), "a word with no dot matches anywhere in the host");
+            runner.IsTrue(Hits("domain:api.", api), "so does a single word ending in a dot");
+
+            // A trailing root dot on a full domain names the same domain; treating it as a substring
+            // fragment let a pasted FQDN admit a lookalike that merely contains it.
+            var apex = Build(url: "http://example.com/");
+            runner.IsTrue(Hits("domain:example.com.", apex), "example.com. matches example.com");
+            runner.IsTrue(Hits("domain:example.com.", Build(url: "http://api.example.com/")), "and its subdomains");
+            runner.IsTrue(!Hits("domain:example.com.", Build(url: "http://example.com.attacker.net/")),
+                "but not a host that only contains it");
+            runner.IsTrue(Hits("domain:192.168.1", lan), "and a partial IPv4 address");
+            runner.IsTrue(Hits("domain:192.168.", lan), "with or without its trailing dot");
+            runner.IsTrue(Hits("domain:localhost", local), "a single-label host still matches");
+            runner.IsTrue(Hits("domain:192.168.1.20", lan), "a full IPv4 address matches itself");
+            runner.IsTrue(!Hits("domain:92.168.1.20", lan), "and not a longer address ending in it");
+            runner.IsTrue(SearchQuery.MatchesHostPattern("API.CurseForge.com", "*.curseforge.com"),
+                "the shared rule ignores case and a wildcard");
+            return Task.CompletedTask;
+        });
+
+        await runner.RunAsync("a number too large for its field is a warning, not a crash", () =>
+        {
+            // long.Parse throws OverflowException, which the parser used not to catch, so typing one
+            // digit too many into the filter box took the app down.
+            var session = Build(url: "http://api.example.test/", responseBody: string.Empty, responseStatus: 200);
+            foreach (var text in new[] { "status:99999999999999999999", "status:200|99999999999999999999", "id:>99999999999999999999" })
+            {
+                Exception? thrown = null;
+                SearchQuery? query = null;
+                try { query = SearchQuery.Parse(text); }
+                catch (Exception ex) { thrown = ex; }
+                runner.IsTrue(thrown is null, $"{text} parses ({thrown?.GetType().Name})");
+                runner.AreEqual(1, query?.Warnings.Count ?? -1, $"{text} is reported as a warning");
+            }
+
+            runner.IsTrue(Hits("status:200|99999999999999999999", session), "and the query still runs without the bad term");
+            return Task.CompletedTask;
+        });
+
+        await runner.RunAsync("a regex that backtracks past its timeout fails the query closed", () =>
+        {
+            // A catastrophic pattern is ordinary input: the user types the pattern and the traffic
+            // supplies the text. The timeout used to escape Matches and crash every grid refresh.
+            const string pattern = @"(\w+\s?)*$";
+            var trap = new string('a', 40) + "!";
+            Session Trap() => Build(
+                url: "http://api.example.test/" + trap,
+                requestHeaders: [("Content-Type", "text/plain")],
+                requestBody: trap);
+            var session = Trap();
+
+            var probe = new System.Text.RegularExpressions.Regex(pattern,
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase
+                | System.Text.RegularExpressions.RegexOptions.CultureInvariant,
+                TimeSpan.FromMilliseconds(250));
+            var probeTimedOut = false;
+            try { probe.IsMatch(session.Path); }
+            catch (System.Text.RegularExpressions.RegexMatchTimeoutException) { probeTimedOut = true; }
+            runner.IsTrue(probeTimedOut, "precondition: the pattern really does time out on this input");
+
+            // The pattern can match an empty tail, so only fields whose first catastrophic run comes
+            // before any easy match prove the point: the path, the whole-session index and the body.
+            foreach (var text in new[] { $"path:/{pattern}/", $"/{pattern}/", $"body:/{pattern}/" })
+            {
+                var query = SearchQuery.Parse(text);
+                Exception? thrown = null;
+                var matched = true;
+                try { matched = query.Matches(session); }
+                catch (Exception ex) { thrown = ex; }
+                runner.IsTrue(thrown is null, $"{text} does not throw ({thrown?.GetType().Name})");
+                runner.IsTrue(!matched, $"{text} does not match");
+                runner.IsTrue(query.RegexTimedOut, $"{text} reports that it timed out");
+            }
+
+            // Negation must not turn the timeout into "matches everything": an AutoResponder rule
+            // built on it would then answer every request.
+            var negated = SearchQuery.Parse($"-path:/{pattern}/");
+            runner.IsTrue(!negated.Matches(session), "a negated term that timed out fails closed too");
+
+            // One timeout costs one timeout, not one per session per refresh: a grid of trap rows used
+            // to take 250 ms each on every 150 ms rebuild.
+            var rows = Enumerable.Range(0, 40).Select(_ => Trap()).ToList();
+            var grid = SearchQuery.Parse($"path:/{pattern}/");
+            var clock = System.Diagnostics.Stopwatch.StartNew();
+            var shown = rows.Count(grid.Matches);
+            clock.Stop();
+            runner.AreEqual(0, shown, "no trap row is shown");
+            runner.IsTrue(clock.ElapsedMilliseconds < 2_500,
+                $"40 trap rows are filtered in about one timeout, not forty ({clock.ElapsedMilliseconds} ms)");
+
+            var healthy = SearchQuery.Parse("path:/orders/");
+            runner.IsTrue(healthy.Matches(Build(url: "http://api.example.test/orders")) && !healthy.RegexTimedOut,
+                "an ordinary pattern is unaffected");
+            return Task.CompletedTask;
+        });
     }
 
     private static bool Hits(string query, Session session) => SearchQuery.Parse(query).Matches(session);

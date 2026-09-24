@@ -197,7 +197,7 @@
 
   "searchHelp": {
     "caption": "Search syntax",
-    "body": "The same query grammar works in Find Sessions, the session filter box and the\nComposer search. Terms are combined with AND.\n\nCtrl+F opens Find Sessions: it marks matching sessions in a colour you pick and\nhides nothing. F3 selects the next match. Ctrl+Shift+F focuses the filter box,\nwhich does hide the sessions that do not match.\n\n  checkout               substring across URL, headers and text bodies\n  \"exact phrase\"         quoted literal\n  /orders\\/[0-9]+/       regular expression\n\n  method:POST            also m:\n  method:GET|POST        alternatives\n  host:api.example.com   also h:\n  path:/v2/users\n  url:token\n  status:404             also s:\n  status:4xx             class shorthand\n  status:>=400           comparisons: > >= < <=\n  status:200..299        ranges\n  ct:json                content type\n\n  header:Authorization   name or value, request or response\n  header:Accept=json     specific header, specific value\n  reqheader: respheader: restrict to one side\n\n  body:user_id           either body\n  req:  resp:            restrict to one side\n\n  size:>100kb            response size; b/kb/mb/gb suffixes\n  reqsize:>0\n  dur:>500               duration in milliseconds\n  id:1234\n\n  is:https  is:http  is:tunnel  is:composed  is:captured\n  is:error  is:ok  is:redirect  is:pending  is:complete\n  is:json  is:xml  is:html  is:image  is:script  is:css\n  is:slow  is:cached  is:body\n\n  -host:cdn.example.com  negate any term with - or !\n\nAn unrecognised field is searched literally, so a pasted URL works as typed.\n\nExample:\n  method:POST host:api status:>=400 -is:image body:\"order\""
+    "body": "The same query grammar works in Find Sessions, the session filter box and the\nComposer search. Terms are combined with AND.\n\nCtrl+F opens Find Sessions: it marks matching sessions in a colour you pick and\nhides nothing. F3 selects the next match. Ctrl+Shift+F focuses the filter box,\nwhich does hide the sessions that do not match.\n\n  checkout               substring across URL, headers and text bodies\n  \"exact phrase\"         quoted literal\n  /orders\\/[0-9]+/       regular expression\n\n  method:POST            also m:\n  method:GET|POST        alternatives\n  host:api.example.com   also h:\n  domain:example.com     that host and its subdomains, also d:\n  path:/v2/users\n  url:token\n  status:404             also s:\n  status:4xx             class shorthand\n  status:>=400           comparisons: > >= < <=\n  status:200..299        ranges\n  status:4xx|5xx         alternatives\n  ct:json                content type\n\n  header:Authorization   name or value, request or response\n  header:Accept=json     specific header, specific value\n  reqheader: respheader: restrict to one side\n\n  body:user_id           either body\n  req:  resp:            restrict to one side\n\n  size:>100kb            response size; b/kb/mb/gb suffixes\n  reqsize:>0\n  dur:>500               duration in milliseconds\n  id:1234\n\n  is:https  is:http  is:tunnel  is:composed  is:captured\n  is:error  is:ok  is:redirect  is:pending  is:complete\n  is:json  is:xml  is:html  is:image  is:script  is:css\n  is:slow  is:cached  is:body\n\n  -host:cdn.example.com  negate any term with - or !\n\nAn unrecognised field is searched literally, so a pasted URL works as typed.\n\nExample:\n  method:POST host:api status:>=400 -is:image body:\"order\""
   },
 
   "log": {
@@ -252,9 +252,10 @@
     "shutdownFailed": "Could not finish shutdown: {{message}}",
 
     "hideHostNotFilterable": "Hide this host: that session's host is not usable as a filter pattern, so nothing was hidden.",
-    "hideHostShowOnlyConflict": "Hide this host: {{host}} is hidden in the capture list for this session only. The Filters tab is showing only specific hosts, which cannot also carry an exception, so switch its Hosts list to \"Hide the following Hosts\" to keep it.",
+    "hideHostShowOnlyConflict": "Hide this host: {{host}} is hidden in the capture list for this session only. The Filters tab is showing only specific hosts, which cannot also carry an exception, so switch its Hosts list to \"Hide the following Hosts\" to keep it. Right-click a session and choose \"Show hosts hidden this session\" to undo it.",
     "hideHostSwitchedToHideMode": "Hide this host: the Filters tab's Hosts list had nothing ticked, so it switched to \"Hide the following Hosts\".",
-    "hideHostAdded": "Hide this host: the Filters tab's Hosts list now hides {{host}}. It stays hidden here for this session; the saved list applies when you tick \"Use Filters\" there, or on the next start if it is ticked already.",
+    "hideHostAdded": "Hide this host: the Filters tab's Hosts list now hides {{host}}. It is hidden here straight away; untick or remove its entry to show it again. The saved list takes over when you tick \"Use Filters\" there, or on the next start if it is ticked already.",
+    "sessionHiddenHostsShown": "Hosts hidden this session are shown again. Entries in the Filters tab's Hosts list are unchanged and apply when the filterset runs.",
 
     "showingTrustPrompt": "Showing the root certificate trust prompt. The main window is disabled, and will ignore dropped files, until it is answered.",
     "noSazToImport": "No SAZ file to import from {{names}}: a capture must be an existing .saz or .raz file.",
@@ -343,6 +344,7 @@
     "filterSessions": "Fi&lter sessions",
     "filterToThisHost": "Filter to this &host",
     "hideThisHost": "&Hide this host",
+    "showHiddenHosts": "Sh&ow hosts hidden this session",
     "sendUrlToTextWizard": "Send URL to Text&Wizard",
     "removeSelected": "&Remove selected",
 
@@ -354,6 +356,9 @@
     "findCaption": "Find Sessions",
     "findNothingToMatch": "That query has nothing to match.",
     "findNoMatches": "No sessions matched.",
+    "followTail": "↓ Follow new sessions",
+    "followTailTooltip": "New sessions are not being kept in view. Click to go back to capture order and follow the newest session.",
+    "regexTimedOut": "A regular expression in the query took too long on the captured text and was stopped, so the query matches nothing. Simplify the pattern and try again.",
     "findMarksRemoved_one": "{{count, N0}} session matched and had its mark removed.",
     "findMarksRemoved_other": "{{count, N0}} sessions matched and had their marks removed.",
     "findMarked_one": "{{count, N0}} session matched and is marked.",
@@ -535,6 +540,7 @@
 
     "enterUrl": "Enter a URL.",
     "invalidUrl": "'{{url}}' is not a valid absolute URL.",
+    "rawNotApplied": "The Raw request could not be read, so it was not applied: {{error}}",
 
     "responseNotSent": "Response   (not sent yet)",
     "responseCancelled": "Response   (cancelled)",
@@ -580,7 +586,7 @@
     "saveFailed": "Could not save the filterset: {{message}}",
 
     "helpCaption": "Filters",
-    "helpBody": "Add one or more host patterns, then use their checkboxes to choose which ones apply. Host and Response Status Code edits stay staged, so a partly-typed pattern is never applied on its own.\n\nThe Use Filters checkbox takes effect immediately in both directions. Checking it runs the staged filterset straight away, exactly as Actions > Run Filterset now does; unchecking it stops filtering at once, as does Actions > Show all sessions, which leaves the filterset itself intact.\n\nRight-clicking a session and choosing \"Hide this host\" hides it in the capture list right away and adds it here, so the choice is remembered. Like the rest of the filterset the list applies once \"Use Filters\" is on; untick or remove the entry to undo it. While this list is showing only specific hosts it cannot also carry an exception, so a hide then lasts for the session only and the Log says so.\n\nFiltered-out sessions are dropped rather than hidden, so traffic captured while a filter is applied cannot be recovered by turning the filter off afterwards. Check your host and status choices before enabling the filterset.\n\nFilters compose into the same query grammar as the session grid's own filter box, but apply separately: running a filterset leaves whatever you typed there alone, and both narrow the list together. Editing that box does not turn the filterset off -- use the Use Filters checkbox for that.\n\nOnly Hosts and Response Status Code filters are implemented."
+    "helpBody": "Add one or more host patterns, then use their checkboxes to choose which ones apply. Host and Response Status Code edits stay staged, so a partly-typed pattern is never applied on its own.\n\nA full domain or address, such as example.com, *.example.com or 10.0.0.1, matches that host and its subdomains, never a lookalike such as evil-example.com. A fragment matches any host that contains it: a single word (curseforge, localhost, api.) or a partial address (192.168.1). A trailing dot on a full domain, as in example.com., changes nothing.\n\nThe Use Filters checkbox takes effect immediately in both directions. Checking it runs the staged filterset straight away, exactly as Actions > Run Filterset now does; unchecking it stops filtering at once, as does Actions > Show all sessions, which leaves the filterset itself intact.\n\nRight-clicking a session and choosing \"Hide this host\" hides it in the capture list right away and adds it here, so the choice is remembered. Untick or remove the entry and the host shows again at once. Like the rest of the filterset, the saved list takes over once the filterset runs: tick \"Use Filters\" to keep hiding it. While this list is showing only specific hosts it cannot also carry an exception, so a hide then lasts for the session only; the Log says so, and \"Show hosts hidden this session\" on the right-click menu undoes it.\n\nFiltered-out sessions are dropped rather than hidden, so traffic captured while a filter is applied cannot be recovered by turning the filter off afterwards. Check your host and status choices before enabling the filterset.\n\nFilters compose into the same query grammar as the session grid's own filter box, but apply separately: running a filterset leaves whatever you typed there alone, and both narrow the list together. Editing that box does not turn the filterset off -- use the Use Filters checkbox for that.\n\nOnly Hosts and Response Status Code filters are implemented."
   },
 
   "autoResponder": {

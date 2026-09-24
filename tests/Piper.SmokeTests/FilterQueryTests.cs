@@ -41,11 +41,11 @@ internal static class FilterQueryTests
                 Hosts = [new HostFilterEntry { Pattern = "a.com", Enabled = true }],
                 HideSuccess = true,
             };
-            runner.AreEqual("host:a.com -status:200..299", FilterQuery.Compose(single),
+            runner.AreEqual("domain:a.com -status:200..299", FilterQuery.Compose(single),
                 "a host term and a status term are joined in panel order");
 
             single.HostsMode = 1;
-            runner.AreEqual("-host:a.com -status:200..299", FilterQuery.Compose(single),
+            runner.AreEqual("-domain:a.com -status:200..299", FilterQuery.Compose(single),
                 "hide mode negates the host term");
 
             var partlyEnabled = new FilterSettings
@@ -57,7 +57,7 @@ internal static class FilterQueryTests
                     new HostFilterEntry { Pattern = "b.com", Enabled = false },
                 ],
             };
-            runner.AreEqual("host:a.com", FilterQuery.Compose(partlyEnabled),
+            runner.AreEqual("domain:a.com", FilterQuery.Compose(partlyEnabled),
                 "unchecked host patterns are staged but excluded from the query");
 
             var legacy = new FilterSettings
@@ -66,11 +66,11 @@ internal static class FilterQueryTests
                 HostsText = "a.com; *.b.com",
                 Hosts = [],
             };
-            runner.AreEqual("host:a.com|b.com", FilterQuery.Compose(legacy),
+            runner.AreEqual("domain:a.com|b.com", FilterQuery.Compose(legacy),
                 "a filterset predating the per-host checkboxes falls back to HostsText");
 
             var nullHosts = new FilterSettings { UseFilters = true, HostsText = "a.com", Hosts = null! };
-            runner.AreEqual("host:a.com", FilterQuery.Compose(nullHosts),
+            runner.AreEqual("domain:a.com", FilterQuery.Compose(nullHosts),
                 "a malformed filterset with a null Hosts list falls back rather than throwing");
 
             // A hand-edited or truncated filterset reaches Compose straight from disk, so entries
@@ -80,7 +80,7 @@ internal static class FilterQueryTests
                 UseFilters = true,
                 Hosts = [null!, new HostFilterEntry { Pattern = "a.com", Enabled = true }, null!],
             };
-            runner.AreEqual("host:a.com", FilterQuery.Compose(nullEntries),
+            runner.AreEqual("domain:a.com", FilterQuery.Compose(nullEntries),
                 "null host entries are skipped rather than dereferenced");
 
             var nullPattern = new FilterSettings
@@ -93,7 +93,7 @@ internal static class FilterQueryTests
                     new HostFilterEntry { Pattern = "a.com", Enabled = true },
                 ],
             };
-            runner.AreEqual("host:a.com", FilterQuery.Compose(nullPattern),
+            runner.AreEqual("domain:a.com", FilterQuery.Compose(nullPattern),
                 "null and blank patterns drop out instead of composing an empty alternative");
 
             var onlyNullEntries = new FilterSettings { UseFilters = true, Hosts = [null!] };

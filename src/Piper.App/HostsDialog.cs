@@ -86,7 +86,6 @@ public sealed class HostsDialog : Form
         actions.Controls.Add(save);
         footer.Controls.Add(importActions);
         footer.Controls.Add(actions);
-        actions.Controls.Add(import);
 
         Controls.Add(editorPadding);
         Controls.Add(_enabled);

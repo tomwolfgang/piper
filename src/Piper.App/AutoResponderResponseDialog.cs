@@ -44,7 +44,9 @@ public sealed class AutoResponderResponseDialog : Form
         MaximizeBox = false;
         ShowInTaskbar = false;
 
-        HttpWireFormat.TryParseResponse(System.Text.Encoding.Latin1.GetBytes(rawResponse), out var parsed, out _);
+        // Parsed as editor text, not as Latin1 bytes: the body in rawResponse was decoded with its
+        // charset, and a Latin1 round trip mangled every non-ASCII character in it.
+        HttpWireFormat.TryParseEditableText(rawResponse, out var parsed, out _);
 
         // ----------------------------------------------------------------- status
 

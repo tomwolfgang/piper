@@ -96,7 +96,7 @@ internal static class HostFilterHideTests
             runner.IsTrue(!soleEntry.HideHost("api.example.com"), "the only shown host is refused as well");
             runner.AreEqual(0, soleEntry.HostsMode, "its mode is left alone");
             runner.IsTrue(soleEntry.Hosts[0].Enabled, "and its entry stays ticked");
-            runner.AreEqual("host:api.example.com",
+            runner.AreEqual("domain:api.example.com",
                 HostFilterTerm.Compose(soleEntry.HostsText, hide: soleEntry.HostsMode == 1),
                 "so the list still composes exactly what the user set up");
 
@@ -113,6 +113,42 @@ internal static class HostFilterHideTests
             runner.IsTrue(!parked.Hosts[0].Enabled, "the parked pattern stays unticked");
             runner.IsTrue(parked.Hosts[1].Enabled, "the newly hidden host is ticked");
 
+            return Task.CompletedTask;
+        });
+
+        await runner.RunAsync("a hidden host shows again when its Hosts entry is unticked or removed", () =>
+        {
+            // The capture list keeps a host from "Hide this host" hidden only while the Hosts list
+            // still hides it, which is the undo the Filters help describes. It used to write a term
+            // into the filter box instead, and unticking the entry left the host hidden by it.
+            var settings = new FilterSettings();
+            runner.IsTrue(settings.HideHost("api.example.com"), "the host is hidden");
+            runner.IsTrue(settings.Hides("api.example.com"), "the list hides it");
+            runner.IsTrue(settings.Hides("v2.api.example.com"), "and its subdomains");
+            runner.IsTrue(!settings.Hides("example.com"), "but not its parent");
+            runner.IsTrue(!settings.Hides("netflix.com"), "or an unrelated host");
+
+            settings.Hosts[0].Enabled = false;
+            runner.IsTrue(!settings.Hides("api.example.com"), "unticking the entry stops hiding it");
+            settings.Hosts[0].Enabled = true;
+            runner.IsTrue(settings.Hides("api.example.com"), "ticking it again hides it again");
+
+            settings.Hosts.Clear();
+            runner.IsTrue(!settings.Hides("api.example.com"), "removing the entry stops hiding it");
+
+            var wildcard = new FilterSettings
+            {
+                HostsMode = 1,
+                Hosts = [new HostFilterEntry { Pattern = "*.example.com", Enabled = true }],
+            };
+            runner.IsTrue(wildcard.Hides("api.example.com"), "a broader entry that covers the host keeps it hidden");
+            wildcard.HostsMode = 0;
+            runner.IsTrue(!wildcard.Hides("api.example.com"), "a show-only list hides nothing");
+
+            var malformed = new FilterSettings { HostsMode = 1, Hosts = [null!, new HostFilterEntry { Pattern = " ", Enabled = true }] };
+            runner.IsTrue(!malformed.Hides("api.example.com"), "null and blank entries hide nothing and do not throw");
+            var noList = new FilterSettings { HostsMode = 1, Hosts = null! };
+            runner.IsTrue(!noList.Hides("api.example.com"), "nor does a missing list");
             return Task.CompletedTask;
         });
 
@@ -248,7 +284,7 @@ internal static class HostFilterHideTests
                 var term = HostFilterTerm.Compose(
                     string.Join(';', restored.Hosts.Where(host => host.Enabled).Select(host => host.Pattern)),
                     hide: restored.HostsMode == 1);
-                runner.AreEqual("-host:api.example.com", term, "the restored list composes a hide term");
+                runner.AreEqual("-domain:api.example.com", term, "the restored list composes a hide term");
 
                 var query = SearchQuery.Parse(term);
                 runner.IsTrue(!query.Matches(SessionFor("api.example.com")), "the hidden host is filtered out");

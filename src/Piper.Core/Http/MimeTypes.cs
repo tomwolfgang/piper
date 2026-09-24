@@ -40,6 +40,35 @@ public static class MimeTypes
         "application/json", "application/xml", "application/xhtml+xml", "image/svg+xml",
     };
 
+    /// <summary>
+    /// Trims "application/json; charset=utf-8" down to "json" for the session grid. Lives beside the
+    /// extension table rather than in the UI so sorting the grid's Type column orders by exactly the
+    /// text it shows.
+    /// </summary>
+    /// <remarks>
+    /// Only <c>application/*</c> collapses a structured-syntax suffix ("vnd.api+json" reads better as
+    /// "json"). Elsewhere the suffix is what names the type: "image/svg+xml" is an SVG, not XML.
+    /// </remarks>
+    public static string ShortName(string? contentType)
+    {
+        if (string.IsNullOrEmpty(contentType)) return string.Empty;
+
+        var value = contentType;
+        var semi = value.IndexOf(';');
+        if (semi > 0) value = value[..semi];
+        value = value.Trim();
+
+        var slash = value.IndexOf('/');
+        if (slash < 0) return value;
+
+        var type = value[..slash];
+        var subtype = value[(slash + 1)..];
+        if (type is not "application") return value;
+
+        var plus = subtype.LastIndexOf('+');
+        return plus > 0 ? subtype[(plus + 1)..] : subtype;
+    }
+
     public static string ForFile(string? path) => ForExtension(Path.GetExtension(path ?? string.Empty));
 
     public static string ForExtension(string? extension)

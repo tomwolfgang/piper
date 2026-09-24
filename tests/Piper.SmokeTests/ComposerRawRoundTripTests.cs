@@ -43,16 +43,28 @@ internal static class ComposerRawRoundTripTests
             return Task.CompletedTask;
         });
 
-        await runner.RunAsync("raw round trip keeps a multi-line body", () =>
+        await runner.RunAsync("raw round trip keeps a multi-line body byte for byte", () =>
         {
-            // TryParseRaw normalises CRLF to LF throughout, so the body comes back LF-terminated.
-            // That is the one intentional asymmetry here; no line may be lost or gain a blank.
+            // Only the head is normalised. The body goes out exactly as typed: flattening its CRLFs
+            // to LF broke multipart bodies, whose boundaries are CRLF-delimited.
             var raw = RequestExecutor.BuildRawText("PUT", "http://example.com/doc",
                 "Content-Type: text/plain", "line one\r\nline two\r\n\r\nline four");
 
             runner.IsTrue(RequestExecutor.TryParseRaw(raw, out var parsed, out var error), $"parses ({error})");
-            runner.AreEqual("line one\nline two\n\nline four", Encoding.UTF8.GetString(parsed.Body),
-                "every body line survives");
+            runner.AreEqual("line one\r\nline two\r\n\r\nline four", Encoding.UTF8.GetString(parsed.Body),
+                "every body line survives with its CRLF");
+
+            const string multipart = "--b\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\n1\r\n--b--\r\n";
+            var form = RequestExecutor.BuildRawText("POST", "http://example.com/upload",
+                "Content-Type: multipart/form-data; boundary=b", multipart);
+            runner.IsTrue(RequestExecutor.TryParseRaw(form, out var formParsed, out _), "a multipart request parses");
+            runner.AreEqual(multipart, Encoding.UTF8.GetString(formParsed.Body), "its framing is untouched");
+
+            // A head typed with bare LFs (pasted from a log) still splits from its body correctly.
+            var lfOnly = "POST http://example.com/v1 HTTP/1.1\nContent-Type: text/plain\n\nbody\r\nline";
+            runner.IsTrue(RequestExecutor.TryParseRaw(lfOnly, out var lfParsed, out _), "an LF-only head parses");
+            runner.AreEqual("text/plain", lfParsed.Headers["Content-Type"], "with its header intact");
+            runner.AreEqual("body\r\nline", Encoding.UTF8.GetString(lfParsed.Body), "and the body as typed");
             return Task.CompletedTask;
         });
     }

@@ -347,6 +347,7 @@ internal static class Strings
             I18n.T("log.hideHostShowOnlyConflict", ("host", host));
         public static string HideHostSwitchedToHideMode => I18n.T("log.hideHostSwitchedToHideMode");
         public static string HideHostAdded(string host) => I18n.T("log.hideHostAdded", ("host", host));
+        public static string SessionHiddenHostsShown => I18n.T("log.sessionHiddenHostsShown");
 
         public static string ShowingTrustPrompt => I18n.T("log.showingTrustPrompt");
         public static string NoSazToImport(string names) => I18n.T("log.noSazToImport", ("names", names));
@@ -469,6 +470,9 @@ internal static class Strings
         public static string FilterSessions => I18n.T("sessionList.filterSessions");
         public static string FilterToThisHost => I18n.T("sessionList.filterToThisHost");
         public static string HideThisHost => I18n.T("sessionList.hideThisHost");
+        public static string ShowHiddenHosts => I18n.T("sessionList.showHiddenHosts");
+        public static string FollowTail => I18n.T("sessionList.followTail");
+        public static string FollowTailTooltip => I18n.T("sessionList.followTailTooltip");
         public static string SendUrlToTextWizard => I18n.T("sessionList.sendUrlToTextWizard");
         public static string RemoveSelected => I18n.T("sessionList.removeSelected");
 
@@ -483,6 +487,7 @@ internal static class Strings
         public static string FindCaption => I18n.T("sessionList.findCaption");
         public static string FindNothingToMatch => I18n.T("sessionList.findNothingToMatch");
         public static string FindNoMatches => I18n.T("sessionList.findNoMatches");
+        public static string RegexTimedOut => I18n.T("sessionList.regexTimedOut");
         public static string FindMarksRemoved(int count) => I18n.T("sessionList.findMarksRemoved", ("count", count));
         public static string FindMarked(int count) => I18n.T("sessionList.findMarked", ("count", count));
         public static string FindSelectionCapped(int limit) =>
@@ -703,6 +708,7 @@ internal static class Strings
 
         public static string EnterUrl => I18n.T("composer.enterUrl");
         public static string InvalidUrl(string url) => I18n.T("composer.invalidUrl", ("url", url));
+        public static string RawNotApplied(string error) => I18n.T("composer.rawNotApplied", ("error", error));
 
         public static string ResponseNotSent => I18n.T("composer.responseNotSent");
         public static string ResponseCancelled => I18n.T("composer.responseCancelled");

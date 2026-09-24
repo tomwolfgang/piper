@@ -67,6 +67,20 @@ public sealed class FilterSettings
         return Commit(entries);
     }
 
+    /// <summary>
+    /// Whether the Hosts list, once the filterset runs, hides <paramref name="host"/>: it is in hide
+    /// mode and an enabled entry covers the host. The capture list asks this to decide when a host it
+    /// hid for "Hide this host" has been unticked or removed here and should show again.
+    /// </summary>
+    public bool Hides(string host)
+    {
+        ArgumentNullException.ThrowIfNull(host);
+        return HostsMode == 1
+            && (Hosts ?? []).Any(entry => entry is { Enabled: true }
+                && !string.IsNullOrWhiteSpace(entry.Pattern)
+                && Covers(entry.Pattern, host));
+    }
+
     private bool Commit(List<HostFilterEntry> entries)
     {
         Hosts = entries;
@@ -76,16 +90,12 @@ public sealed class FilterSettings
     }
 
     /// <summary>
-    /// Whether an enabled entry already decides <paramref name="host"/>, using the same substring,
-    /// case-insensitive comparison <see cref="SearchQuery"/> applies to a composed <c>host:</c> term.
+    /// Whether an enabled entry already decides <paramref name="host"/>, using the same
+    /// exact-or-subdomain rule <see cref="SearchQuery"/> applies to a composed <c>domain:</c> term.
+    /// A pattern that strips to nothing (a lone "*") is dropped by <see cref="HostFilterTerm.Compose"/>
+    /// and so covers nothing.
     /// </summary>
-    private static bool Covers(string pattern, string host)
-    {
-        var stripped = HostFilterTerm.StripWildcard(pattern);
-        // A pattern that strips to nothing (a lone "*") is dropped by HostFilterTerm.Compose and so
-        // filters nothing; without this guard Contains("") would report every host as covered.
-        return stripped.Length > 0 && host.Contains(stripped, StringComparison.OrdinalIgnoreCase);
-    }
+    private static bool Covers(string pattern, string host) => HostFilterTerm.Covers(pattern, host);
 }
 
 /// <summary>A host pattern in a filterset and whether it participates when the filter is run.</summary>

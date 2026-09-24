@@ -20,6 +20,7 @@ namespace Piper.Core.Sessions;
 /// <item><c>size:&gt;100kb</c>, <c>dur:&gt;500</c> (ms)</item>
 /// <item><c>is:https is:json -is:tunnel</c></item>
 /// <item><c>-host:cdn.example.com</c> - negation</item>
+/// <item><c>domain:example.com</c> - that host and its subdomains, never a lookalike</item>
 /// <item><c>stat:200</c> - an unrecognised field is searched literally, not ignored</item>
 /// </list>
 /// </remarks>
@@ -74,12 +75,38 @@ public sealed class SearchQuery
         ("URLs only", "url"),
     ];
 
+    private volatile bool _regexTimedOut;
+
+    /// <summary>
+    /// True once one of this query's patterns has run past its match timeout. From then on the
+    /// query matches nothing: see <see cref="Matches"/>. Lets the UI show why a list went empty.
+    /// </summary>
+    public bool RegexTimedOut => _regexTimedOut;
+
+    /// <remarks>
+    /// A pattern and the captured text are both outside Piper's control, so a catastrophic backtrack
+    /// is an ordinary input. The first one fails the query closed for good: this session does not
+    /// match, and nor does any later one. Carrying on would cost a full timeout for every session on
+    /// every refresh of the grid, and treating one term as "no match" would turn a negated term into
+    /// "matches everything", which an AutoResponder rule would then answer. Letting the timeout
+    /// escape, as it used to, crashed the grid refresh instead.
+    /// </remarks>
     public bool Matches(Session session)
     {
-        for (var i = 0; i < _predicates.Count; i++)
-            if (!_predicates[i](session))
-                return false;
-        return true;
+        if (_regexTimedOut) return false;
+
+        try
+        {
+            for (var i = 0; i < _predicates.Count; i++)
+                if (!_predicates[i](session))
+                    return false;
+            return true;
+        }
+        catch (RegexMatchTimeoutException)
+        {
+            _regexTimedOut = true;
+            return false;
+        }
     }
 
     public IEnumerable<Session> Filter(IEnumerable<Session> sessions) =>
@@ -143,7 +170,9 @@ public sealed class SearchQuery
                 if (predicate is null) continue;
                 predicates.Add(token.Negated ? Negate(predicate) : predicate);
             }
-            catch (Exception ex) when (ex is ArgumentException or RegexParseException or FormatException)
+            // OverflowException: a number too large for its field (status:99999999999999999999) is
+            // a malformed value like any other, not a reason to take the filter box down.
+            catch (Exception ex) when (ex is ArgumentException or RegexParseException or FormatException or OverflowException)
             {
                 warnings.Add($"{token.Field ?? "term"}: {ex.Message}");
             }
@@ -261,6 +290,7 @@ public sealed class SearchQuery
         {
             "method" or "m" => TextField(token, s => s.Method),
             "host" or "h" => TextField(token, s => s.Host),
+            "domain" or "d" => DomainField(token),
             "path" or "p" => TextField(token, s => s.Path),
             "query" or "qs" => TextField(token, s => s.Query),
             "url" or "u" => TextField(token, s => s.Url),
@@ -323,6 +353,108 @@ public sealed class SearchQuery
 
         var needle = token.Value;
         return s => selector(s).Contains(needle, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// <c>domain:example.com</c> matches that host and its subdomains and nothing else, unlike the
+    /// substring <c>host:</c> field. The Filters tab's host list and "Hide this host" compose this
+    /// field: hiding <c>x.com</c> must not also hide <c>netflix.com</c>, and a show-only
+    /// <c>*.example.com</c> must not admit <c>evil-example.com</c>. See
+    /// <see cref="MatchesHostPattern"/> for how a fragment such as <c>curseforge</c> is treated.
+    /// </summary>
+    private static Func<Session, bool> DomainField(Token token)
+    {
+        if (token.IsRegex) return TextField(token, s => s.Host);
+
+        string[] alternatives = token.IsQuoted ? [token.Value] : token.Value.Split('|');
+        var patterns = alternatives
+            .Select(NormaliseHostPattern)
+            .Where(pattern => pattern.Length > 0)
+            .ToArray();
+        if (patterns.Length == 0) throw new ArgumentException("missing domain");
+
+        return s =>
+        {
+            var host = s.Host;
+            foreach (var pattern in patterns)
+                if (MatchesHostPattern(host, pattern)) return true;
+            return false;
+        };
+    }
+
+    /// <summary>Strips surrounding space and a leading "*." wildcard.</summary>
+    public static string NormaliseHostPattern(string pattern)
+    {
+        ArgumentNullException.ThrowIfNull(pattern);
+        return pattern.Trim().TrimStart('*', '.');
+    }
+
+    /// <summary>
+    /// Whether a host-list pattern selects <paramref name="host"/>.
+    /// </summary>
+    /// <remarks>
+    /// A full domain or address ("example.com", "*.example.com", "example.com.", "10.0.0.1") matches
+    /// that host and its subdomains, never a lookalike such as evil-example.com. Anything else is a
+    /// fragment and matches any host containing it, which is how every pattern matched before this
+    /// rule existed: a single label with or without a trailing dot ("curseforge", "localhost",
+    /// "api.") and a partial IPv4 address ("192.168.1", "192.168."). Keeping fragments working matters
+    /// because saved filtersets carry them, and a show-only list whose patterns suddenly matched
+    /// nothing would discard all traffic at admission after an upgrade.
+    /// </remarks>
+    public static bool MatchesHostPattern(string host, string pattern)
+    {
+        ArgumentNullException.ThrowIfNull(host);
+        ArgumentNullException.ThrowIfNull(pattern);
+        pattern = NormaliseHostPattern(pattern);
+        if (pattern.Length == 0) return false;
+
+        // A trailing root dot names the same domain ("example.com." is example.com), so it is judged
+        // on what is left. Treating every trailing dot as a fragment made a pasted FQDN a substring
+        // pattern, which admitted example.com.attacker.net. A single label ("api.") or a partial
+        // address ("192.168.") is still a fragment and keeps its dot in the substring it matches.
+        var domain = pattern.TrimEnd('.');
+        return IsHostFragment(domain)
+            ? host.Contains(pattern, StringComparison.OrdinalIgnoreCase)
+            : IsSameOrSubdomain(WithoutPort(host).TrimEnd('.'), domain);
+    }
+
+    /// <summary>
+    /// The host without a trailing <c>:port</c>. <see cref="Session.Host"/> is the raw Host header
+    /// whenever the request line had no parseable URL, so it can carry one, and "example.com:8443"
+    /// has to match the domain example.com like any other request to it. A bracketed IPv6 literal
+    /// keeps its brackets ("[::1]:8080" is "[::1]"), and a bare IPv6 address, whose colons are not a
+    /// port separator, is left alone.
+    /// </summary>
+    private static string WithoutPort(string host)
+    {
+        if (host.StartsWith('['))
+        {
+            var close = host.IndexOf(']');
+            return close > 0 ? host[..(close + 1)] : host;
+        }
+
+        var colon = host.IndexOf(':');
+        if (colon <= 0 || colon != host.LastIndexOf(':')) return host;
+
+        var port = host.AsSpan(colon + 1);
+        return port.Length is > 0 and <= 5 && !port.ContainsAnyExcept("0123456789") ? host[..colon] : host;
+    }
+
+    /// <summary>Whether a pattern, trailing dots already removed, is a fragment rather than a domain.</summary>
+    private static bool IsHostFragment(string domain)
+    {
+        if (domain.IndexOf('.') <= 0) return true;
+        return domain.All(c => char.IsAsciiDigit(c) || c == '.') && domain.Count(c => c == '.') < 3;
+    }
+
+    /// <summary>True when <paramref name="host"/> is <paramref name="domain"/> or sits beneath it.</summary>
+    public static bool IsSameOrSubdomain(string host, string domain)
+    {
+        ArgumentNullException.ThrowIfNull(host);
+        ArgumentNullException.ThrowIfNull(domain);
+        if (domain.Length == 0 || host.Length < domain.Length) return false;
+        if (!host.EndsWith(domain, StringComparison.OrdinalIgnoreCase)) return false;
+        return host.Length == domain.Length || host[host.Length - domain.Length - 1] == '.';
     }
 
     private static Func<Session, bool> HeaderField(Token token, bool request, bool response)
@@ -403,22 +535,39 @@ public sealed class SearchQuery
     {
         var raw = token.Value.Trim();
 
-        // 2xx / 4XX class shorthand.
-        if (raw.Length == 3 && char.IsDigit(raw[0]) && (raw[1] is 'x' or 'X') && (raw[2] is 'x' or 'X'))
-        {
-            var hundreds = (raw[0] - '0') * 100;
-            return s => s.StatusCode >= hundreds && s.StatusCode < hundreds + 100;
-        }
-
+        // Each alternative is a full status term of its own, so "4xx|5xx" and "200|3xx" work, and one
+        // that cannot be read throws like "status:abc" does rather than silently matching nothing.
         if (!token.IsQuoted && raw.Contains('|'))
         {
-            var codes = raw.Split('|', StringSplitOptions.RemoveEmptyEntries)
-                           .Select(x => int.TryParse(x, out var c) ? c : -1)
-                           .Where(c => c > 0).ToHashSet();
-            return s => codes.Contains(s.StatusCode);
+            var alternatives = raw.Split('|', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .Select(StatusMatcher)
+                .ToArray();
+            if (alternatives.Length == 0) throw new FormatException("missing status code");
+
+            return s =>
+            {
+                var code = s.StatusCode;
+                foreach (var matches in alternatives)
+                    if (matches(code)) return true;
+                return false;
+            };
         }
 
-        return NumericField(token, s => s.StatusCode, ParsePlain);
+        var single = StatusMatcher(raw);
+        return s => single(s.StatusCode);
+    }
+
+    /// <summary>One status term: a <c>2xx</c> / <c>4XX</c> class, or anything <see cref="NumericMatcher"/> reads.</summary>
+    private static Func<long, bool> StatusMatcher(string text)
+    {
+        if (text.Length == 3 && char.IsDigit(text[0]) && (text[1] is 'x' or 'X') && (text[2] is 'x' or 'X'))
+        {
+            var hundreds = (text[0] - '0') * 100;
+            return code => code >= hundreds && code < hundreds + 100;
+        }
+
+        var matcher = NumericMatcher.Parse(text, ParsePlain);
+        return matcher.Matches;
     }
 
     private static Func<Session, bool> NumericField(Token token, Func<Session, long> selector, Func<string, long> parse)
@@ -510,7 +659,7 @@ public sealed class SearchQuery
     /// <summary>Field names offered by the UI's autocomplete.</summary>
     public static readonly string[] FieldNames =
     [
-        "method:", "host:", "path:", "query:", "url:", "status:", "ct:",
+        "method:", "host:", "domain:", "path:", "query:", "url:", "status:", "ct:",
         "header:", "reqheader:", "respheader:",
         "req:", "resp:", "body:",
         "size:", "reqsize:", "dur:", "id:", "error:", "is:",
