@@ -741,6 +741,8 @@ internal static class Strings
         public static string HostPlaceholder => I18n.T("filters.hostPlaceholder");
         public static string AddHost => I18n.T("filters.addHost");
         public static string RemoveSelectedHost => I18n.T("filters.removeSelectedHost");
+        public static string HostPatternsRejected(string patterns) =>
+            I18n.T("filters.hostPatternsRejected", ("patterns", patterns));
 
         public static string StatusGroup => I18n.T("filters.statusGroup");
         public static string HideSuccess => I18n.T("filters.hideSuccess");

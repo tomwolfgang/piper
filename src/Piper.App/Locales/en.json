@@ -344,7 +344,7 @@
     "findNext": "Find &next",
     "clearFindMarks": "Clear find &marks",
     "filterSessions": "Fi&lter sessions",
-    "filterToThisHost": "Filter to this &host",
+    "filterToThisHost": "Filter &to this host",
     "hideThisHost": "&Hide this host",
     "showHiddenHosts": "Sh&ow hosts hidden this session",
     "sendUrlToTextWizard": "Send URL to Text&Wizard",
@@ -565,6 +565,7 @@
     "hostPlaceholder": "Host pattern, e.g. *.curseforge.com",
     "addHost": "Add",
     "removeSelectedHost": "Remove selected",
+    "hostPatternsRejected": "Not added, because these are not host patterns: {{patterns}}\n\nUse a host name, a *.wildcard or an address, without quotes, slashes or '|'.",
 
     "statusGroup": "Response Status Code",
     "hideSuccess": "Hide success (2xx)",
