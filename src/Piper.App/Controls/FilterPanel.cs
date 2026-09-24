@@ -350,7 +350,7 @@ public sealed class FilterPanel : UserControl
 
         // Refuse what the composed query would silently drop, and leave it in the box to fix:
         // otherwise a show-only list of nothing but such entries restricts nothing once it runs.
-        var rejected = patterns.Where(pattern => !HostFilterTerm.IsFilterableHost(HostFilterTerm.StripWildcard(pattern))).ToArray();
+        var rejected = patterns.Where(pattern => !HostFilterTerm.IsUsablePattern(pattern)).ToArray();
         var existing = HostEntries().Select(host => host.Pattern).ToHashSet(StringComparer.OrdinalIgnoreCase);
         foreach (var pattern in patterns.Except(rejected))
         {
