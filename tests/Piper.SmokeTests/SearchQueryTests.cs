@@ -90,6 +90,36 @@ internal static class SearchQueryTests
             return Task.CompletedTask;
         });
 
+        await runner.RunAsync("one body: query re-reads a body that was replaced, re-encoded or released", () =>
+        {
+            // The grid keeps one parsed query across refreshes, and it remembers each body's
+            // verdict, so every input to that verdict has to be noticed when it changes.
+            var query = SearchQuery.Parse("resp:gamma");
+            var session = Build(
+                url: "http://api.example.test/v1/report",
+                responseHeaders: [("Content-Type", "text/plain")],
+                responseBody: "alpha");
+            runner.IsTrue(!query.Matches(session), "the first body does not match");
+            runner.IsTrue(!query.Matches(session), "nor does it on a second look, from the remembered verdict");
+
+            session.Response!.Body = Encoding.UTF8.GetBytes("gamma");
+            runner.IsTrue(query.Matches(session), "a replaced body is searched afresh");
+
+            using (var packed = new MemoryStream())
+            {
+                using (var gzip = new System.IO.Compression.GZipStream(packed, System.IO.Compression.CompressionLevel.Fastest))
+                    gzip.Write("gamma"u8);
+                session.Response.Body = packed.ToArray();
+            }
+            runner.IsTrue(!query.Matches(session), "compressed bytes without Content-Encoding are not decoded");
+            session.Response.Headers.Set("Content-Encoding", "gzip");
+            runner.IsTrue(query.Matches(session), "the same bytes are decoded once Content-Encoding names gzip");
+
+            session.Response.ReleaseBody();
+            runner.IsTrue(!query.Matches(session), "a released body no longer matches");
+            return Task.CompletedTask;
+        });
+
         await runner.RunAsync("the search index is rebuilt after a session mutates", () =>
         {
             var session = Build(url: "http://api.example.test/v1/orders");

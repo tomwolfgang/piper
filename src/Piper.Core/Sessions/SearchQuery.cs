@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.RegularExpressions;
 using Piper.Core.Http;
@@ -539,6 +540,14 @@ public sealed class SearchQuery
         var re = token.IsRegex ? BuildRegex(token.Value) : null;
         var needle = token.Value;
 
+        // The grid re-filters every session on each refresh while traffic flows, and a body has to
+        // be decompressed and decoded before it can be searched: a few thousand compressed JSON
+        // responses took the UI thread hundreds of milliseconds a refresh. A body is replaced, never
+        // written in place, so a verdict holds for as long as the message keeps the same array and
+        // the same headers that decide how it is decoded. Keyed weakly on the array, the table keeps
+        // no released body alive, and it goes with the query when the filter text changes.
+        var verdicts = new ConditionalWeakTable<byte[], BodyVerdict>();
+
         return s =>
         {
             if (request && s.Request is not null && MatchBody(s.Request)) return true;
@@ -548,14 +557,32 @@ public sealed class SearchQuery
 
         bool MatchBody(HttpMessage message)
         {
-            if (message.Body.Length == 0) return false;
-            if (!ContentCodec.LooksTextual(message.ContentType, message.Body)) return false;
+            var body = message.Body;
+            if (body.Length == 0) return false;
+            var contentType = message.ContentType;
+            var contentEncoding = message.ContentEncoding;
+            if (verdicts.TryGetValue(body, out var cached)
+                && cached.ContentType == contentType
+                && cached.ContentEncoding == contentEncoding)
+                return cached.Matched;
+
+            // A regex timeout escapes before anything is recorded, so it still fails the query closed.
+            var matched = Evaluate(message, body, contentType);
+            verdicts.AddOrUpdate(body, new BodyVerdict(contentType, contentEncoding, matched));
+            return matched;
+        }
+
+        bool Evaluate(HttpMessage message, byte[] body, string? contentType)
+        {
+            if (!ContentCodec.LooksTextual(contentType, body)) return false;
             string text;
             try { text = message.BodyAsText(); }
             catch { return false; }
             return re is not null ? re.IsMatch(text) : text.Contains(needle, StringComparison.OrdinalIgnoreCase);
         }
     }
+
+    private sealed record BodyVerdict(string? ContentType, string? ContentEncoding, bool Matched);
 
     private static Func<Session, bool> CompileStatus(Token token)
     {
