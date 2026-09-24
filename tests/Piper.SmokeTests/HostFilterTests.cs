@@ -119,6 +119,60 @@ internal static class HostFilterTests
             return Task.CompletedTask;
         });
 
+        await runner.RunAsync("a host pattern carrying a port matches its host", () =>
+        {
+            // "Hide this host" records Session.Host verbatim, and that is the raw Host header, port
+            // included, whenever the request line had no parseable URL. The port came off the host
+            // but not the pattern, so the recorded entry could never match and hid nothing.
+            static Session RawHost(string hostHeader)
+            {
+                var request = new HttpRequestData { Method = "GET", RequestTarget = "/" };
+                request.Headers.Add("Host", hostHeader);
+                return new Session { Request = request, State = SessionState.Complete };
+            }
+
+            bool Matches(string term, Session session) => SearchQuery.Parse(term).Matches(session);
+
+            var hide = HostFilterTerm.Compose("example.com:8443", hide: true);
+            runner.IsTrue(!Matches(hide, RawHost("example.com:8443")), "hiding example.com:8443 hides that session");
+            runner.IsTrue(!Matches(hide, SessionFor("api.example.com")), "and the domain beneath it");
+            runner.IsTrue(Matches(hide, RawHost("evil-example.com:8443")), "but not a lookalike");
+            runner.IsTrue(HostFilterTerm.Covers("example.com:8443", "example.com:8443"), "Covers agrees");
+            runner.IsTrue(HostFilterTerm.Covers("192.168.1.5:8080", "192.168.1.5:8080"), "an address with a port too");
+
+            // Dropping the port must not change what kind of pattern it is: a single label or an
+            // IPv6 literal stays a fragment, matched with its port as a substring.
+            runner.IsTrue(HostFilterTerm.Covers("localhost:3000", "localhost:3000"), "a single label with a port matches itself");
+            runner.IsTrue(!HostFilterTerm.Covers("localhost:3000", "localhost:4000"), "but stays a fragment, port included");
+            runner.IsTrue(HostFilterTerm.Covers("[::1]:8080", "[::1]:8080"), "an IPv6 literal with a port matches itself");
+            runner.IsTrue(!HostFilterTerm.Covers("[::1]:8080", "[::1]:9090"), "and also keeps its port");
+
+            var settings = new FilterSettings();
+            runner.IsTrue(settings.HideHost("example.com:8443"), "precondition: the host is recorded");
+            runner.IsTrue(settings.Hides("example.com:8443"), "the recorded entry hides the host it came from");
+            return Task.CompletedTask;
+        });
+
+        await runner.RunAsync("ignored Hosts entries are counted so the UI can say so", () =>
+        {
+            runner.AreEqual(0, HostFilterTerm.CountIgnored("a.com; *.b.com, c"), "usable entries are not counted");
+            runner.AreEqual(2, HostFilterTerm.CountIgnored("a.com; \"b.com\"; c/d"), "a quote and a slash are");
+            runner.AreEqual(1, HostFilterTerm.CountIgnored("*"), "and so is a lone wildcard");
+            runner.AreEqual(0, HostFilterTerm.CountIgnored(null), "nothing typed is nothing ignored");
+
+            // Every entry dropped means the hosts term disappears and show-only admits everything.
+            var settings = new FilterSettings
+            {
+                UseFilters = true,
+                Hosts = [new HostFilterEntry { Pattern = "\"a.com\"", Enabled = true }],
+            };
+            runner.AreEqual(string.Empty, FilterQuery.Compose(settings), "precondition: nothing is composed");
+            runner.AreEqual(1, FilterQuery.IgnoredHostPatterns(settings), "and the drop is reported");
+            settings.UseFilters = false;
+            runner.AreEqual(0, FilterQuery.IgnoredHostPatterns(settings), "filters off reports nothing");
+            return Task.CompletedTask;
+        });
+
         await runner.RunAsync("Filters tab Hosts box actually narrows the session grid", () =>
         {
             var api = SessionFor("api.curseforge.com");

@@ -56,7 +56,7 @@ public sealed class FilterSettings
         // Either already hiding, or a show-only list with nothing ticked -- which composes to an
         // empty term and so filters nothing, meaning hide mode inverts no live intent.
         HostsMode = 1;
-        if (!entries.Any(entry => entry.Enabled && Covers(entry.Pattern, pattern)))
+        if (!entries.Any(entry => entry.Enabled && HostFilterTerm.Covers(entry.Pattern, pattern)))
         {
             var existing = entries.FirstOrDefault(entry =>
                 string.Equals(entry.Pattern.Trim(), pattern, StringComparison.OrdinalIgnoreCase));
@@ -78,7 +78,7 @@ public sealed class FilterSettings
         return HostsMode == 1
             && (Hosts ?? []).Any(entry => entry is { Enabled: true }
                 && !string.IsNullOrWhiteSpace(entry.Pattern)
-                && Covers(entry.Pattern, host));
+                && HostFilterTerm.Covers(entry.Pattern, host));
     }
 
     private bool Commit(List<HostFilterEntry> entries)
@@ -88,14 +88,6 @@ public sealed class FilterSettings
         HostsText = string.Join("; ", entries.Select(entry => entry.Pattern));
         return true;
     }
-
-    /// <summary>
-    /// Whether an enabled entry already decides <paramref name="host"/>, using the same
-    /// exact-or-subdomain rule <see cref="SearchQuery"/> applies to a composed <c>domain:</c> term.
-    /// A pattern that strips to nothing (a lone "*") is dropped by <see cref="HostFilterTerm.Compose"/>
-    /// and so covers nothing.
-    /// </summary>
-    private static bool Covers(string pattern, string host) => HostFilterTerm.Covers(pattern, host);
 }
 
 /// <summary>A host pattern in a filterset and whether it participates when the filter is run.</summary>

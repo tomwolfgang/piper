@@ -348,6 +348,7 @@ internal static class Strings
         public static string HideHostSwitchedToHideMode => I18n.T("log.hideHostSwitchedToHideMode");
         public static string HideHostAdded(string host) => I18n.T("log.hideHostAdded", ("host", host));
         public static string SessionHiddenHostsShown => I18n.T("log.sessionHiddenHostsShown");
+        public static string HostPatternsIgnored(int count) => I18n.T("log.hostPatternsIgnored", ("count", count));
 
         public static string ShowingTrustPrompt => I18n.T("log.showingTrustPrompt");
         public static string NoSazToImport(string names) => I18n.T("log.noSazToImport", ("names", names));
@@ -740,6 +741,8 @@ internal static class Strings
         public static string HostPlaceholder => I18n.T("filters.hostPlaceholder");
         public static string AddHost => I18n.T("filters.addHost");
         public static string RemoveSelectedHost => I18n.T("filters.removeSelectedHost");
+        public static string HostPatternsRejected(string patterns) =>
+            I18n.T("filters.hostPatternsRejected", ("patterns", patterns));
 
         public static string StatusGroup => I18n.T("filters.statusGroup");
         public static string HideSuccess => I18n.T("filters.hideSuccess");

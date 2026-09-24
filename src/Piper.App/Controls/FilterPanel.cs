@@ -348,13 +348,20 @@ public sealed class FilterPanel : UserControl
         var patterns = HostFilterTerm.Split(_hostEntry.Text);
         if (patterns.Count == 0) return;
 
+        // Refuse what the composed query would silently drop, and leave it in the box to fix:
+        // otherwise a show-only list of nothing but such entries restricts nothing once it runs.
+        var rejected = patterns.Where(pattern => !HostFilterTerm.IsUsablePattern(pattern)).ToArray();
         var existing = HostEntries().Select(host => host.Pattern).ToHashSet(StringComparer.OrdinalIgnoreCase);
-        foreach (var pattern in patterns)
+        foreach (var pattern in patterns.Except(rejected))
         {
             if (existing.Add(pattern)) _hostsList.Items.Add(pattern, isChecked: true);
         }
-        _hostEntry.Clear();
+        _hostEntry.Text = string.Join("; ", rejected);
         OnCriteriaChanged();
+
+        if (rejected.Length > 0)
+            MessageBox.Show(this, Strings.Filters.HostPatternsRejected(string.Join(", ", rejected)),
+                Strings.App.Name, MessageBoxButtons.OK, MessageBoxIcon.Warning);
     }
 
     private void RemoveSelectedHost()

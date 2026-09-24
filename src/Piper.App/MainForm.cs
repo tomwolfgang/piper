@@ -196,6 +196,8 @@ public sealed class MainForm : Form, IMessageFilter
             var admissionQuery = SearchQuery.Parse(query);
             _sessionList.FiltersetFilter = admissionQuery.IsEmpty ? null : admissionQuery.Matches;
             _store.CompletedSessionFilter = admissionQuery.IsEmpty ? null : admissionQuery.Matches;
+            var ignoredHosts = FilterQuery.IgnoredHostPatterns(_filterPanel.Settings);
+            if (ignoredHosts > 0) AppendLog(Strings.Log.HostPatternsIgnored(ignoredHosts));
             // Keep this save unconditional. The Use Filters checkbox no longer raises
             // SettingsChanged, so this is the only path that persists it: making the save depend
             // on a non-empty query would stop unticking from being written, and the filterset

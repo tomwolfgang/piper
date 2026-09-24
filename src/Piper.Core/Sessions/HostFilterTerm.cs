@@ -33,8 +33,8 @@ public static class HostFilterTerm
     public static string Compose(string? hostsText, bool hide)
     {
         var patterns = Split(hostsText)
+            .Where(IsUsablePattern)
             .Select(StripWildcard)
-            .Where(IsFilterableHost)
             .ToArray();
 
         if (patterns.Length == 0) return string.Empty;
@@ -49,6 +49,20 @@ public static class HostFilterTerm
     /// the query never disagree.
     /// </summary>
     public static bool Covers(string pattern, string host) => SearchQuery.MatchesHostPattern(host, pattern);
+
+    /// <summary>
+    /// How many entries of <paramref name="hostsText"/> <see cref="Compose"/> leaves out. Dropping
+    /// them is silent otherwise, and when it drops every entry a show-only list stops restricting
+    /// anything: the whole hosts term disappears and all traffic is admitted.
+    /// </summary>
+    public static int CountIgnored(string? hostsText) =>
+        Split(hostsText).Count(pattern => !IsUsablePattern(pattern));
+
+    /// <summary>
+    /// Whether <see cref="Compose"/> keeps a host list entry. The one drop rule: the Filters tab's
+    /// Add box and <see cref="CountIgnored"/> ask this too, so neither can drift from the query.
+    /// </summary>
+    public static bool IsUsablePattern(string pattern) => IsFilterableHost(StripWildcard(pattern));
 
     /// <summary>
     /// Whether a host observed on the wire may be turned into a filter pattern. A Host header is

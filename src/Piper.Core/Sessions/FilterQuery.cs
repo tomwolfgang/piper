@@ -35,6 +35,16 @@ public static class FilterQuery
     }
 
     /// <summary>
+    /// How many enabled host entries <see cref="Compose"/> left out as unusable, so the UI can say
+    /// so. Zero when filters are off, since nothing is composed then.
+    /// </summary>
+    public static int IgnoredHostPatterns(FilterSettings settings)
+    {
+        ArgumentNullException.ThrowIfNull(settings);
+        return settings.UseFilters ? HostFilterTerm.CountIgnored(EnabledHosts(settings)) : 0;
+    }
+
+    /// <summary>
     /// The host patterns that participate in the query, in the separated form
     /// <see cref="HostFilterTerm.Compose"/> accepts. Falls back to the legacy
     /// <see cref="FilterSettings.HostsText"/> field when a filterset predates the per-host
