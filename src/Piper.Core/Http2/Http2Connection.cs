@@ -47,7 +47,19 @@ public sealed class Http2Connection(Stream stream, Func<HttpRequestData, Cancell
     private readonly Http2Settings _peerSettings = new();
     private readonly HpackDecoder _hpackDecoder = new(Http2Settings.Advertised().HeaderTableSize);
 
+    /// <summary>The highest stream id the peer has opened. RFC 9113 §5.1.1: a new stream must
+    /// exceed it, and GOAWAY reports it as the last stream this side may have processed.</summary>
     private int _highestStreamId;
+
+    /// <summary>The header block being assembled, and the stream its HEADERS frame named (0 when
+    /// none is). RFC 9113 §6.10: its CONTINUATION frames follow immediately, on that stream.</summary>
+    private readonly List<byte> _headerBlock = [];
+    private int _headerBlockStreamId;
+    private bool _headerBlockEndsStream;
+
+    /// <summary>Caps the compressed block as well as the decoded list, so CONTINUATION frames
+    /// cannot be used to buffer without limit (the 2024 "CONTINUATION flood").</summary>
+    private int MaxHeaderBlockSize => _localSettings.MaxHeaderListSize ?? 65_536;
 
     // Guards _peerConnectionWindow. This budget is shared by every concurrent stream's sender
     // task, so "read the remaining window, decide how much to send, then subtract" is only safe
@@ -192,7 +204,8 @@ public sealed class Http2Connection(Stream stream, Func<HttpRequestData, Cancell
 
     private void DispatchFrame(Http2Frame frame, CancellationToken ct)
     {
-        _highestStreamId = Math.Max(_highestStreamId, frame.StreamId);
+        if (_headerBlockStreamId != 0 && (frame.Type != Http2FrameType.Continuation || frame.StreamId != _headerBlockStreamId))
+            throw new Http2ProtocolException(Http2ErrorCode.ProtocolError, "Header block interrupted before END_HEADERS.");
 
         switch (frame.Type)
         {
@@ -241,43 +254,44 @@ public sealed class Http2Connection(Stream stream, Func<HttpRequestData, Cancell
         if (frame.StreamId == 0)
             throw new Http2ProtocolException(Http2ErrorCode.ProtocolError, "HEADERS on stream 0.");
 
-        var maxConcurrent = _localSettings.MaxConcurrentStreams ?? int.MaxValue;
-        if (!_streams.ContainsKey(frame.StreamId) && _streams.Count >= maxConcurrent)
-        {
-            EnqueueRstStream(frame.StreamId, Http2ErrorCode.RefusedStream);
-            return;
-        }
-
-        var http2Stream = new Http2Stream(frame.StreamId)
-        {
-            RemoteWindow = _peerSettings.InitialWindowSize,
-        };
-        _streams[frame.StreamId] = http2Stream;
-
-        http2Stream.HeaderBlockFragment.AddRange(frame.HeaderBlockPayload.ToArray());
-        http2Stream.EndStreamOnHeaders = frame.HasFlag(Http2FrameFlags.EndStream);
-
-        if (frame.HasFlag(Http2FrameFlags.EndHeaders))
-            CompleteHeaders(http2Stream);
+        _headerBlock.Clear();
+        _headerBlockStreamId = frame.StreamId;
+        _headerBlockEndsStream = frame.HasFlag(Http2FrameFlags.EndStream);
+        AppendHeaderBlock(frame);
     }
 
     private void HandleContinuation(Http2Frame frame)
     {
-        if (!_streams.TryGetValue(frame.StreamId, out var http2Stream)) return; // stream already gone; ignore trailing frames
-
-        http2Stream.HeaderBlockFragment.AddRange(frame.HeaderBlockPayload.ToArray());
-        if (frame.HasFlag(Http2FrameFlags.EndHeaders))
-            CompleteHeaders(http2Stream);
+        // One on the stream being assembled got past DispatchFrame; any other is unexpected.
+        if (_headerBlockStreamId == 0)
+            throw new Http2ProtocolException(Http2ErrorCode.ProtocolError, "CONTINUATION without a preceding HEADERS.");
+        AppendHeaderBlock(frame);
     }
 
-    private void CompleteHeaders(Http2Stream http2Stream)
+    private void AppendHeaderBlock(Http2Frame frame)
     {
-        http2Stream.HeadersComplete = true;
+        _headerBlock.AddRange(frame.HeaderBlockPayload.Span);
+        if (_headerBlock.Count > MaxHeaderBlockSize)
+            throw new Http2ProtocolException(Http2ErrorCode.EnhanceYourCalm, "Header block exceeds the advertised header list size.");
 
+        if (!frame.HasFlag(Http2FrameFlags.EndHeaders)) return;
+
+        var streamId = _headerBlockStreamId;
+        var block = _headerBlock.ToArray();
+        _headerBlockStreamId = 0;
+        _headerBlock.Clear();
+        CompleteHeaders(streamId, block, _headerBlockEndsStream);
+    }
+
+    private void CompleteHeaders(int streamId, byte[] block, bool endStream)
+    {
+        // Decoded before anything else is decided, however the block is then treated: the dynamic
+        // table is shared by every stream, so skipping a block that is about to be refused would
+        // desynchronise it for all of them.
         List<(string Name, string Value)> fields;
         try
         {
-            fields = _hpackDecoder.Decode(http2Stream.HeaderBlockFragment.ToArray());
+            fields = _hpackDecoder.Decode(block);
         }
         catch (HttpParseException ex)
         {
@@ -286,10 +300,69 @@ public sealed class Http2Connection(Stream stream, Func<HttpRequestData, Cancell
             throw new Http2ProtocolException(Http2ErrorCode.CompressionError, $"HPACK decoding failed: {ex.Message}");
         }
 
-        http2Stream.Request = Http2MessageAdapter.ToRequest(fields, isHttps: true);
+        if (_streams.TryGetValue(streamId, out var open))
+        {
+            CompleteTrailers(open, fields, endStream);
+            return;
+        }
 
-        if (http2Stream.EndStreamOnHeaders)
+        // RFC 9113 §5.1.1: a client opens odd ids, each higher than the last. A lower or repeated
+        // one names a stream that is already closed -- including one this side refused or reset.
+        if ((streamId & 1) == 0 || streamId <= _highestStreamId)
+            throw new Http2ProtocolException(Http2ErrorCode.ProtocolError, $"HEADERS on stream {streamId}, which cannot open a new stream.");
+        _highestStreamId = streamId;
+
+        var maxConcurrent = _localSettings.MaxConcurrentStreams ?? int.MaxValue;
+        if (_streams.Count >= maxConcurrent)
+        {
+            EnqueueRstStream(streamId, Http2ErrorCode.RefusedStream);
+            return;
+        }
+
+        HttpRequestData request;
+        try
+        {
+            request = Http2MessageAdapter.ToRequest(fields);
+        }
+        catch (HttpParseException)
+        {
+            // RFC 9113 §8.1.1: a malformed request is a stream error; the other streams carry on.
+            EnqueueRstStream(streamId, Http2ErrorCode.ProtocolError);
+            return;
+        }
+
+        var http2Stream = new Http2Stream(streamId, request) { RemoteWindow = _peerSettings.InitialWindowSize };
+        _streams[streamId] = http2Stream;
+
+        if (endStream)
             DispatchRequest(http2Stream);
+    }
+
+    /// <summary>A second HEADERS on an open stream: the request's trailers (RFC 9113 §8.1).</summary>
+    private void CompleteTrailers(Http2Stream http2Stream, List<(string Name, string Value)> fields, bool endStream)
+    {
+        ThrowIfDispatched(http2Stream);
+
+        // Trailers end the stream and carry no pseudo-headers; anything else is malformed.
+        if (!endStream || fields.Exists(f => f.Name.StartsWith(':')))
+        {
+            EnqueueRstStream(http2Stream.Id, Http2ErrorCode.ProtocolError);
+            http2Stream.Cancellation.Cancel();
+            _streams.TryRemove(http2Stream.Id, out _);
+            return;
+        }
+
+        // The trailers themselves are discarded, as HTTP/1.1 chunked trailers are
+        // (HttpParser.SkipTrailersAsync): HttpRequestData has nowhere to carry them.
+        DispatchRequest(http2Stream);
+    }
+
+    /// <summary>RFC 9113 §5.1: after END_STREAM the peer may send no more HEADERS or DATA on the
+    /// stream. That is a stream error, which §5.4.1 lets an endpoint treat as a connection error.</summary>
+    private static void ThrowIfDispatched(Http2Stream http2Stream)
+    {
+        if (http2Stream.Dispatched)
+            throw new Http2ProtocolException(Http2ErrorCode.StreamClosed, $"Frame on stream {http2Stream.Id} after END_STREAM.");
     }
 
     private void HandleData(Http2Frame frame)
@@ -309,6 +382,7 @@ public sealed class Http2Connection(Stream stream, Func<HttpRequestData, Cancell
         }
 
         if (!_streams.TryGetValue(frame.StreamId, out var http2Stream)) return; // reset/unknown stream: drop the payload
+        ThrowIfDispatched(http2Stream);
 
         if (length > 0)
         {
@@ -354,8 +428,15 @@ public sealed class Http2Connection(Stream stream, Func<HttpRequestData, Cancell
 
     private void HandleRstStream(Http2Frame frame)
     {
-        if (_streams.TryGetValue(frame.StreamId, out var http2Stream))
-            http2Stream.Cancellation.Cancel();
+        if (!_streams.TryGetValue(frame.StreamId, out var http2Stream)) return;
+        http2Stream.Cancellation.Cancel();
+
+        // A stream still receiving its request is closed now, so a later HEADERS naming it must be
+        // refused rather than taken for trailers. A dispatched one stays counted against
+        // MaxConcurrentStreams until its handler has actually stopped (ProcessStreamAsync removes
+        // it); freeing the slot on the reset alone would let HEADERS+RST_STREAM loops start
+        // handlers without limit (CVE-2023-44487, "Rapid Reset").
+        if (!http2Stream.Dispatched) _streams.TryRemove(frame.StreamId, out _);
     }
 
     private void HandlePing(Http2Frame frame)
@@ -375,7 +456,7 @@ public sealed class Http2Connection(Stream stream, Func<HttpRequestData, Cancell
 
     private void DispatchRequest(Http2Stream http2Stream)
     {
-        if (http2Stream.Request is null) return; // END_STREAM arrived before headers ever completed; malformed, drop
+        http2Stream.Dispatched = true;
         http2Stream.Request.Body = http2Stream.Body.ToArray();
 
         var task = Task.Run(() => ProcessStreamAsync(http2Stream));
@@ -389,7 +470,7 @@ public sealed class Http2Connection(Stream stream, Func<HttpRequestData, Cancell
             Http2StreamResponse response;
             try
             {
-                response = await handler(http2Stream.Request!, http2Stream.Cancellation.Token).ConfigureAwait(false);
+                response = await handler(http2Stream.Request, http2Stream.Cancellation.Token).ConfigureAwait(false);
             }
             catch (Http2StreamAbortException abort)
             {

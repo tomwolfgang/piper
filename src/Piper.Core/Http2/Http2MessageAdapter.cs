@@ -63,32 +63,63 @@ public static class Http2MessageAdapter
         return false;
     }
 
-    /// <summary>Rebuilds a request from a decoded h2 field list. <paramref name="isHttps"/> is used
-    /// only as a fallback when a peer omits <c>:scheme</c>, which compliant peers never do.</summary>
-    public static HttpRequestData ToRequest(IReadOnlyList<(string Name, string Value)> fields, bool isHttps = true)
+    /// <summary>Rebuilds a request from a decoded h2 field list.</summary>
+    /// <exception cref="HttpParseException">The pseudo-headers make the request malformed (RFC 9113
+    /// §8.3.1): one missing, repeated, unknown, empty, or placed after a regular field.</exception>
+    public static HttpRequestData ToRequest(IReadOnlyList<(string Name, string Value)> fields)
     {
         var request = new HttpRequestData { HttpVersion = "HTTP/2" };
-        string? scheme = null, authority = null, path = null;
+        string? method = null, scheme = null, authority = null, path = null;
+        var sawRegular = false;
 
         foreach (var (name, value) in fields)
         {
-            switch (name)
+            if (name.Length > 0 && name[0] == ':')
             {
-                case ":method": request.Method = value; break;
-                case ":scheme": scheme = value; break;
-                case ":authority": authority = value; break;
-                case ":path": path = value; break;
-                default:
-                    if (name.Length > 0 && name[0] == ':') break; // unknown pseudo-header: ignore
-                    request.Headers.Add(name, value);
-                    break;
+                if (sawRegular) throw new HttpParseException($"Pseudo-header {name} follows a regular field.");
+                switch (name)
+                {
+                    case ":method": method = Once(method, name, value); break;
+                    case ":scheme": scheme = Once(scheme, name, value); break;
+                    case ":authority": authority = Once(authority, name, value); break;
+                    case ":path": path = Once(path, name, value); break;
+                    default: throw new HttpParseException($"Pseudo-header {name} is not valid in a request.");
+                }
+                continue;
             }
+
+            sawRegular = true;
+            request.Headers.Add(name, value);
         }
 
-        request.RequestTarget = path ?? "/";
-        request.Url = ResolveUrl(scheme ?? (isHttps ? "https" : "http"), authority, path);
+        // A token (RFC 9110 §9.1): it is written verbatim into the request line when the origin
+        // speaks HTTP/1.1, so a space or CR/LF here would forge a second request.
+        if (string.IsNullOrEmpty(method) || !method.All(IsTokenChar)) throw new HttpParseException("Request has no valid :method.");
+
+        if (method == "CONNECT")
+        {
+            // §8.5: CONNECT names only the authority it tunnels to.
+            if (scheme is not null || path is not null || string.IsNullOrEmpty(authority))
+                throw new HttpParseException("CONNECT must carry :authority and neither :scheme nor :path.");
+            request.Method = method;
+            request.RequestTarget = authority;
+            return request;
+        }
+
+        if (string.IsNullOrEmpty(scheme)) throw new HttpParseException("Request has no :scheme.");
+        if (path is null || !(path.StartsWith('/') || (path == "*" && method == "OPTIONS")))
+            throw new HttpParseException("Request has no valid :path.");
+
+        request.Method = method;
+        request.RequestTarget = path;
+        request.Url = ResolveUrl(scheme, authority, path);
         return request;
     }
+
+    private static bool IsTokenChar(char c) => char.IsAsciiLetterOrDigit(c) || "!#$%&'*+-.^_`|~".Contains(c);
+
+    private static string Once(string? current, string name, string value) =>
+        current is null ? value : throw new HttpParseException($"Pseudo-header {name} is repeated.");
 
     public static HttpResponseData ToResponse(IReadOnlyList<(string Name, string Value)> fields)
     {

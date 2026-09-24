@@ -70,14 +70,40 @@ internal static class Http2MessageAdapterTests
             return Task.CompletedTask;
         });
 
-        await runner.RunAsync("ToRequest falls back to the tunnel's scheme when :scheme is missing", () =>
+        await runner.RunAsync("ToRequest rejects malformed request pseudo-headers", () =>
         {
-            var fields = new List<(string Name, string Value)>
+            (string, string) m = (":method", "GET"), s = (":scheme", "https"), a = (":authority", "example.com"), p = (":path", "/");
+            var cases = new (string What, (string, string)[] Fields)[]
             {
-                (":method", "GET"), (":authority", "example.com"), (":path", "/"),
+                ("missing :method", [s, a, p]),
+                ("missing :scheme", [m, a, p]),
+                ("missing :path", [m, s, a]),
+                ("empty :method", [(":method", ""), s, a, p]),
+                ("request line smuggled in :method", [(":method", "GET / HTTP/1.1\r\nHost: evil\r\n\r\nGET"), s, a, p]),
+                (":method with a space", [(":method", "G ET"), s, a, p]),
+                ("empty :path", [m, s, a, (":path", "")]),
+                ("relative :path", [m, s, a, (":path", "x")]),
+                ("asterisk :path on GET", [m, s, a, (":path", "*")]),
+                ("duplicate :path", [m, s, a, p, (":path", "/other")]),
+                ("duplicate :method", [m, m, s, a, p]),
+                ("pseudo-header after a regular field", [m, s, a, ("accept", "*/*"), p]),
+                ("response pseudo-header", [m, s, a, p, (":status", "200")]),
+                ("unknown pseudo-header", [m, s, a, p, (":protocol", "websocket")]),
+                ("CONNECT with :path", [(":method", "CONNECT"), a, p]),
+                ("CONNECT without :authority", [(":method", "CONNECT")]),
             };
-            var rebuilt = Http2MessageAdapter.ToRequest(fields, isHttps: true);
-            runner.AreEqual("https", rebuilt.Url!.Scheme, "falls back to https");
+            foreach (var (what, fields) in cases)
+            {
+                var rejected = false;
+                try { Http2MessageAdapter.ToRequest(fields); }
+                catch (HttpParseException) { rejected = true; }
+                runner.IsTrue(rejected, $"rejects {what}");
+            }
+
+            runner.AreEqual("OPTIONS", Http2MessageAdapter.ToRequest([(":method", "OPTIONS"), s, a, (":path", "*")]).Method,
+                "OPTIONS * is accepted");
+            runner.AreEqual("example.com:443", Http2MessageAdapter.ToRequest([(":method", "CONNECT"), (":authority", "example.com:443")]).RequestTarget,
+                "CONNECT carries only :authority");
             return Task.CompletedTask;
         });
 
