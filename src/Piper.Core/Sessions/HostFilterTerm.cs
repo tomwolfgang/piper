@@ -51,6 +51,14 @@ public static class HostFilterTerm
     public static bool Covers(string pattern, string host) => SearchQuery.MatchesHostPattern(host, pattern);
 
     /// <summary>
+    /// How many entries of <paramref name="hostsText"/> <see cref="Compose"/> leaves out. Dropping
+    /// them is silent otherwise, and when it drops every entry a show-only list stops restricting
+    /// anything: the whole hosts term disappears and all traffic is admitted.
+    /// </summary>
+    public static int CountIgnored(string? hostsText) =>
+        Split(hostsText).Count(pattern => !IsFilterableHost(StripWildcard(pattern)));
+
+    /// <summary>
     /// Whether a host observed on the wire may be turned into a filter pattern. A Host header is
     /// attacker-controlled and reaches <see cref="Session.Host"/> verbatim whenever the request
     /// line has no parseable URL (<see cref="Http.HttpParser.ResolveUrl"/> returns null), so

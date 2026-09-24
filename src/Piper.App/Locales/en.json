@@ -256,6 +256,8 @@
     "hideHostSwitchedToHideMode": "Hide this host: the Filters tab's Hosts list had nothing ticked, so it switched to \"Hide the following Hosts\".",
     "hideHostAdded": "Hide this host: the Filters tab's Hosts list now hides {{host}}. It is hidden here straight away; untick or remove its entry to show it again. The saved list takes over when you tick \"Use Filters\" there, or on the next start if it is ticked already.",
     "sessionHiddenHostsShown": "Hosts hidden this session are shown again. Entries in the Filters tab's Hosts list are unchanged and apply when the filterset runs.",
+    "hostPatternsIgnored_one": "Filters: {{count, N0}} Hosts entry is not a usable host pattern and was ignored. A list whose entries are all ignored filters no hosts.",
+    "hostPatternsIgnored_other": "Filters: {{count, N0}} Hosts entries are not usable host patterns and were ignored. A list whose entries are all ignored filters no hosts.",
 
     "showingTrustPrompt": "Showing the root certificate trust prompt. The main window is disabled, and will ignore dropped files, until it is answered.",
     "noSazToImport": "No SAZ file to import from {{names}}: a capture must be an existing .saz or .raz file.",

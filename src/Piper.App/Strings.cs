@@ -348,6 +348,7 @@ internal static class Strings
         public static string HideHostSwitchedToHideMode => I18n.T("log.hideHostSwitchedToHideMode");
         public static string HideHostAdded(string host) => I18n.T("log.hideHostAdded", ("host", host));
         public static string SessionHiddenHostsShown => I18n.T("log.sessionHiddenHostsShown");
+        public static string HostPatternsIgnored(int count) => I18n.T("log.hostPatternsIgnored", ("count", count));
 
         public static string ShowingTrustPrompt => I18n.T("log.showingTrustPrompt");
         public static string NoSazToImport(string names) => I18n.T("log.noSazToImport", ("names", names));

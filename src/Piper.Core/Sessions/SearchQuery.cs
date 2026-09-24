@@ -367,9 +367,10 @@ public sealed class SearchQuery
         if (token.IsRegex) return TextField(token, s => s.Host);
 
         string[] alternatives = token.IsQuoted ? [token.Value] : token.Value.Split('|');
+        // Classified once here: the predicate runs for every session on every grid refresh.
         var patterns = alternatives
-            .Select(NormaliseHostPattern)
-            .Where(pattern => pattern.Length > 0)
+            .Select(HostPattern.TryCreate)
+            .OfType<HostPattern>()
             .ToArray();
         if (patterns.Length == 0) throw new ArgumentException("missing domain");
 
@@ -377,7 +378,7 @@ public sealed class SearchQuery
         {
             var host = s.Host;
             foreach (var pattern in patterns)
-                if (MatchesHostPattern(host, pattern)) return true;
+                if (pattern.Matches(host)) return true;
             return false;
         };
     }
@@ -405,17 +406,42 @@ public sealed class SearchQuery
     {
         ArgumentNullException.ThrowIfNull(host);
         ArgumentNullException.ThrowIfNull(pattern);
-        pattern = NormaliseHostPattern(pattern);
-        if (pattern.Length == 0) return false;
+        return HostPattern.TryCreate(pattern) is { } parsed && parsed.Matches(host);
+    }
 
-        // A trailing root dot names the same domain ("example.com." is example.com), so it is judged
-        // on what is left. Treating every trailing dot as a fragment made a pasted FQDN a substring
-        // pattern, which admitted example.com.attacker.net. A single label ("api.") or a partial
-        // address ("192.168.") is still a fragment and keeps its dot in the substring it matches.
-        var domain = pattern.TrimEnd('.');
-        return IsHostFragment(domain)
-            ? host.Contains(pattern, StringComparison.OrdinalIgnoreCase)
-            : IsSameOrSubdomain(WithoutPort(host).TrimEnd('.'), domain);
+    /// <summary>A host-list pattern classified once; see <see cref="MatchesHostPattern"/>.</summary>
+    private sealed class HostPattern
+    {
+        private readonly string _pattern;
+        private readonly string _domain;
+        private readonly bool _isFragment;
+
+        private HostPattern(string pattern, string domain, bool isFragment)
+        {
+            _pattern = pattern;
+            _domain = domain;
+            _isFragment = isFragment;
+        }
+
+        public static HostPattern? TryCreate(string pattern)
+        {
+            pattern = NormaliseHostPattern(pattern);
+            if (pattern.Length == 0) return null;
+
+            // A trailing root dot names the same domain ("example.com." is example.com), so it is
+            // judged on what is left. Treating every trailing dot as a fragment made a pasted FQDN a
+            // substring pattern, which admitted example.com.attacker.net. A single label ("api.") or
+            // a partial address ("192.168.") is still a fragment and keeps its dot in the substring
+            // it matches. A port comes off the pattern as it does off the host: "Hide this host" on
+            // a session whose Host header carried one records "example.com:8443", which otherwise
+            // could never equal the port-stripped host and so hid nothing.
+            var domain = WithoutPort(pattern).TrimEnd('.');
+            return new HostPattern(pattern, domain, IsHostFragment(domain));
+        }
+
+        public bool Matches(string host) => _isFragment
+            ? host.Contains(_pattern, StringComparison.OrdinalIgnoreCase)
+            : IsSameOrSubdomain(WithoutPort(host).TrimEnd('.'), _domain);
     }
 
     /// <summary>
