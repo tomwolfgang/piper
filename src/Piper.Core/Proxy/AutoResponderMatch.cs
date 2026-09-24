@@ -222,10 +222,10 @@ public sealed class AutoResponderMatch
 
     private bool MatchHeader(HttpRequestData request)
     {
-        var values = request.Headers.GetValues(_headerName).ToArray();
-        if (values.Length == 0) return false;
-        return _value.Length == 0
-               || values.Any(value => value.Contains(_value, StringComparison.OrdinalIgnoreCase));
+        foreach (var value in request.Headers.GetValues(_headerName))
+            if (_value.Length == 0 || value.Contains(_value, StringComparison.OrdinalIgnoreCase))
+                return true;
+        return false;
     }
 
     /// <summary>The URL as the session grid shows it, so an EXACT: rule can be pasted straight from there.</summary>
