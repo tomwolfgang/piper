@@ -70,6 +70,14 @@ public sealed class Http2Connection(Stream stream, Func<HttpRequestData, Cancell
     private const int WindowUpdateThreshold = 32 * 1024;
 
     /// <summary>
+    /// Largest request body one stream may accumulate, the same cap HTTP/1.1 and HTTP/3 bodies have.
+    /// Window credit is granted as bytes arrive, so without it a client could stream one body until
+    /// the process runs out of memory. A stream past it is reset. Settable so a test need not send
+    /// the full amount.
+    /// </summary>
+    internal long MaxRequestBodyBytes { get; init; } = 256L * 1024 * 1024;
+
+    /// <summary>
     /// Completed and replaced whenever the peer grants more send window, so a sender waiting for
     /// credit is woken by the grant itself.
     /// </summary>
@@ -310,6 +318,21 @@ public sealed class Http2Connection(Stream stream, Func<HttpRequestData, Cancell
 
         if (!_streams.TryGetValue(frame.StreamId, out var http2Stream)) return; // reset/unknown stream: drop the payload
 
+        // RFC 9113 §5.1: a peer that has sent END_STREAM may send no more DATA on the stream. The body
+        // is already with the handler, so late bytes are dropped rather than buffered, and the
+        // response the handler is sending is left alone.
+        if (http2Stream.Dispatched) return;
+
+        if (http2Stream.Body.Length + frame.DataPayload.Length > MaxRequestBodyBytes)
+        {
+            // No handler owns the stream yet. Forgetting it is what makes its later DATA frames fall
+            // into the drop above.
+            _streams.TryRemove(frame.StreamId, out _);
+            http2Stream.Body.Dispose();
+            EnqueueRstStream(frame.StreamId, Http2ErrorCode.EnhanceYourCalm);
+            return;
+        }
+
         if (length > 0)
         {
             http2Stream.BytesToAck += length;
@@ -376,7 +399,17 @@ public sealed class Http2Connection(Stream stream, Func<HttpRequestData, Cancell
     private void DispatchRequest(Http2Stream http2Stream)
     {
         if (http2Stream.Request is null) return; // END_STREAM arrived before headers ever completed; malformed, drop
+        // A stray CONTINUATION after the headers completed would otherwise hand the request to a
+        // second handler.
+        if (http2Stream.Dispatched) return;
         http2Stream.Request.Body = http2Stream.Body.ToArray();
+        // The copy is all the handler reads, and the stream stays registered until the response is
+        // sent, so holding the buffer would keep the body in memory twice for that long. Disposing
+        // alone would not free it: a closed MemoryStream keeps its buffer.
+        http2Stream.Body.SetLength(0);
+        http2Stream.Body.Capacity = 0;
+        http2Stream.Body.Dispose();
+        http2Stream.Dispatched = true;
 
         var task = Task.Run(() => ProcessStreamAsync(http2Stream));
         lock (_inFlightGate) _inFlight.Add(task);

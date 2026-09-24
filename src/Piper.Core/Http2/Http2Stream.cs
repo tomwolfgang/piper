@@ -18,6 +18,10 @@ internal sealed class Http2Stream(int id)
 
     public MemoryStream Body { get; } = new();
 
+    /// <summary>The request has been handed to its handler, which now owns the stream. Its body has
+    /// been copied out and <see cref="Body"/> disposed.</summary>
+    public bool Dispatched { get; set; }
+
     public HttpRequestData? Request { get; set; }
 
     /// <summary>Bytes this side may still send before it must wait for a WINDOW_UPDATE from the
