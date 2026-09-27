@@ -383,12 +383,14 @@ public sealed class Http2Connection(Stream stream, Func<HttpRequestData, Cancell
     /// reader, the only thread that writes those buffers. A stream the peer reset before finishing
     /// still counts, since its buffer is still held.
     /// </summary>
-    // Sums up to MaxConcurrentStreams (100) lengths per DATA frame, and only once the per-stream cap
-    // passes. Keep a running total instead if the stream limit is ever raised far enough to show.
+    // Runs for every DATA frame within its stream's own cap, which is every frame of a healthy
+    // upload, and sums up to MaxConcurrentStreams (100) lengths. It enumerates the dictionary rather
+    // than .Values, which would take every lock and copy the values out on each frame. Keep a running
+    // total instead if the stream limit is ever raised far enough for the scan to show.
     private long BufferedRequestBytes()
     {
         long total = 0;
-        foreach (var open in _streams.Values)
+        foreach (var (_, open) in _streams)
             if (!open.Dispatched) total += open.Body.Length;
         return total;
     }
