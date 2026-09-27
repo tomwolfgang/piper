@@ -157,19 +157,32 @@ internal static class Http2ConnectionTests
             var request = new HttpRequestData { Method = "GET", RequestTarget = "/late", Url = url, HttpVersion = "HTTP/2" };
             var block = Piper.Core.Http2.Hpack.HpackEncoder.Encode(Http2MessageAdapter.ToHeaderFields(request));
             await Http2FrameWriter.WriteHeadersAsync(wire, 1, block, endStream: true, 16_384, budget.Token);
-            for (var i = 0; i < 4; i++)
-                await Http2FrameWriter.WriteAsync(wire, Http2FrameType.Data, Http2FrameFlags.None, 1, new byte[limit], budget.Token);
+            // More than the whole 65,535-byte connection window, and each frame past the body cap:
+            // dropped bytes must still be credited back, or the other streams would stall.
+            const int lateFrames = 8;
+            for (var i = 0; i < lateFrames; i++)
+                await Http2FrameWriter.WriteAsync(wire, Http2FrameType.Data, Http2FrameFlags.None, 1, new byte[16_384], budget.Token);
 
             // Frames are handled in wire order, so the PING's answer means the late DATA was seen.
             await Http2FrameWriter.WriteAsync(wire, Http2FrameType.Ping, Http2FrameFlags.None, 0, new byte[8], budget.Token);
             var reset = false;
             var body = new List<byte>();
+            long credited = 0, creditedByPing = -1;
             try
             {
                 while (true)
                 {
                     var frame = await Http2FrameReader.ReadRequiredAsync(wire, 16_384, budget.Token);
-                    if (frame.Type == Http2FrameType.Ping && frame.HasFlag(Http2FrameFlags.Ack)) release.TrySetResult();
+                    if (frame.Type == Http2FrameType.WindowUpdate && frame.StreamId == 0)
+                    {
+                        var span = frame.Payload.Span;
+                        credited += ((span[0] & 0x7f) << 24) | (span[1] << 16) | (span[2] << 8) | span[3];
+                    }
+                    if (frame.Type == Http2FrameType.Ping && frame.HasFlag(Http2FrameFlags.Ack))
+                    {
+                        creditedByPing = credited;
+                        release.TrySetResult();
+                    }
                     if (frame.StreamId != 1) continue;
                     if (frame.Type == Http2FrameType.RstStream) { reset = true; break; }
                     if (frame.Type != Http2FrameType.Data) continue;
@@ -181,6 +194,63 @@ internal static class Http2ConnectionTests
 
             runner.IsTrue(!reset, "the stream is not reset");
             runner.AreEqual("done", System.Text.Encoding.Latin1.GetString(body.ToArray()), "the response arrives whole");
+            // Credit is batched in 32 KB steps, so at most one step can still be owed.
+            runner.IsTrue(creditedByPing >= lateFrames * 16_384 - 32 * 1024,
+                $"the dropped bytes are credited to the connection window ({creditedByPing:N0} of {lateFrames * 16_384:N0})");
+        });
+
+        await runner.RunAsync("a stray CONTINUATION after a dispatched request neither re-dispatches it nor ends the connection", async () =>
+        {
+            // CONTINUATION after END_HEADERS re-completes the headers of a stream already handed to
+            // its handler. Dispatching it again would run the handler twice, and dispatch releases
+            // the request buffer, so a second dispatch would throw on the reader and drop the
+            // connection.
+            var calls = 0;
+            // Held until the CONTINUATION has been read, so the stream is still registered when it
+            // arrives rather than already answered and forgotten.
+            var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            await using var harness = await Harness.StartAsync(async (request, ct) =>
+            {
+                Interlocked.Increment(ref calls);
+                if (request.Url!.AbsolutePath == "/once") await release.Task.WaitAsync(ct);
+                return HttpResponseData.Simple(200, "OK", request.Url.AbsolutePath);
+            });
+
+            using var tcp = new TcpClient();
+            var url = new Uri($"{harness.BaseUrl}/once");
+            await tcp.ConnectAsync(IPAddress.Loopback, url.Port);
+            var wire = tcp.GetStream();
+            using var budget = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+
+            // The encoder never writes to the dynamic table, so repeating a block cannot desynchronise
+            // the decoder: what is under test is only the dispatch.
+            byte[] Block(string path) => Piper.Core.Http2.Hpack.HpackEncoder.Encode(Http2MessageAdapter.ToHeaderFields(
+                new HttpRequestData { Method = "GET", RequestTarget = path, Url = new Uri(url, path), HttpVersion = "HTTP/2" }));
+
+            await wire.WriteAsync("PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"u8.ToArray(), budget.Token);
+            await Http2FrameWriter.WriteAsync(wire, Http2FrameType.Settings, Http2FrameFlags.None, 0, ReadOnlyMemory<byte>.Empty, budget.Token);
+            await Http2FrameWriter.WriteHeadersAsync(wire, 1, Block("/once"), endStream: true, 16_384, budget.Token);
+            await Http2FrameWriter.WriteAsync(wire, Http2FrameType.Continuation, Http2FrameFlags.EndHeaders, 1, ReadOnlyMemory<byte>.Empty, budget.Token);
+            // Frames are handled in wire order, so the PING's answer means the CONTINUATION was seen.
+            await Http2FrameWriter.WriteAsync(wire, Http2FrameType.Ping, Http2FrameFlags.None, 0, new byte[8], budget.Token);
+            await Http2FrameWriter.WriteHeadersAsync(wire, 3, Block("/after"), endStream: true, 16_384, budget.Token);
+
+            var bodies = new Dictionary<int, string>();
+            try
+            {
+                while (!bodies.ContainsKey(1) || !bodies.ContainsKey(3))
+                {
+                    var frame = await Http2FrameReader.ReadRequiredAsync(wire, 16_384, budget.Token);
+                    if (frame.Type == Http2FrameType.Ping && frame.HasFlag(Http2FrameFlags.Ack)) release.TrySetResult();
+                    if (frame.Type != Http2FrameType.Data || !frame.HasFlag(Http2FrameFlags.EndStream)) continue;
+                    bodies[frame.StreamId] = System.Text.Encoding.Latin1.GetString(frame.DataPayload.Span);
+                }
+            }
+            catch (Exception ex) when (ex is OperationCanceledException or IOException) { /* reported below */ }
+
+            runner.AreEqual("/once", bodies.GetValueOrDefault(1), "the first request is answered");
+            runner.AreEqual("/after", bodies.GetValueOrDefault(3), "the connection keeps serving later streams");
+            runner.AreEqual(2, Volatile.Read(ref calls), "the handler ran once per request, not again for the CONTINUATION");
         });
     }
 

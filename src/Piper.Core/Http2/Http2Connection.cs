@@ -320,7 +320,9 @@ public sealed class Http2Connection(Stream stream, Func<HttpRequestData, Cancell
 
         // RFC 9113 §5.1: a peer that has sent END_STREAM may send no more DATA on the stream. The body
         // is already with the handler, so late bytes are dropped rather than buffered, and the
-        // response the handler is sending is left alone.
+        // response the handler is sending is left alone. §6.1 would have the stream reset with
+        // STREAM_CLOSED instead; dropping is deliberate leniency, since a reset would throw away a
+        // response that may already be on its way. Connection credit for the bytes was returned above.
         if (http2Stream.Dispatched) return;
 
         if (http2Stream.Body.Length + frame.DataPayload.Length > MaxRequestBodyBytes)
