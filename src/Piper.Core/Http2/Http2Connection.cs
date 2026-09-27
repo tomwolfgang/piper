@@ -308,16 +308,17 @@ public sealed class Http2Connection(Stream stream, Func<HttpRequestData, Cancell
         }
 
         // The decoded list is capped too: one-byte references to a large dynamic-table entry turn a
-        // small block into a huge one, which is materialised when the request is forwarded.
-        // Size as RFC 9113 §6.5.2 counts it: name + value + 32 per field.
+        // small block into a huge one, which is materialised when the request is forwarded. (Decode
+        // itself stays cheap: indexed fields share the table's strings.) Size as RFC 9113 §6.5.2
+        // counts it: name + value + 32 per field. The table is in sync by now, so only the
+        // offending stream is reset, as §6.5.2 suggests for this advisory limit.
         long listSize = 0;
         foreach (var (name, value) in fields) listSize += name.Length + value.Length + 32;
-        if (listSize > MaxHeaderBlockSize)
-            throw new Http2ProtocolException(Http2ErrorCode.EnhanceYourCalm, "Header list exceeds the advertised header list size.");
+        var tooLarge = listSize > MaxHeaderBlockSize;
 
         if (_streams.TryGetValue(streamId, out var open))
         {
-            CompleteTrailers(open, fields, endStream);
+            CompleteTrailers(open, fields, endStream, tooLarge);
             return;
         }
 
@@ -334,6 +335,12 @@ public sealed class Http2Connection(Stream stream, Func<HttpRequestData, Cancell
         if (_streams.Count >= maxConcurrent)
         {
             ResetStream(streamId, Http2ErrorCode.RefusedStream, peerStillSending: !endStream);
+            return;
+        }
+
+        if (tooLarge)
+        {
+            ResetStream(streamId, Http2ErrorCode.EnhanceYourCalm, peerStillSending: !endStream);
             return;
         }
 
@@ -357,14 +364,15 @@ public sealed class Http2Connection(Stream stream, Func<HttpRequestData, Cancell
     }
 
     /// <summary>A second HEADERS on an open stream: the request's trailers (RFC 9113 §8.1).</summary>
-    private void CompleteTrailers(Http2Stream http2Stream, List<(string Name, string Value)> fields, bool endStream)
+    private void CompleteTrailers(Http2Stream http2Stream, List<(string Name, string Value)> fields, bool endStream, bool tooLarge)
     {
         ThrowIfDispatched(http2Stream);
 
         // Trailers end the stream and carry no pseudo-headers; anything else is malformed.
-        if (!endStream || fields.Exists(f => f.Name.StartsWith(':')))
+        if (tooLarge || !endStream || fields.Exists(f => f.Name.StartsWith(':')))
         {
-            ResetStream(http2Stream.Id, Http2ErrorCode.ProtocolError, peerStillSending: !endStream);
+            ResetStream(http2Stream.Id, tooLarge ? Http2ErrorCode.EnhanceYourCalm : Http2ErrorCode.ProtocolError,
+                peerStillSending: !endStream);
             http2Stream.Cancellation.Cancel();
             _streams.TryRemove(http2Stream.Id, out _);
             return;

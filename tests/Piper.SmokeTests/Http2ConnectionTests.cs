@@ -263,12 +263,25 @@ internal static class Http2ConnectionTests
 
             // ~4 KiB of block: one 4000-byte entry added to the dynamic table, then referenced 20
             // times by one-byte index, decoding to ~80 KiB against the 64 KiB advertised limit.
-            byte[] block = [.. Get("/x"), .. LiteralIndexed("x-big", new string('a', 4000)), .. Enumerable.Repeat((byte)(0x80 | 62), 20)];
-            await peer.SendHeadersAsync(1, endStream: true, block);
+            // The table is in sync afterwards, so only that stream is reset. Stream 3's oversized
+            // trailers (the same entry, referenced 20 times) are reset the same way, and stream 5
+            // proves the connection carries on.
+            byte[] amplify = [.. Enumerable.Repeat((byte)(0x80 | 62), 20)];
+            await peer.SendHeadersAsync(1, endStream: true, [.. Get("/x"), .. LiteralIndexed("x-big", new string('a', 4000)), .. amplify]);
+            await peer.SendHeadersAsync(3, endStream: false, Get("/upload", "POST"));
+            await peer.SendHeadersAsync(3, endStream: true, amplify);
+            await peer.SendHeadersAsync(5, endStream: true, Get("/after"));
 
-            var goAway = await peer.ReadUntilAsync(f => f.Type == Http2FrameType.GoAway);
-            runner.AreEqual(Http2ErrorCode.EnhanceYourCalm, GoAwayCode(goAway), "rejected as ENHANCE_YOUR_CALM");
-            runner.AreEqual(0, peer.Requests.Count, "nothing reached the handler");
+            var resets = new Dictionary<int, Http2ErrorCode>();
+            var answered = await peer.ReadUntilAsync(f =>
+            {
+                if (f.Type == Http2FrameType.RstStream) resets[f.StreamId] = ErrorCodeAt(f, 0);
+                return f.Type == Http2FrameType.GoAway || (f.StreamId == 5 && f.HasFlag(Http2FrameFlags.EndStream));
+            });
+            runner.IsTrue(answered is { Type: not Http2FrameType.GoAway }, "the connection survives and stream 5 is answered");
+            runner.AreEqual(Http2ErrorCode.EnhanceYourCalm, resets.GetValueOrDefault(1), "the oversized request is reset with ENHANCE_YOUR_CALM");
+            runner.AreEqual(Http2ErrorCode.EnhanceYourCalm, resets.GetValueOrDefault(3), "the oversized trailers are reset with ENHANCE_YOUR_CALM");
+            runner.AreEqual("/after", peer.Requests.Single().RequestTarget, "only stream 5 reached the handler");
         });
 
         await runner.RunAsync("Http2Connection discards the rest of a malformed request it reset", async () =>
