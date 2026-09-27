@@ -96,6 +96,11 @@ public static class Http2MessageAdapter
         // speaks HTTP/1.1, so a space or CR/LF here would forge a second request.
         if (string.IsNullOrEmpty(method) || !method.All(IsTokenChar)) throw new HttpParseException("Request has no valid :method.");
 
+        // :path and :authority reach the same request line (and :authority the Host header), so
+        // they may not carry spaces or control characters either.
+        if (!IsVisible(path) || !IsVisible(authority))
+            throw new HttpParseException("Request :path or :authority contains a space or control character.");
+
         if (method == "CONNECT")
         {
             // §8.5: CONNECT names only the authority it tunnels to.
@@ -115,6 +120,8 @@ public static class Http2MessageAdapter
         request.Url = ResolveUrl(scheme, authority, path);
         return request;
     }
+
+    private static bool IsVisible(string? value) => value is null || !value.Any(c => c < 0x21 || c == 0x7F);
 
     private static bool IsTokenChar(char c) => char.IsAsciiLetterOrDigit(c) || "!#$%&'*+-.^_`|~".Contains(c);
 
