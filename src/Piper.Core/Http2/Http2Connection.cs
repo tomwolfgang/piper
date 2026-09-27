@@ -75,9 +75,9 @@ public sealed class Http2Connection(Stream stream, Func<HttpRequestData, Cancell
     /// <summary>
     /// Largest request body one stream may accumulate, the same cap HTTP/1.1 and HTTP/3 bodies have.
     /// Window credit is granted as bytes arrive, so without it a client could stream one body until
-    /// the process runs out of memory. A stream past it is reset. This bounds one stream; the
-    /// connection as a whole is bounded by <see cref="MaxBufferedRequestBytes"/>. Settable so a test
-    /// need not send the full amount.
+    /// the process runs out of memory. A stream past it is reset. This bounds one stream; bodies
+    /// still arriving across the connection are bounded by <see cref="MaxBufferedRequestBytes"/>,
+    /// but bodies already handed to handlers are not. Settable so a test need not send the full amount.
     /// </summary>
     internal long MaxRequestBodyBytes { get; init; } = DefaultMaxRequestBodyBytes;
 
