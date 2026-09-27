@@ -61,15 +61,21 @@ public abstract class HttpMessage
     public byte[] DecodedBody => ContentCodec.Decode(Body, ContentEncoding);
 
     /// <summary>Best-effort text rendering of <see cref="DecodedBody"/> using the charset from Content-Type.</summary>
-    public string BodyAsText()
-    {
-        return BodyAsText(DecodedBody);
-    }
+    public string BodyAsText() => TextOf(Body, ContentType, ContentEncoding);
 
     /// <summary>Renders an already decoded body without repeating content decompression.</summary>
-    public string BodyAsText(byte[] decodedBody) => decodedBody.Length == 0
+    public string BodyAsText(byte[] decodedBody) => DecodedText(decodedBody, ContentType);
+
+    /// <summary>
+    /// What <see cref="BodyAsText()"/> gives, for a body and headers already read off the message,
+    /// so a caller that must describe exactly those values decodes them the same way the viewer does.
+    /// </summary>
+    public static string TextOf(byte[] body, string? contentType, string? contentEncoding) =>
+        DecodedText(ContentCodec.Decode(body, contentEncoding), contentType);
+
+    private static string DecodedText(byte[] decodedBody, string? contentType) => decodedBody.Length == 0
         ? string.Empty
-        : ContentCodec.CharsetFor(ContentType).GetString(decodedBody);
+        : ContentCodec.CharsetFor(contentType).GetString(decodedBody);
 
     public abstract string StartLine { get; }
 

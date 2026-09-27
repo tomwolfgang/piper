@@ -578,7 +578,7 @@ public sealed class SearchQuery
         {
             if (!ContentCodec.LooksTextual(contentType, body)) return false;
             string text;
-            try { text = ContentCodec.CharsetFor(contentType).GetString(ContentCodec.Decode(body, contentEncoding)); }
+            try { text = HttpMessage.TextOf(body, contentType, contentEncoding); }
             catch { return false; }
             return re is not null ? re.IsMatch(text) : text.Contains(needle, StringComparison.OrdinalIgnoreCase);
         }
