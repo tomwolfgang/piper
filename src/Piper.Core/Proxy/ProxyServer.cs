@@ -273,7 +273,7 @@ public sealed class ProxyServer : IAsyncDisposable
         var connection = new Http2Connection(ssl,
             (request, streamCt) => Http2RequestForwarder.ForwardAsync(request, _options, _store, _altSvc, clientEndpoint, processName, streamCt))
         {
-            Log = message => Log?.Invoke(this, $"Protocol error from {clientEndpoint}: {message}"),
+            Log = message => Log?.Invoke(this, $"Request from {clientEndpoint} refused: {message}"),
         };
 
         try

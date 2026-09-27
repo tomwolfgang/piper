@@ -69,18 +69,29 @@ public sealed class Http2Connection(Stream stream, Func<HttpRequestData, Cancell
     /// <summary>Credit back once about half the initial 65,535-byte connection window is used.</summary>
     private const int WindowUpdateThreshold = 32 * 1024;
 
+    internal const long DefaultMaxRequestBodyBytes = 256L * 1024 * 1024;
+    internal const long DefaultMaxBufferedRequestBytes = 1024L * 1024 * 1024;
+
     /// <summary>
     /// Largest request body one stream may accumulate, the same cap HTTP/1.1 and HTTP/3 bodies have.
     /// Window credit is granted as bytes arrive, so without it a client could stream one body until
-    /// the process runs out of memory. A stream past it is reset. Settable so a test need not send
-    /// the full amount.
+    /// the process runs out of memory. A stream past it is reset. This bounds one stream; the
+    /// connection as a whole is bounded by <see cref="MaxBufferedRequestBytes"/>. Settable so a test
+    /// need not send the full amount.
     /// </summary>
-    internal long MaxRequestBodyBytes { get; init; } = 256L * 1024 * 1024;
+    internal long MaxRequestBodyBytes { get; init; } = DefaultMaxRequestBodyBytes;
 
     /// <summary>
-    /// Told when a stream is reset for passing <see cref="MaxRequestBodyBytes"/>. The request never
-    /// reaches the handler, so no session records it; this is what says it happened, as HTTP/1.1
-    /// logs the same cap. Only sizes and the stream id, never captured content.
+    /// Most request-body bytes all of a connection's undispatched streams may hold between them.
+    /// With 100 concurrent streams each just under <see cref="MaxRequestBodyBytes"/>, one connection
+    /// could otherwise buffer about 25 GB. The stream whose DATA would pass it is reset.
+    /// </summary>
+    internal long MaxBufferedRequestBytes { get; init; } = DefaultMaxBufferedRequestBytes;
+
+    /// <summary>
+    /// Told when a stream is reset for passing a body cap. The request never reaches the handler, so
+    /// no session records it; this is what says it happened, as HTTP/1.1 logs its cap. Only sizes and
+    /// the stream id, never captured content.
     /// </summary>
     internal Action<string>? Log { get; init; }
 
@@ -332,13 +343,19 @@ public sealed class Http2Connection(Stream stream, Func<HttpRequestData, Cancell
         // response that may already be on its way. Connection credit for the bytes was returned above.
         if (http2Stream.Dispatched) return;
 
-        if (http2Stream.Body.Length + frame.DataPayload.Length > MaxRequestBodyBytes)
+        var incoming = frame.DataPayload.Length;
+        var overCap = http2Stream.Body.Length + incoming > MaxRequestBodyBytes
+            ? $"request body exceeds the {MaxRequestBodyBytes} byte cap"
+            : BufferedRequestBytes() + incoming > MaxBufferedRequestBytes
+                ? $"request bodies on this connection exceed the {MaxBufferedRequestBytes} byte cap"
+                : null;
+        if (overCap is not null)
         {
             // No handler owns the stream yet. Forgetting it is what makes its later DATA frames fall
             // into the drop above.
             _streams.TryRemove(frame.StreamId, out _);
             http2Stream.Body.Dispose();
-            Log?.Invoke($"HTTP/2 stream {frame.StreamId} reset: request body exceeds the {MaxRequestBodyBytes} byte cap.");
+            Log?.Invoke($"HTTP/2 stream {frame.StreamId} reset: {overCap}.");
             EnqueueRstStream(frame.StreamId, Http2ErrorCode.EnhanceYourCalm);
             return;
         }
@@ -357,6 +374,21 @@ public sealed class Http2Connection(Stream stream, Func<HttpRequestData, Cancell
 
         if (frame.HasFlag(Http2FrameFlags.EndStream))
             DispatchRequest(http2Stream);
+    }
+
+    /// <summary>
+    /// Bytes held by streams whose requests have not been handed to a handler. Read on the frame
+    /// reader, the only thread that writes those buffers. A stream the peer reset before finishing
+    /// still counts, since its buffer is still held.
+    /// </summary>
+    // ponytail: sums up to MaxConcurrentStreams (100) lengths per DATA frame; keep a running total
+    // if the stream limit is ever raised far enough for that to show.
+    private long BufferedRequestBytes()
+    {
+        long total = 0;
+        foreach (var open in _streams.Values)
+            if (!open.Dispatched) total += open.Body.Length;
+        return total;
     }
 
     private void HandleWindowUpdate(Http2Frame frame)
