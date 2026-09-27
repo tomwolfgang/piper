@@ -78,6 +78,13 @@ public sealed class Http2Connection(Stream stream, Func<HttpRequestData, Cancell
     internal long MaxRequestBodyBytes { get; init; } = 256L * 1024 * 1024;
 
     /// <summary>
+    /// Told when a stream is reset for passing <see cref="MaxRequestBodyBytes"/>. The request never
+    /// reaches the handler, so no session records it; this is what says it happened, as HTTP/1.1
+    /// logs the same cap. Only sizes and the stream id, never captured content.
+    /// </summary>
+    internal Action<string>? Log { get; init; }
+
+    /// <summary>
     /// Completed and replaced whenever the peer grants more send window, so a sender waiting for
     /// credit is woken by the grant itself.
     /// </summary>
@@ -331,6 +338,7 @@ public sealed class Http2Connection(Stream stream, Func<HttpRequestData, Cancell
             // into the drop above.
             _streams.TryRemove(frame.StreamId, out _);
             http2Stream.Body.Dispose();
+            Log?.Invoke($"HTTP/2 stream {frame.StreamId} reset: request body exceeds the {MaxRequestBodyBytes} byte cap.");
             EnqueueRstStream(frame.StreamId, Http2ErrorCode.EnhanceYourCalm);
             return;
         }

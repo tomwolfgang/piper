@@ -108,11 +108,12 @@ internal static class Http2ConnectionTests
             // request body until the process ran out of memory.
             const int limit = 64 * 1024;
             var handled = 0;
+            var logged = new System.Collections.Concurrent.ConcurrentQueue<string>();
             await using var harness = await Harness.StartAsync((request, ct) =>
             {
                 Interlocked.Increment(ref handled);
                 return StubHandler(request, ct);
-            }, maxRequestBodyBytes: limit);
+            }, maxRequestBodyBytes: limit, log: logged.Enqueue);
             using var client = harness.CreateClient();
 
             var rejected = false;
@@ -126,6 +127,8 @@ internal static class Http2ConnectionTests
             }
             runner.IsTrue(rejected, "an oversized body is refused rather than buffered");
             runner.AreEqual(0, Volatile.Read(ref handled), "the handler never saw the oversized request");
+            // No session records it, so the log is what says it happened, as it does for HTTP/1.1.
+            runner.AreEqual(1, logged.Count(line => line.Contains("exceeds the 65536 byte cap")), "the reset is logged once");
 
             var atLimit = await client.PostAsync($"{harness.BaseUrl}/echo", new ByteArrayContent(new byte[limit]));
             runner.AreEqual(System.Net.HttpStatusCode.OK, atLimit.StatusCode, "a body exactly at the cap is still served");
@@ -309,11 +312,14 @@ internal static class Http2ConnectionTests
         private readonly Lock _gate = new();
 
         private readonly long? _maxRequestBodyBytes;
+        private readonly Action<string>? _log;
 
-        private Harness(TcpListener listener, Func<HttpRequestData, CancellationToken, Task<HttpResponseData>> handler, long? maxRequestBodyBytes)
+        private Harness(TcpListener listener, Func<HttpRequestData, CancellationToken, Task<HttpResponseData>> handler,
+            long? maxRequestBodyBytes, Action<string>? log)
         {
             _listener = listener;
             _maxRequestBodyBytes = maxRequestBodyBytes;
+            _log = log;
             _acceptLoop = AcceptLoopAsync(handler);
         }
 
@@ -321,11 +327,12 @@ internal static class Http2ConnectionTests
         public string BaseUrl => $"http://127.0.0.1:{Port}";
 
         public static Task<Harness> StartAsync(
-            Func<HttpRequestData, CancellationToken, Task<HttpResponseData>> handler, long? maxRequestBodyBytes = null)
+            Func<HttpRequestData, CancellationToken, Task<HttpResponseData>> handler, long? maxRequestBodyBytes = null,
+            Action<string>? log = null)
         {
             var listener = new TcpListener(IPAddress.Loopback, 0);
             listener.Start();
-            return Task.FromResult(new Harness(listener, handler, maxRequestBodyBytes));
+            return Task.FromResult(new Harness(listener, handler, maxRequestBodyBytes, log));
         }
 
         public HttpClient CreateClient() => new(new SocketsHttpHandler
@@ -352,8 +359,8 @@ internal static class Http2ConnectionTests
                     using var c = client;
                     c.NoDelay = true;
                     var connection = _maxRequestBodyBytes is { } max
-                        ? new Http2Connection(c.GetStream(), async (r, t) => await handler(r, t).ConfigureAwait(false)) { MaxRequestBodyBytes = max }
-                        : new Http2Connection(c.GetStream(), async (r, t) => await handler(r, t).ConfigureAwait(false));
+                        ? new Http2Connection(c.GetStream(), async (r, t) => await handler(r, t).ConfigureAwait(false)) { MaxRequestBodyBytes = max, Log = _log }
+                        : new Http2Connection(c.GetStream(), async (r, t) => await handler(r, t).ConfigureAwait(false)) { Log = _log };
                     try { await connection.RunAsync(_cts.Token).ConfigureAwait(false); }
                     catch { /* test asserts on the client side */ }
                 }, _cts.Token);
