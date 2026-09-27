@@ -110,8 +110,9 @@ internal static class Http2MessageAdapterTests
 
             runner.AreEqual("OPTIONS", Http2MessageAdapter.ToRequest([(":method", "OPTIONS"), s, a, (":path", "*")]).Method,
                 "OPTIONS * is accepted");
-            runner.AreEqual("example.com:443", Http2MessageAdapter.ToRequest([(":method", "CONNECT"), (":authority", "example.com:443")]).RequestTarget,
-                "CONNECT carries only :authority");
+            var connect = Http2MessageAdapter.ToRequest([(":method", "CONNECT"), (":authority", "example.com:443")]);
+            runner.AreEqual("example.com:443", connect.RequestTarget, "CONNECT carries only :authority");
+            runner.IsTrue(connect.Url is null, "CONNECT has no Url, which the forwarder answers with 400");
             return Task.CompletedTask;
         });
 

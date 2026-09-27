@@ -111,6 +111,8 @@ public static class Http2MessageAdapter
                 throw new HttpParseException("CONNECT must carry :authority and neither :scheme nor :path.");
             request.Method = method;
             request.RequestTarget = authority;
+            // Url stays null, as it always has for h2 CONNECT (ResolveUrl needs a :path).
+            // Http2RequestForwarder answers a request without one with 400.
             return request;
         }
 
