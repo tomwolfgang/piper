@@ -567,16 +567,18 @@ public sealed class SearchQuery
                 return cached.Matched;
 
             // A regex timeout escapes before anything is recorded, so it still fails the query closed.
-            var matched = Evaluate(message, body, contentType);
+            var matched = Evaluate(body, contentType, contentEncoding);
             verdicts.AddOrUpdate(body, new BodyVerdict(contentType, contentEncoding, matched));
             return matched;
         }
 
-        bool Evaluate(HttpMessage message, byte[] body, string? contentType)
+        // Decodes the values read above, not the message again: a proxy thread can replace the body
+        // in between, and the verdict must describe the array it is recorded under.
+        bool Evaluate(byte[] body, string? contentType, string? contentEncoding)
         {
             if (!ContentCodec.LooksTextual(contentType, body)) return false;
             string text;
-            try { text = message.BodyAsText(); }
+            try { text = ContentCodec.CharsetFor(contentType).GetString(ContentCodec.Decode(body, contentEncoding)); }
             catch { return false; }
             return re is not null ? re.IsMatch(text) : text.Contains(needle, StringComparison.OrdinalIgnoreCase);
         }
