@@ -57,8 +57,9 @@ public sealed class Http2Connection(Stream stream, Func<HttpRequestData, Cancell
     private int _headerBlockStreamId;
     private bool _headerBlockEndsStream;
 
-    /// <summary>Caps the compressed block as well as the decoded list, so CONTINUATION frames
-    /// cannot be used to buffer without limit (the 2024 "CONTINUATION flood").</summary>
+    /// <summary>The advertised header list size, enforced on both the compressed block (so
+    /// CONTINUATION frames cannot buffer without limit, the 2024 "CONTINUATION flood") and the
+    /// decoded list (see <see cref="CompleteHeaders"/>).</summary>
     private int MaxHeaderBlockSize => _localSettings.MaxHeaderListSize ?? 65_536;
 
     /// <summary>Streams this side reset while the peer was still sending on them; see
@@ -305,6 +306,14 @@ public sealed class Http2Connection(Stream stream, Func<HttpRequestData, Cancell
             // decoder's dynamic table state is now unrecoverable for every other stream too.
             throw new Http2ProtocolException(Http2ErrorCode.CompressionError, $"HPACK decoding failed: {ex.Message}");
         }
+
+        // The decoded list is capped too: one-byte references to a large dynamic-table entry turn a
+        // small block into a huge one, which is materialised when the request is forwarded.
+        // Size as RFC 9113 §6.5.2 counts it: name + value + 32 per field.
+        long listSize = 0;
+        foreach (var (name, value) in fields) listSize += name.Length + value.Length + 32;
+        if (listSize > MaxHeaderBlockSize)
+            throw new Http2ProtocolException(Http2ErrorCode.EnhanceYourCalm, "Header list exceeds the advertised header list size.");
 
         if (_streams.TryGetValue(streamId, out var open))
         {

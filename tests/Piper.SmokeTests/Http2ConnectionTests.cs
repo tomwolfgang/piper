@@ -242,17 +242,33 @@ internal static class Http2ConnectionTests
         {
             await using var peer = await RawPeer.StartAsync();
 
-            // 100 streams left open (no END_STREAM) fill MaxConcurrentStreams; 201 is refused.
+            // 100 streams left open (no END_STREAM) fill MaxConcurrentStreams; 201 is refused. Its
+            // block inserts "x-sync: 1" into the dynamic table, and stream 1's trailers refer to it
+            // by index 62, which only decodes if the refused block was decoded too.
             for (var id = 1; id <= 199; id += 2)
                 await peer.SendHeadersAsync(id, endStream: false, Get($"/open/{id}", "POST"));
-            await peer.SendHeadersAsync(201, endStream: false, Get("/refused", "POST"));
+            await peer.SendHeadersAsync(201, endStream: false, [.. Get("/refused", "POST"), .. LiteralIndexed("x-sync", "1")]);
             await peer.SendHeadersAsync(201, endStream: true, HpackEncoder.Encode([("x-trailer", "1")]));
-            await peer.SendAsync(Http2FrameType.Data, Http2FrameFlags.EndStream, 1, "done"u8.ToArray());
+            await peer.SendHeadersAsync(1, endStream: true, [0x80 | 62]);
 
             var outcome = await peer.ReadUntilAsync(f =>
                 f.Type == Http2FrameType.GoAway || (f.StreamId == 1 && f.HasFlag(Http2FrameFlags.EndStream)));
-            runner.IsTrue(outcome is { Type: not Http2FrameType.GoAway }, "the connection survives and stream 1 is answered");
+            runner.IsTrue(outcome is { Type: not Http2FrameType.GoAway }, "the connection survives, HPACK in sync, and stream 1 is answered");
             runner.AreEqual("/open/1", peer.Requests.Single().RequestTarget, "the refused stream never reached the handler");
+        });
+
+        await runner.RunAsync("Http2Connection bounds the decoded header list, not just the block", async () =>
+        {
+            await using var peer = await RawPeer.StartAsync();
+
+            // ~4 KiB of block: one 4000-byte entry added to the dynamic table, then referenced 20
+            // times by one-byte index, decoding to ~80 KiB against the 64 KiB advertised limit.
+            byte[] block = [.. Get("/x"), .. LiteralIndexed("x-big", new string('a', 4000)), .. Enumerable.Repeat((byte)(0x80 | 62), 20)];
+            await peer.SendHeadersAsync(1, endStream: true, block);
+
+            var goAway = await peer.ReadUntilAsync(f => f.Type == Http2FrameType.GoAway);
+            runner.AreEqual(Http2ErrorCode.EnhanceYourCalm, GoAwayCode(goAway), "rejected as ENHANCE_YOUR_CALM");
+            runner.AreEqual(0, peer.Requests.Count, "nothing reached the handler");
         });
 
         await runner.RunAsync("Http2Connection discards the rest of a malformed request it reset", async () =>
@@ -314,6 +330,27 @@ internal static class Http2ConnectionTests
 
     private static byte[] Get(string path, string method = "GET") => HpackEncoder.Encode(
         [(":method", method), (":scheme", "https"), (":authority", "example.com"), (":path", path)]);
+
+    /// <summary>HPACK literal with incremental indexing and a new name (RFC 7541 §6.2.1), no
+    /// Huffman: the one representation that adds to the peer's dynamic table.</summary>
+    private static byte[] LiteralIndexed(string name, string value)
+    {
+        var bytes = new List<byte> { 0x40 };
+        foreach (var s in new[] { name, value })
+        {
+            // 7-bit-prefix integer (RFC 7541 §5.1) for the length, then the raw octets.
+            var n = s.Length;
+            if (n < 127) bytes.Add((byte)n);
+            else
+            {
+                bytes.Add(127);
+                for (n -= 127; n >= 128; n >>= 7) bytes.Add((byte)((n & 0x7f) | 0x80));
+                bytes.Add((byte)n);
+            }
+            bytes.AddRange(System.Text.Encoding.ASCII.GetBytes(s));
+        }
+        return [.. bytes];
+    }
 
     private static Http2ErrorCode? GoAwayCode(Http2Frame? goAway) => goAway is null ? null : ErrorCodeAt(goAway.Value, 4);
 
