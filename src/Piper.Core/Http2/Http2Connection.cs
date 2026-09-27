@@ -84,7 +84,9 @@ public sealed class Http2Connection(Stream stream, Func<HttpRequestData, Cancell
     /// <summary>
     /// Most request-body bytes all of a connection's undispatched streams may hold between them.
     /// With 100 concurrent streams each just under <see cref="MaxRequestBodyBytes"/>, one connection
-    /// could otherwise buffer about 25 GB. The stream whose DATA would pass it is reset.
+    /// could otherwise buffer about 25 GB. The stream whose DATA would pass it is reset. Only bodies
+    /// still arriving count: one already handed to a handler is not, and is bounded only by how long
+    /// the handler holds it, so streams that finish in turn can still hold that much between them.
     /// </summary>
     internal long MaxBufferedRequestBytes { get; init; } = DefaultMaxBufferedRequestBytes;
 
@@ -381,8 +383,8 @@ public sealed class Http2Connection(Stream stream, Func<HttpRequestData, Cancell
     /// reader, the only thread that writes those buffers. A stream the peer reset before finishing
     /// still counts, since its buffer is still held.
     /// </summary>
-    // ponytail: sums up to MaxConcurrentStreams (100) lengths per DATA frame; keep a running total
-    // if the stream limit is ever raised far enough for that to show.
+    // Sums up to MaxConcurrentStreams (100) lengths per DATA frame, and only once the per-stream cap
+    // passes. Keep a running total instead if the stream limit is ever raised far enough to show.
     private long BufferedRequestBytes()
     {
         long total = 0;
