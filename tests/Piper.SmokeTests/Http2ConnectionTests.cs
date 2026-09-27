@@ -209,6 +209,9 @@ internal static class Http2ConnectionTests
 
             var goAway = await peer.ReadUntilAsync(f => f.Type == Http2FrameType.GoAway);
             runner.AreEqual(Http2ErrorCode.StreamClosed, GoAwayCode(goAway), "connection error STREAM_CLOSED");
+            // Handlers run on their own tasks, so the GOAWAY can overtake the first one's arrival.
+            await Poll.UntilAsync(() => !peer.Requests.IsEmpty);
+            await Task.Delay(100);
             runner.AreEqual(1, peer.Requests.Count, "no second request");
         });
 
@@ -230,7 +233,42 @@ internal static class Http2ConnectionTests
                 f.Type == Http2FrameType.RstStream && ErrorCodeAt(f, 0) == Http2ErrorCode.RefusedStream && ++refused == pairs - 100);
 
             runner.AreEqual(pairs - 100, refused, "streams beyond MaxConcurrentStreams are refused");
+            await Poll.UntilAsync(() => peer.Requests.Count >= 100);
+            await Task.Delay(200);
             runner.AreEqual(100, peer.Requests.Count, "no more than MaxConcurrentStreams handlers started");
+        });
+
+        await runner.RunAsync("Http2Connection discards trailers the peer sent before seeing REFUSED_STREAM", async () =>
+        {
+            await using var peer = await RawPeer.StartAsync();
+
+            // 100 streams left open (no END_STREAM) fill MaxConcurrentStreams; 201 is refused.
+            for (var id = 1; id <= 199; id += 2)
+                await peer.SendHeadersAsync(id, endStream: false, Get($"/open/{id}", "POST"));
+            await peer.SendHeadersAsync(201, endStream: false, Get("/refused", "POST"));
+            await peer.SendHeadersAsync(201, endStream: true, HpackEncoder.Encode([("x-trailer", "1")]));
+            await peer.SendAsync(Http2FrameType.Data, Http2FrameFlags.EndStream, 1, "done"u8.ToArray());
+
+            var outcome = await peer.ReadUntilAsync(f =>
+                f.Type == Http2FrameType.GoAway || (f.StreamId == 1 && f.HasFlag(Http2FrameFlags.EndStream)));
+            runner.IsTrue(outcome is { Type: not Http2FrameType.GoAway }, "the connection survives and stream 1 is answered");
+            runner.AreEqual("/open/1", peer.Requests.Single().RequestTarget, "the refused stream never reached the handler");
+        });
+
+        await runner.RunAsync("Http2Connection discards the rest of a malformed request it reset", async () =>
+        {
+            await using var peer = await RawPeer.StartAsync();
+
+            await peer.SendHeadersAsync(1, endStream: false,
+                HpackEncoder.Encode([(":method", "POST"), (":scheme", "https"), (":authority", "example.com")]));
+            await peer.SendAsync(Http2FrameType.Data, Http2FrameFlags.None, 1, "body"u8.ToArray());
+            await peer.SendHeadersAsync(1, endStream: true, HpackEncoder.Encode([("x-trailer", "1")]));
+            await peer.SendHeadersAsync(3, endStream: true, Get("/after"));
+
+            var outcome = await peer.ReadUntilAsync(f =>
+                f.Type == Http2FrameType.GoAway || (f.StreamId == 3 && f.HasFlag(Http2FrameFlags.EndStream)));
+            runner.IsTrue(outcome is { Type: not Http2FrameType.GoAway }, "the connection survives and stream 3 is answered");
+            runner.AreEqual("/after", peer.Requests.Single().RequestTarget, "only stream 3 reached the handler");
         });
 
         await runner.RunAsync("Http2Connection rejects a header block interrupted by another frame", async () =>

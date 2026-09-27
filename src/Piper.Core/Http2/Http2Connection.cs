@@ -61,6 +61,12 @@ public sealed class Http2Connection(Stream stream, Func<HttpRequestData, Cancell
     /// cannot be used to buffer without limit (the 2024 "CONTINUATION flood").</summary>
     private int MaxHeaderBlockSize => _localSettings.MaxHeaderListSize ?? 65_536;
 
+    /// <summary>Streams this side reset while the peer was still sending on them; see
+    /// <see cref="ResetStream"/>. Touched only by the reader loop.</summary>
+    private readonly HashSet<int> _resetWhileOpen = [];
+    private readonly Queue<int> _resetWhileOpenOrder = new();
+    private const int MaxRememberedResets = 128;
+
     // Guards _peerConnectionWindow. This budget is shared by every concurrent stream's sender
     // task, so "read the remaining window, decide how much to send, then subtract" is only safe
     // if the read-decide-subtract sequence is one atomic operation -- otherwise two streams can
@@ -306,8 +312,11 @@ public sealed class Http2Connection(Stream stream, Func<HttpRequestData, Cancell
             return;
         }
 
+        // Sent before the peer saw this side's RST_STREAM: decoded above, otherwise discarded.
+        if (_resetWhileOpen.Contains(streamId)) return;
+
         // RFC 9113 §5.1.1: a client opens odd ids, each higher than the last. A lower or repeated
-        // one names a stream that is already closed -- including one this side refused or reset.
+        // one names a stream that is already closed.
         if ((streamId & 1) == 0 || streamId <= _highestStreamId)
             throw new Http2ProtocolException(Http2ErrorCode.ProtocolError, $"HEADERS on stream {streamId}, which cannot open a new stream.");
         _highestStreamId = streamId;
@@ -315,7 +324,7 @@ public sealed class Http2Connection(Stream stream, Func<HttpRequestData, Cancell
         var maxConcurrent = _localSettings.MaxConcurrentStreams ?? int.MaxValue;
         if (_streams.Count >= maxConcurrent)
         {
-            EnqueueRstStream(streamId, Http2ErrorCode.RefusedStream);
+            ResetStream(streamId, Http2ErrorCode.RefusedStream, peerStillSending: !endStream);
             return;
         }
 
@@ -327,7 +336,7 @@ public sealed class Http2Connection(Stream stream, Func<HttpRequestData, Cancell
         catch (HttpParseException)
         {
             // RFC 9113 §8.1.1: a malformed request is a stream error; the other streams carry on.
-            EnqueueRstStream(streamId, Http2ErrorCode.ProtocolError);
+            ResetStream(streamId, Http2ErrorCode.ProtocolError, peerStillSending: !endStream);
             return;
         }
 
@@ -346,7 +355,7 @@ public sealed class Http2Connection(Stream stream, Func<HttpRequestData, Cancell
         // Trailers end the stream and carry no pseudo-headers; anything else is malformed.
         if (!endStream || fields.Exists(f => f.Name.StartsWith(':')))
         {
-            EnqueueRstStream(http2Stream.Id, Http2ErrorCode.ProtocolError);
+            ResetStream(http2Stream.Id, Http2ErrorCode.ProtocolError, peerStillSending: !endStream);
             http2Stream.Cancellation.Cancel();
             _streams.TryRemove(http2Stream.Id, out _);
             return;
@@ -355,6 +364,21 @@ public sealed class Http2Connection(Stream stream, Func<HttpRequestData, Cancell
         // The trailers themselves are discarded, as HTTP/1.1 chunked trailers are
         // (HttpParser.SkipTrailersAsync): HttpRequestData has nowhere to carry them.
         DispatchRequest(http2Stream);
+    }
+
+    /// <summary>Resets a stream from the header path. When the peer had not yet ended it, the id is
+    /// remembered so that HEADERS it already had in flight are discarded rather than taken for a
+    /// reused id (RFC 9113 §5.1, closed) -- which would end every other stream too.</summary>
+    private void ResetStream(int streamId, Http2ErrorCode code, bool peerStillSending)
+    {
+        EnqueueRstStream(streamId, code);
+        if (!peerStillSending || !_resetWhileOpen.Add(streamId)) return;
+
+        // Bounded: a peer stops sending once it sees the reset, so only recent ids can still have
+        // frames in flight. A forgotten one falls back to the connection error.
+        _resetWhileOpenOrder.Enqueue(streamId);
+        if (_resetWhileOpenOrder.Count > MaxRememberedResets)
+            _resetWhileOpen.Remove(_resetWhileOpenOrder.Dequeue());
     }
 
     /// <summary>RFC 9113 §5.1: after END_STREAM the peer may send no more HEADERS or DATA on the
