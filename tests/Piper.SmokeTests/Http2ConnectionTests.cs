@@ -140,34 +140,52 @@ internal static class Http2ConnectionTests
                 streamId += 2;
             }
 
+            var resets = new Dictionary<int, uint>();
+            var validAnswered = false;
+            var pingAcked = false;
+            long connectionCredit = 0;
+            var valid = -1;
+            async Task<bool> ReadOneAsync()
+            {
+                var frame = await Http2FrameReader.ReadRequiredAsync(stream, 1 << 20, ct);
+                runner.IsTrue(frame.Type != Http2FrameType.GoAway, "the connection is not torn down");
+                if (frame.Type == Http2FrameType.GoAway) return false;
+                if (frame.Type == Http2FrameType.RstStream)
+                    resets[frame.StreamId] = System.Buffers.Binary.BinaryPrimitives.ReadUInt32BigEndian(frame.Payload.Span);
+                if (frame.Type == Http2FrameType.WindowUpdate && frame.StreamId == 0)
+                    connectionCredit += System.Buffers.Binary.BinaryPrimitives.ReadUInt32BigEndian(frame.Payload.Span) & 0x7fffffff;
+                if (frame.Type == Http2FrameType.Ping && frame.HasFlag(Http2FrameFlags.Ack)) pingAcked = true;
+                if (frame.Type == Http2FrameType.Headers && frame.StreamId == valid) validAnswered = true;
+                return true;
+            }
+
+            // The outbox is FIFO, so once this PING is acked every stream-0 credit sent before the
+            // DATA below (an initial window bump, say) has been counted, and only the delta is
+            // attributed to the discarded body.
+            await Http2FrameWriter.WriteAsync(stream, Http2FrameType.Ping, Http2FrameFlags.None, 0, new byte[8], ct);
+            while (!pingAcked) if (!await ReadOneAsync()) return;
+            var creditBeforeData = connectionCredit;
+
             // Headers without END_STREAM, then a body filling the whole RFC-default connection
             // window: the DATA is dropped with the stream, but the connection window must still be
             // credited back, or one malformed request would stall every later stream.
             var withBody = streamId;
-            var junk = new byte[65536];
+            var junk = new byte[65535];
             "GET /smuggled HTTP/1.1\r\n\r\n"u8.CopyTo(junk);
             await Http2FrameWriter.WriteHeadersAsync(stream, withBody, HpackEncoder.Encode(Request("/body", ("x-a", "\r\n"))), endStream: false, 16384, ct);
             await Http2FrameWriter.WriteDataAsync(stream, withBody, junk, endStream: true, 16384, ct);
             streamId += 2;
 
-            var valid = streamId;
+            valid = streamId;
             await Http2FrameWriter.WriteHeadersAsync(stream, valid, HpackEncoder.Encode(Request("/ok")), endStream: true, 16384, ct);
 
-            var resets = new Dictionary<int, uint>();
-            var validAnswered = false;
-            long connectionCredit = 0;
-            while (!validAnswered || resets.Count < malformed.Length + 1 || connectionCredit < junk.Length)
-            {
-                var frame = await Http2FrameReader.ReadRequiredAsync(stream, 1 << 20, ct);
-                runner.IsTrue(frame.Type != Http2FrameType.GoAway, "the connection is not torn down");
-                if (frame.Type == Http2FrameType.GoAway) return;
-                if (frame.Type == Http2FrameType.RstStream)
-                    resets[frame.StreamId] = System.Buffers.Binary.BinaryPrimitives.ReadUInt32BigEndian(frame.Payload.Span);
-                if (frame.Type == Http2FrameType.WindowUpdate && frame.StreamId == 0)
-                    connectionCredit += System.Buffers.Binary.BinaryPrimitives.ReadUInt32BigEndian(frame.Payload.Span) & 0x7fffffff;
-                if (frame.Type == Http2FrameType.Headers && frame.StreamId == valid) validAnswered = true;
-            }
-            runner.IsTrue(connectionCredit >= junk.Length, "DATA on a reset stream is credited back to the connection window");
+            // Credit goes out in 32 KiB steps (Http2Connection.WindowUpdateThreshold), so up to one
+            // step short of the full body may still be pending; without the credit it would be 0.
+            const int creditStep = 32 * 1024;
+            long credited() => connectionCredit - creditBeforeData;
+            while (!validAnswered || resets.Count < malformed.Length + 1 || credited() <= junk.Length - creditStep)
+                if (!await ReadOneAsync()) return;
+            runner.IsTrue(credited() > junk.Length - creditStep, "DATA on a reset stream is credited back to the connection window");
 
             for (var id = 1; id < valid; id += 2)
                 runner.AreEqual((uint)Http2ErrorCode.ProtocolError, resets.GetValueOrDefault(id), $"stream {id} reset with PROTOCOL_ERROR");
