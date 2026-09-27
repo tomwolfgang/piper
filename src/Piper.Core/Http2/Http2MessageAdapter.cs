@@ -114,7 +114,10 @@ public static class Http2MessageAdapter
             return request;
         }
 
-        if (string.IsNullOrEmpty(scheme)) throw new HttpParseException("Request has no :scheme.");
+        // RFC 3986 §3.1: ALPHA *( ALPHA / DIGIT / "+" / "-" / "." ).
+        if (string.IsNullOrEmpty(scheme) || !char.IsAsciiLetter(scheme[0])
+            || !scheme.All(c => char.IsAsciiLetterOrDigit(c) || c is '+' or '-' or '.'))
+            throw new HttpParseException("Request has no valid :scheme.");
         if (path is null || !(path.StartsWith('/') || (path == "*" && method == "OPTIONS")))
             throw new HttpParseException("Request has no valid :path.");
 
