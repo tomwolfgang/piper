@@ -90,10 +90,14 @@ public static class Http2MessageAdapter
                     break;
                 case ":scheme":
                     if (scheme is not null) throw Malformed("duplicate :scheme");
+                    if (!IsToken(value)) throw Malformed(":scheme is not a token");
                     scheme = value;
                     break;
                 case ":authority":
                     if (authority is not null) throw Malformed("duplicate :authority");
+                    // Names the upstream socket and is compared with Host below.
+                    if (value.Length == 0 || value.Any(c => c <= ' ' || c == '\x7f'))
+                        throw Malformed(":authority is empty or contains whitespace or a control character");
                     authority = value;
                     break;
                 case ":path":
@@ -108,7 +112,7 @@ public static class Http2MessageAdapter
                     ValidateRegularField(name, value);
                     if (ConnectionSpecificFields.Contains(name))
                         throw Malformed($"connection-specific field '{name}'");
-                    if (name == "te" && value != "trailers")
+                    if (name == "te" && !string.Equals(value, "trailers", StringComparison.OrdinalIgnoreCase))
                         throw Malformed("te other than \"trailers\"");
                     request.Headers.Add(name, value);
                     break;

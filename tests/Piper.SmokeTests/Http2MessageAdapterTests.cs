@@ -119,6 +119,11 @@ internal static class Http2MessageAdapterTests
                 ("space in :path", ":path", "/a b"),
                 ("empty :path", ":path", ""),
                 ("host naming another entity", "host", "other.example"),
+                ("CRLF in :scheme", ":scheme", "https\r\nx: y"),
+                ("space in :scheme", ":scheme", "ht tps"),
+                ("CRLF in :authority", ":authority", "example.com\r\nx: y"),
+                ("space in :authority", ":authority", "example.com evil"),
+                ("empty :authority", ":authority", ""),
             };
 
             foreach (var (what, name, value) in malformed)
@@ -177,6 +182,9 @@ internal static class Http2MessageAdapterTests
             };
             var request = Http2MessageAdapter.ToRequest(fields);
             runner.AreEqual("trailers", request.Headers["te"], "te: trailers is allowed");
+            var capitalised = Http2MessageAdapter.ToRequest(
+                [(":method", "GET"), (":scheme", "https"), (":authority", "example.com"), (":path", "/"), ("te", "Trailers")]);
+            runner.AreEqual("Trailers", capitalised.Headers["te"], "te token is case-insensitive");
             runner.AreEqual("", request.Headers["x-empty"], "empty value is allowed");
             runner.AreEqual("a \t b", request.Headers["x-inner"], "inner whitespace is allowed");
             runner.AreEqual("v", request.Headers["x-tchar!#$%&'*+-.^_`|~"], "every tchar is allowed in a name");

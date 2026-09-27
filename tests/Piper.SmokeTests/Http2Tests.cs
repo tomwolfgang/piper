@@ -270,6 +270,32 @@ internal static class Http2Tests
             runner.IsTrue(!session.Response.Headers.Contains("Connection"), "no Connection header leaks into an h2-sourced response");
         });
 
+        await runner.RunAsync("a CR/LF in an h2 origin's response fails that session with a 502 and splits nothing", async () =>
+        {
+            // The upstream h2 connection is per request, so the HttpParseException from ToResponse
+            // is contained by the forwarder's 502 path rather than a shared reader loop.
+            using var h1Client = new HttpClient(new HttpClientHandler
+            {
+                Proxy = new WebProxy($"http://127.0.0.1:{proxyPort}"),
+                UseProxy = true,
+                ServerCertificateCustomValidationCallback = (_, cert, _, _) => TrustsRoot(ca.RootCertificate, cert),
+            })
+            { DefaultRequestVersion = HttpVersion.Version11, DefaultVersionPolicy = HttpVersionPolicy.RequestVersionExact };
+
+            var split = await h1Client.GetAsync($"{h2OriginBase}/split-response");
+            runner.AreEqual(HttpStatusCode.BadGateway, split.StatusCode, "h1.1 client gets a 502");
+            runner.IsTrue(!split.Headers.Contains("Set-Cookie"), "the injected header did not reach the h1.1 client");
+
+            var h2Split = await client.GetAsync($"{h2OriginBase}/split-response");
+            runner.AreEqual(HttpStatusCode.BadGateway, h2Split.StatusCode, "h2 client gets a 502 too");
+
+            var session = await WaitForSessionAsync(store, s => s.Path == "/split-response");
+            runner.AreEqual(SessionState.Failed, session.State, "the session is recorded as failed");
+
+            var after = await client.GetAsync($"{h2OriginBase}/after-split");
+            runner.AreEqual(HttpStatusCode.OK, after.StatusCode, "the same h2 client connection still serves the next request");
+        });
+
         await runner.RunAsync("both legs negotiate h2: full translation matrix corner", async () =>
         {
             var response = await client.PostAsync($"{h2OriginBase}/both-h2", new StringContent("both-h2-body"));
@@ -418,6 +444,14 @@ internal static class Http2Tests
 
         if (path.StartsWith("/upload", StringComparison.Ordinal))
             return Task.FromResult(HttpResponseData.Simple(200, "OK", $"received {request.Body.Length}"));
+
+        if (path.StartsWith("/split-response", StringComparison.Ordinal))
+        {
+            // A malformed h2 response: ToHeaderFields puts the value on the wire verbatim.
+            var split = HttpResponseData.Simple(200, "OK", "should never be relayed");
+            split.Headers.Add("X-A", "1\r\nSet-Cookie: injected=1");
+            return Task.FromResult(split);
+        }
 
         var body = request.Body.Length > 0
             ? $"{request.Method} {path} body={Encoding.UTF8.GetString(request.Body)}"
