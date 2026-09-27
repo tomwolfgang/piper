@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Sockets;
 using Piper.Core.Http;
 using Piper.Core.Http2;
+using Piper.Core.Http2.Hpack;
 
 // Http2Connection wired to a stubbed handler over a bare cleartext (h2c) TCP loopback socket --
 // no TLS, no upstream. Proves the frame demux / per-stream concurrency / single-writer outbox
@@ -100,6 +101,70 @@ internal static class Http2ConnectionTests
                 runner.AreEqual(bodySize, body.Length, $"stream {i} body arrived complete, not truncated");
                 runner.IsTrue(BigBodyPattern(i, bodySize).AsSpan().SequenceEqual(body), $"stream {i} body matches its own pattern, not another stream's");
             }
+        });
+
+        await runner.RunAsync("a malformed request is reset with PROTOCOL_ERROR and never reaches the handler", async () =>
+        {
+            // The handler is what forwards upstream in ProxyServer, so a request that never reaches
+            // it never reaches an HTTP/1.1 origin either.
+            var seen = new System.Collections.Concurrent.ConcurrentQueue<string>();
+            await using var harness = await Harness.StartAsync((request, ct) =>
+            {
+                seen.Enqueue(request.RequestTarget);
+                return StubHandler(request, ct);
+            });
+
+            using var tcp = new TcpClient();
+            await tcp.ConnectAsync(IPAddress.Loopback, harness.Port);
+            var stream = tcp.GetStream();
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            var ct = timeout.Token;
+
+            await stream.WriteAsync("PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"u8.ToArray(), ct);
+            await Http2FrameWriter.WriteAsync(stream, Http2FrameType.Settings, Http2FrameFlags.None, 0, ReadOnlyMemory<byte>.Empty, ct);
+
+            static List<(string, string)> Request(string path, params (string, string)[] extra) =>
+                [(":method", "GET"), (":scheme", "http"), (":authority", "127.0.0.1"), (":path", path), .. extra];
+
+            var malformed = new[]
+            {
+                Request("/crlf", ("x-a", "1\r\nx-injected: yes")),
+                Request("/upper", ("X-A", "1")),
+                Request("/te", ("transfer-encoding", "chunked")),
+                Request("/path\r\nx-injected: yes"),
+            };
+            var streamId = 1;
+            foreach (var fields in malformed)
+            {
+                await Http2FrameWriter.WriteHeadersAsync(stream, streamId, HpackEncoder.Encode(fields), endStream: true, 16384, ct);
+                streamId += 2;
+            }
+
+            // Headers without END_STREAM, then a body: the DATA must be dropped with the stream.
+            var withBody = streamId;
+            await Http2FrameWriter.WriteHeadersAsync(stream, withBody, HpackEncoder.Encode(Request("/body", ("x-a", "\r\n"))), endStream: false, 16384, ct);
+            await Http2FrameWriter.WriteDataAsync(stream, withBody, "GET /smuggled HTTP/1.1\r\n\r\n"u8.ToArray(), endStream: true, 16384, ct);
+            streamId += 2;
+
+            var valid = streamId;
+            await Http2FrameWriter.WriteHeadersAsync(stream, valid, HpackEncoder.Encode(Request("/ok")), endStream: true, 16384, ct);
+
+            var resets = new Dictionary<int, uint>();
+            var validAnswered = false;
+            while (!validAnswered || resets.Count < malformed.Length + 1)
+            {
+                var frame = await Http2FrameReader.ReadRequiredAsync(stream, 1 << 20, ct);
+                runner.IsTrue(frame.Type != Http2FrameType.GoAway, "the connection is not torn down");
+                if (frame.Type == Http2FrameType.GoAway) return;
+                if (frame.Type == Http2FrameType.RstStream)
+                    resets[frame.StreamId] = System.Buffers.Binary.BinaryPrimitives.ReadUInt32BigEndian(frame.Payload.Span);
+                if (frame.Type == Http2FrameType.Headers && frame.StreamId == valid) validAnswered = true;
+            }
+
+            for (var id = 1; id < valid; id += 2)
+                runner.AreEqual((uint)Http2ErrorCode.ProtocolError, resets.GetValueOrDefault(id), $"stream {id} reset with PROTOCOL_ERROR");
+            runner.IsTrue(!resets.ContainsKey(valid), "the valid stream is not reset");
+            runner.AreEqual("/ok", string.Join(",", seen), "only the valid request reached the handler");
         });
     }
 

@@ -286,7 +286,18 @@ public sealed class Http2Connection(Stream stream, Func<HttpRequestData, Cancell
             throw new Http2ProtocolException(Http2ErrorCode.CompressionError, $"HPACK decoding failed: {ex.Message}");
         }
 
-        http2Stream.Request = Http2MessageAdapter.ToRequest(fields, isHttps: true);
+        try
+        {
+            http2Stream.Request = Http2MessageAdapter.ToRequest(fields, isHttps: true);
+        }
+        catch (HttpParseException)
+        {
+            // RFC 9113 §8.1.1: a malformed request is a stream error. The HPACK state is intact,
+            // so other streams carry on; dropping the stream discards any DATA that follows.
+            _streams.TryRemove(http2Stream.Id, out _);
+            EnqueueRstStream(http2Stream.Id, Http2ErrorCode.ProtocolError);
+            return;
+        }
 
         if (http2Stream.EndStreamOnHeaders)
             DispatchRequest(http2Stream);
