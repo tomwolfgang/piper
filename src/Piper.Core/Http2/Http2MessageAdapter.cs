@@ -83,6 +83,9 @@ public static class Http2MessageAdapter
                     case ":scheme": scheme = Once(scheme, name, value); break;
                     case ":authority": authority = Once(authority, name, value); break;
                     case ":path": path = Once(path, name, value); break;
+                    // Includes :protocol (RFC 8441 extended CONNECT), which a peer may send only
+                    // once SETTINGS_ENABLE_CONNECT_PROTOCOL is advertised; Http2Settings.Advertised()
+                    // does not. Advertising it means accepting :protocol here too.
                     default: throw new HttpParseException($"Pseudo-header {name} is not valid in a request.");
                 }
                 continue;
