@@ -9,6 +9,8 @@ public abstract class HttpMessage
 
     /// <summary>Body exactly as it travelled on the wire, still content-encoded and de-chunked.
     /// When <see cref="IsBodyComplete"/> is false this holds only the start of it.</summary>
+    /// <remarks>Replace the array to change the body; never write into it. Search remembers each
+    /// body's match by array identity, so an array changed in place would keep a stale result.</remarks>
     public byte[] Body { get; set; } = [];
 
     private long? _bodyTotalLength;
