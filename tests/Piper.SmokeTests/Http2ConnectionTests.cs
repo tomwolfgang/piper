@@ -166,9 +166,14 @@ internal static class Http2ConnectionTests
                 await Data(stream, 16_384);
                 await Data(stream, 8_192);
             }
-            await Http2FrameWriter.WriteHeadersAsync(wire, 5, block, endStream: false, 16_384, budget.Token);
-            await Data(5, 16_384); // 96 KB buffered: at the connection's cap, not past it
-            await Data(5, 16_384); // would be 112 KB
+            // Streams 5 and 7 each reach 96 KB buffered, at the connection's cap, and are reset on the
+            // next frame, which would carry it to 112 KB.
+            foreach (var stream in new[] { 5, 7 })
+            {
+                await Http2FrameWriter.WriteHeadersAsync(wire, stream, block, endStream: false, 16_384, budget.Token);
+                await Data(stream, 16_384);
+                await Data(stream, 16_384);
+            }
             await Data(1, 0, end: true);
             await Data(3, 0, end: true);
 
@@ -176,7 +181,7 @@ internal static class Http2ConnectionTests
             var reset = new HashSet<int>();
             try
             {
-                while (!bodies.ContainsKey(1) || !bodies.ContainsKey(3) || !reset.Contains(5))
+                while (!bodies.ContainsKey(1) || !bodies.ContainsKey(3) || !reset.Contains(5) || !reset.Contains(7))
                 {
                     var frame = await Http2FrameReader.ReadRequiredAsync(wire, 16_384, budget.Token);
                     if (frame.Type == Http2FrameType.RstStream) reset.Add(frame.StreamId);
@@ -186,11 +191,11 @@ internal static class Http2ConnectionTests
             }
             catch (Exception ex) when (ex is OperationCanceledException or IOException) { /* reported below */ }
 
-            runner.IsTrue(reset.SetEquals([5]), $"only the stream that passed the connection's cap is reset ({string.Join(",", reset)})");
+            runner.IsTrue(reset.SetEquals([5, 7]), $"only the streams that passed the connection's cap are reset ({string.Join(",", reset)})");
             runner.AreEqual("40960", bodies.GetValueOrDefault(1), "the first stream's body arrives whole");
             runner.AreEqual("40960", bodies.GetValueOrDefault(3), "and so does the second's");
             runner.AreEqual(1, logged.Count(line => line.Contains("request bodies on this connection exceed the 98304 byte cap")),
-                "the reset is logged once, naming the connection's cap");
+                "the resets are logged once for the connection, naming its cap");
         });
 
         await runner.RunAsync("DATA after END_STREAM is dropped without disturbing the response", async () =>
