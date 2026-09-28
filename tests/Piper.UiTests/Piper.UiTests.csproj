@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Drives real WinForms controls from Piper.App, for behaviour that lives in the native
+       controls and cannot be checked by the WinForms-free smoke tests. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Piper.App\Piper.App.csproj" />
+    <ProjectReference Include="..\..\src\Piper.Core\Piper.Core.csproj" />
+  </ItemGroup>
+
+</Project>

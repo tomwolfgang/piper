@@ -698,6 +698,11 @@ public sealed class SessionListView : UserControl
         {
             _suppressSelectionChanged = true;
             var previousCount = _list.VirtualListSize;
+            // Shrinking the count below the top row (Ctrl+X, a narrow filter) with LVSICF_NOSCROLL
+            // leaves the native scroll origin past the end; the next rows then land at a negative top
+            // index, drawn partway down or not at all, and EnsureVisible cannot recover it because it
+            // thinks row 0 is already on screen. Scroll to the top while the old rows still exist.
+            if (previousTop > 0 && _visible.Count <= previousTop) _list.EnsureVisible(0);
             _list.VirtualListSize = _visible.Count;
 
             // Following depends on where the view is, not on whether a row is selected: a selection

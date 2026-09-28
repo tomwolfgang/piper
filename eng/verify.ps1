@@ -42,6 +42,7 @@ try {
     $projects = @(
         'src/Piper.App/Piper.App.csproj',
         'tests/Piper.SmokeTests/Piper.SmokeTests.csproj',
+        'tests/Piper.UiTests/Piper.UiTests.csproj',
         'tools/Piper.TrafficGen/Piper.TrafficGen.csproj'
     )
 
@@ -66,6 +67,13 @@ try {
     Invoke-DotNet @(
         'run',
         '--project', 'tests/Piper.SmokeTests/Piper.SmokeTests.csproj',
+        '--configuration', 'Release',
+        '--no-build'
+    )
+
+    Invoke-DotNet @(
+        'run',
+        '--project', 'tests/Piper.UiTests/Piper.UiTests.csproj',
         '--configuration', 'Release',
         '--no-build'
     )
