@@ -392,7 +392,9 @@ public sealed class Http2Connection(Stream stream, Func<HttpRequestData, Cancell
         if (!peerStillSending || !_resetWhileOpen.Add(streamId)) return;
 
         // Bounded: a peer stops sending once it sees the reset, so only recent ids can still have
-        // frames in flight. A forgotten one falls back to the connection error.
+        // frames in flight. A forgotten one falls back to the reused-id PROTOCOL_ERROR, which ends
+        // the whole connection, not just that stream -- reachable only by a peer with more than
+        // this many reset-but-unacknowledged streams, far past the advertised concurrency limit.
         _resetWhileOpenOrder.Enqueue(streamId);
         if (_resetWhileOpenOrder.Count > MaxRememberedResets)
             _resetWhileOpen.Remove(_resetWhileOpenOrder.Dequeue());
