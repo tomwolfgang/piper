@@ -16,9 +16,10 @@ internal sealed class Http2Stream(int id, HttpRequestData request)
 
     public HttpRequestData Request { get; } = request;
 
-    /// <summary>The peer has ended its side (END_STREAM) and the request is with the handler.
-    /// Anything more the peer sends on this stream, bar WINDOW_UPDATE, RST_STREAM and PRIORITY,
-    /// is an error (RFC 9113 §5.1, half-closed (remote)).</summary>
+    /// <summary>The peer has ended its side (END_STREAM) and the request is with the handler, which
+    /// now owns the stream. Its body has been copied out and <see cref="Body"/> disposed. Anything
+    /// more the peer sends on this stream, bar WINDOW_UPDATE, RST_STREAM and PRIORITY, resets the
+    /// stream with STREAM_CLOSED (RFC 9113 §5.1, half-closed (remote)).</summary>
     public bool Dispatched { get; set; }
 
     /// <summary>Bytes this side may still send before it must wait for a WINDOW_UPDATE from the

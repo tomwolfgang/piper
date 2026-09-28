@@ -88,6 +88,34 @@ public sealed class Http2Connection(Stream stream, Func<HttpRequestData, Cancell
     /// <summary>Credit back once about half the initial 65,535-byte connection window is used.</summary>
     private const int WindowUpdateThreshold = 32 * 1024;
 
+    internal const long DefaultMaxRequestBodyBytes = 256L * 1024 * 1024;
+    internal const long DefaultMaxBufferedRequestBytes = 1024L * 1024 * 1024;
+
+    /// <summary>
+    /// Largest request body one stream may accumulate, the same cap HTTP/1.1 and HTTP/3 bodies have.
+    /// Window credit is granted as bytes arrive, so without it a client could stream one body until
+    /// the process runs out of memory. A stream past it is reset. This bounds one stream; bodies
+    /// still arriving across the connection are bounded by <see cref="MaxBufferedRequestBytes"/>,
+    /// but bodies already handed to handlers are not. Settable so a test need not send the full amount.
+    /// </summary>
+    internal long MaxRequestBodyBytes { get; init; } = DefaultMaxRequestBodyBytes;
+
+    /// <summary>
+    /// Most request-body bytes all of a connection's undispatched streams may hold between them.
+    /// With 100 concurrent streams each just under <see cref="MaxRequestBodyBytes"/>, one connection
+    /// could otherwise buffer about 25 GB. The stream whose DATA would pass it is reset. Only bodies
+    /// still arriving count: one already handed to a handler is not, and is bounded only by how long
+    /// the handler holds it, so streams that finish in turn can still hold that much between them.
+    /// </summary>
+    internal long MaxBufferedRequestBytes { get; init; } = DefaultMaxBufferedRequestBytes;
+
+    /// <summary>
+    /// Told when a stream is reset for passing a body cap. The request never reaches the handler, so
+    /// no session records it; this is what says it happened, as HTTP/1.1 logs its cap. Only sizes and
+    /// the stream id, never captured content.
+    /// </summary>
+    internal Action<string>? Log { get; init; }
+
     /// <summary>
     /// Completed and replaced whenever the peer grants more send window, so a sender waiting for
     /// credit is woken by the grant itself.
@@ -366,7 +394,7 @@ public sealed class Http2Connection(Stream stream, Func<HttpRequestData, Cancell
     /// <summary>A second HEADERS on an open stream: the request's trailers (RFC 9113 §8.1).</summary>
     private void CompleteTrailers(Http2Stream http2Stream, List<(string Name, string Value)> fields, bool endStream, bool tooLarge)
     {
-        ThrowIfDispatched(http2Stream);
+        if (ResetIfDispatched(http2Stream)) return;
 
         // Trailers end the stream and carry no pseudo-headers; anything else is malformed.
         if (tooLarge || !endStream || fields.Exists(f => f.Name.StartsWith(':')))
@@ -400,12 +428,26 @@ public sealed class Http2Connection(Stream stream, Func<HttpRequestData, Cancell
             _resetWhileOpen.Remove(_resetWhileOpenOrder.Dequeue());
     }
 
-    /// <summary>RFC 9113 §5.1: after END_STREAM the peer may send no more HEADERS or DATA on the
-    /// stream. That is a stream error, which §5.4.1 lets an endpoint treat as a connection error.</summary>
-    private static void ThrowIfDispatched(Http2Stream http2Stream)
+    /// <summary>
+    /// RFC 9113 §5.1: after END_STREAM the peer may send no more HEADERS or DATA on the stream, a
+    /// stream error of type STREAM_CLOSED. Only that stream is reset and its handler cancelled.
+    /// §5.4.1 would allow ending the whole connection instead, but in a debugging proxy that would
+    /// throw away every other stream's response for one peer's mistake.
+    /// </summary>
+    /// <remarks>
+    /// The stream stays registered until its handler stops, as after a reset from the peer, so it
+    /// keeps counting against MaxConcurrentStreams (Rapid Reset). Its token being cancelled already
+    /// means a reset was sent or received, so further late frames are dropped without another one.
+    /// </remarks>
+    private bool ResetIfDispatched(Http2Stream http2Stream)
     {
-        if (http2Stream.Dispatched)
-            throw new Http2ProtocolException(Http2ErrorCode.StreamClosed, $"Frame on stream {http2Stream.Id} after END_STREAM.");
+        if (!http2Stream.Dispatched) return false;
+        if (!http2Stream.Cancellation.IsCancellationRequested)
+        {
+            EnqueueRstStream(http2Stream.Id, Http2ErrorCode.StreamClosed);
+            http2Stream.Cancellation.Cancel();
+        }
+        return true;
     }
 
     private void HandleData(Http2Frame frame)
@@ -425,7 +467,27 @@ public sealed class Http2Connection(Stream stream, Func<HttpRequestData, Cancell
         }
 
         if (!_streams.TryGetValue(frame.StreamId, out var http2Stream)) return; // reset/unknown stream: drop the payload
-        ThrowIfDispatched(http2Stream);
+
+        // DATA after END_STREAM resets only this stream. The bytes are never buffered, and the
+        // connection credit for them was returned above, so the other streams are not stalled.
+        if (ResetIfDispatched(http2Stream)) return;
+
+        var incoming = frame.DataPayload.Length;
+        var overCap = http2Stream.Body.Length + incoming > MaxRequestBodyBytes
+            ? $"request body exceeds the {MaxRequestBodyBytes} byte cap"
+            : BufferedRequestBytes() + incoming > MaxBufferedRequestBytes
+                ? $"request bodies on this connection exceed the {MaxBufferedRequestBytes} byte cap"
+                : null;
+        if (overCap is not null)
+        {
+            // No handler owns the stream yet. Forgetting it is what makes its later DATA frames fall
+            // into the drop above.
+            _streams.TryRemove(frame.StreamId, out _);
+            http2Stream.Body.Dispose();
+            Log?.Invoke($"HTTP/2 stream {frame.StreamId} reset: {overCap}.");
+            EnqueueRstStream(frame.StreamId, Http2ErrorCode.EnhanceYourCalm);
+            return;
+        }
 
         if (length > 0)
         {
@@ -441,6 +503,23 @@ public sealed class Http2Connection(Stream stream, Func<HttpRequestData, Cancell
 
         if (frame.HasFlag(Http2FrameFlags.EndStream))
             DispatchRequest(http2Stream);
+    }
+
+    /// <summary>
+    /// Bytes held by streams whose requests have not been handed to a handler. Read on the frame
+    /// reader, the only thread that writes those buffers. A stream the peer reset before finishing
+    /// still counts, since its buffer is still held.
+    /// </summary>
+    // Runs for every DATA frame within its stream's own cap, which is every frame of a healthy
+    // upload, and sums up to MaxConcurrentStreams (100) lengths. It enumerates the dictionary rather
+    // than .Values, which would take every lock and copy the values out on each frame. Keep a running
+    // total instead if the stream limit is ever raised far enough for the scan to show.
+    private long BufferedRequestBytes()
+    {
+        long total = 0;
+        foreach (var (_, open) in _streams)
+            if (!open.Dispatched) total += open.Body.Length;
+        return total;
     }
 
     private void HandleWindowUpdate(Http2Frame frame)
@@ -499,8 +578,18 @@ public sealed class Http2Connection(Stream stream, Func<HttpRequestData, Cancell
 
     private void DispatchRequest(Http2Stream http2Stream)
     {
-        http2Stream.Dispatched = true;
+        // Every caller resets a stream that is already dispatched instead of coming here, but a
+        // second dispatch would hand the request to a second handler and read a disposed buffer.
+        if (http2Stream.Dispatched) return;
         http2Stream.Request.Body = http2Stream.Body.ToArray();
+        // The copy is all the handler reads, and the stream stays registered until the response is
+        // sent, so holding the buffer would keep the body in memory twice for that long. Disposing
+        // alone would not free it: a closed MemoryStream keeps its buffer. The flag goes first, so
+        // nothing that skips dispatched streams can read the buffer once it is disposed.
+        http2Stream.Dispatched = true;
+        http2Stream.Body.SetLength(0);
+        http2Stream.Body.Capacity = 0;
+        http2Stream.Body.Dispose();
 
         var task = Task.Run(() => ProcessStreamAsync(http2Stream));
         lock (_inFlightGate) _inFlight.Add(task);
@@ -532,7 +621,8 @@ public sealed class Http2Connection(Stream stream, Func<HttpRequestData, Cancell
         }
         catch (OperationCanceledException)
         {
-            // Stream was reset by the peer, or the connection is tearing down -- nothing to send.
+            // Stream was reset by the peer, or by this side for a frame after END_STREAM, or the
+            // connection is tearing down -- nothing to send.
         }
         finally
         {

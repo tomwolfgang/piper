@@ -137,13 +137,21 @@ internal static class Http2ConnectionTests
                     "stream 3 completed");
 
                 await peer.SendHeadersAsync(reusedId, endStream: true, Get("/again"));
-                var goAway = await peer.ReadUntilAsync(f => f.Type == Http2FrameType.GoAway);
+                var answer = await peer.ReadUntilAsync(f =>
+                    f.Type == Http2FrameType.GoAway || (f.Type == Http2FrameType.RstStream && f.StreamId == reusedId));
 
                 // Stream 3's slot is released just after its last frame is queued, so a reuse can
-                // land while it is still half-closed; STREAM_CLOSED is then the right answer.
-                var code = GoAwayCode(goAway);
-                runner.IsTrue(code == Http2ErrorCode.ProtocolError || (reusedId == 3 && code == Http2ErrorCode.StreamClosed),
-                    $"connection error PROTOCOL_ERROR (RFC 9113 §5.1.1), got {code}");
+                // land while it is still half-closed; resetting just that stream with STREAM_CLOSED
+                // is then the right answer.
+                var outcome = answer switch
+                {
+                    { Type: Http2FrameType.GoAway } g => $"GOAWAY {GoAwayCode(g)}",
+                    { Type: Http2FrameType.RstStream } r => $"RST_STREAM {ErrorCodeAt(r, 0)}",
+                    _ => "nothing",
+                };
+                runner.IsTrue(outcome == $"GOAWAY {Http2ErrorCode.ProtocolError}"
+                              || (reusedId == 3 && outcome == $"RST_STREAM {Http2ErrorCode.StreamClosed}"),
+                    $"connection error PROTOCOL_ERROR (RFC 9113 §5.1.1), got {outcome}");
                 runner.AreEqual(1, peer.Requests.Count, "the reused id never reached the handler");
             });
         }
@@ -199,7 +207,7 @@ internal static class Http2ConnectionTests
             runner.AreEqual(0, peer.Requests.Count, "nothing reached the handler");
         });
 
-        await runner.RunAsync("Http2Connection rejects HEADERS after the request already ended", async () =>
+        await runner.RunAsync("Http2Connection resets only the stream that sends HEADERS after its request ended", async () =>
         {
             // A slow handler keeps stream 1 open (half-closed remote) while a second HEADERS arrives.
             await using var peer = await RawPeer.StartAsync(delay: TimeSpan.FromSeconds(1));
@@ -207,12 +215,16 @@ internal static class Http2ConnectionTests
             await peer.SendHeadersAsync(1, endStream: true, Get("/slow"));
             await peer.SendHeadersAsync(1, endStream: true, HpackEncoder.Encode([("x-late", "1")]));
 
-            var goAway = await peer.ReadUntilAsync(f => f.Type == Http2FrameType.GoAway);
-            runner.AreEqual(Http2ErrorCode.StreamClosed, GoAwayCode(goAway), "connection error STREAM_CLOSED");
-            // Handlers run on their own tasks, so the GOAWAY can overtake the first one's arrival.
-            await Poll.UntilAsync(() => !peer.Requests.IsEmpty);
-            await Task.Delay(100);
-            runner.AreEqual(1, peer.Requests.Count, "no second request");
+            var reset = await peer.ReadUntilAsync(f => f.Type == Http2FrameType.GoAway || (f.Type == Http2FrameType.RstStream && f.StreamId == 1));
+            runner.IsTrue(reset is { Type: Http2FrameType.RstStream }, "a stream error, not the end of the connection");
+            runner.AreEqual(Http2ErrorCode.StreamClosed, reset is { Type: Http2FrameType.RstStream } r ? ErrorCodeAt(r, 0) : (Http2ErrorCode?)null,
+                "RFC 9113 §5.1 STREAM_CLOSED");
+
+            // The other streams on the connection carry on.
+            await peer.SendHeadersAsync(3, endStream: true, Get("/after"));
+            var after = await peer.ReadUntilAsync(f => f.Type == Http2FrameType.GoAway || (f.StreamId == 3 && f.HasFlag(Http2FrameFlags.EndStream)));
+            runner.IsTrue(after is { Type: not Http2FrameType.GoAway }, "a later stream is still answered");
+            runner.AreEqual(2, peer.Requests.Count, "no second request for stream 1: /slow and /after only");
         });
 
         await runner.RunAsync("Http2Connection keeps a reset stream counted until its handler stops (Rapid Reset)", async () =>
@@ -338,6 +350,168 @@ internal static class Http2ConnectionTests
 
             runner.IsTrue(goAway is not null, "the connection is ended rather than buffering without limit");
             runner.AreEqual(0, peer.Requests.Count, "nothing reached the handler");
+        });
+
+        await runner.RunAsync("Http2Connection resets a stream whose request body passes the cap", async () =>
+        {
+            // Window credit is granted as DATA arrives, so without a cap one stream could grow a
+            // request body until the process ran out of memory.
+            const int limit = 64 * 1024;
+            var handled = 0;
+            var logged = new System.Collections.Concurrent.ConcurrentQueue<string>();
+            await using var harness = await Harness.StartAsync((request, ct) =>
+            {
+                Interlocked.Increment(ref handled);
+                return StubHandler(request, ct);
+            }, maxRequestBodyBytes: limit, log: logged.Enqueue);
+            using var client = harness.CreateClient();
+
+            var rejected = false;
+            try
+            {
+                using var oversized = await client.PostAsync($"{harness.BaseUrl}/echo", new ByteArrayContent(new byte[limit * 4]));
+            }
+            catch (HttpRequestException)
+            {
+                rejected = true;
+            }
+            runner.IsTrue(rejected, "an oversized body is refused rather than buffered");
+            runner.AreEqual(0, Volatile.Read(ref handled), "the handler never saw the oversized request");
+            // No session records it, so the log is what says it happened, as it does for HTTP/1.1.
+            runner.AreEqual(1, logged.Count(line => line.Contains("exceeds the 65536 byte cap")), "the reset is logged once");
+
+            var atLimit = await client.PostAsync($"{harness.BaseUrl}/echo", new ByteArrayContent(new byte[limit]));
+            runner.AreEqual(System.Net.HttpStatusCode.OK, atLimit.StatusCode, "a body exactly at the cap is still served");
+            var small = await client.PostAsync($"{harness.BaseUrl}/echo", new StringContent("after"));
+            runner.IsTrue((await small.Content.ReadAsStringAsync()).Contains("body=after"), "the connection keeps serving other streams");
+        });
+
+        await runner.RunAsync("Http2Connection bounds request bodies across a connection's streams, not only per stream", async () =>
+        {
+            // Each stream stays under its own cap; together they would pass the connection's. Only
+            // the stream whose DATA would carry the total past it is reset.
+            var logged = new System.Collections.Concurrent.ConcurrentQueue<string>();
+            await using var harness = await Harness.StartAsync(
+                (request, ct) => Task.FromResult(HttpResponseData.Simple(200, "OK", request.Body.Length.ToString())),
+                maxRequestBodyBytes: 64 * 1024, log: logged.Enqueue, maxBufferedRequestBytes: 96 * 1024);
+
+            using var tcp = new TcpClient();
+            var url = new Uri($"{harness.BaseUrl}/up");
+            await tcp.ConnectAsync(IPAddress.Loopback, url.Port);
+            var wire = tcp.GetStream();
+            using var budget = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+
+            var block = Piper.Core.Http2.Hpack.HpackEncoder.Encode(Http2MessageAdapter.ToHeaderFields(
+                new HttpRequestData { Method = "POST", RequestTarget = "/up", Url = url, HttpVersion = "HTTP/2" }));
+            Task Data(int stream, int size, bool end = false) => Http2FrameWriter.WriteAsync(
+                wire, Http2FrameType.Data, end ? Http2FrameFlags.EndStream : Http2FrameFlags.None, stream, new byte[size], budget.Token);
+
+            await wire.WriteAsync("PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"u8.ToArray(), budget.Token);
+            await Http2FrameWriter.WriteAsync(wire, Http2FrameType.Settings, Http2FrameFlags.None, 0, ReadOnlyMemory<byte>.Empty, budget.Token);
+            foreach (var stream in new[] { 1, 3 })
+            {
+                await Http2FrameWriter.WriteHeadersAsync(wire, stream, block, endStream: false, 16_384, budget.Token);
+                await Data(stream, 16_384);
+                await Data(stream, 16_384);
+                await Data(stream, 8_192);
+            }
+            await Http2FrameWriter.WriteHeadersAsync(wire, 5, block, endStream: false, 16_384, budget.Token);
+            await Data(5, 16_384); // 96 KB buffered: at the connection's cap, not past it
+            await Data(5, 16_384); // would be 112 KB
+            await Data(1, 0, end: true);
+            await Data(3, 0, end: true);
+
+            var bodies = new Dictionary<int, string>();
+            var reset = new HashSet<int>();
+            try
+            {
+                while (!bodies.ContainsKey(1) || !bodies.ContainsKey(3) || !reset.Contains(5))
+                {
+                    var frame = await Http2FrameReader.ReadRequiredAsync(wire, 16_384, budget.Token);
+                    if (frame.Type == Http2FrameType.RstStream) reset.Add(frame.StreamId);
+                    if (frame.Type == Http2FrameType.Data && frame.HasFlag(Http2FrameFlags.EndStream))
+                        bodies[frame.StreamId] = System.Text.Encoding.Latin1.GetString(frame.DataPayload.Span);
+                }
+            }
+            catch (Exception ex) when (ex is OperationCanceledException or IOException) { /* reported below */ }
+
+            runner.IsTrue(reset.SetEquals([5]), $"only the stream that passed the connection's cap is reset ({string.Join(",", reset)})");
+            runner.AreEqual("40960", bodies.GetValueOrDefault(1), "the first stream's body arrives whole");
+            runner.AreEqual("40960", bodies.GetValueOrDefault(3), "and so does the second's");
+            runner.AreEqual(1, logged.Count(line => line.Contains("request bodies on this connection exceed the 98304 byte cap")),
+                "the reset is logged once, naming the connection's cap");
+        });
+
+        await runner.RunAsync("DATA after END_STREAM resets only that stream, once, and is still credited", async () =>
+        {
+            // Once a request is dispatched its stream stays registered until the response is sent.
+            // Late DATA used to pile up in the stream's buffer. It is a stream error (RFC 9113 §5.1):
+            // that stream is reset, and only once however much follows, while the bytes are still
+            // credited to the connection window so the other streams are not stalled.
+            const int limit = 1024;
+            var handlerCancelled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            await using var harness = await Harness.StartAsync(async (request, ct) =>
+            {
+                if (request.Url!.AbsolutePath != "/late") return HttpResponseData.Simple(200, "OK", "after");
+                try { await Task.Delay(Timeout.Infinite, ct); }
+                catch (OperationCanceledException) { handlerCancelled.TrySetResult(); throw; }
+                return HttpResponseData.Simple(200, "OK", "unreachable");
+            }, maxRequestBodyBytes: limit);
+
+            using var tcp = new TcpClient();
+            var url = new Uri($"{harness.BaseUrl}/late");
+            await tcp.ConnectAsync(IPAddress.Loopback, url.Port);
+            var wire = tcp.GetStream();
+            using var budget = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+
+            await wire.WriteAsync("PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"u8.ToArray(), budget.Token);
+            await Http2FrameWriter.WriteAsync(wire, Http2FrameType.Settings, Http2FrameFlags.None, 0, ReadOnlyMemory<byte>.Empty, budget.Token);
+            var request = new HttpRequestData { Method = "GET", RequestTarget = "/late", Url = url, HttpVersion = "HTTP/2" };
+            var block = Piper.Core.Http2.Hpack.HpackEncoder.Encode(Http2MessageAdapter.ToHeaderFields(request));
+            await Http2FrameWriter.WriteHeadersAsync(wire, 1, block, endStream: true, 16_384, budget.Token);
+            // More than the whole 65,535-byte connection window, and each frame past the body cap:
+            // dropped bytes must still be credited back, or the other streams would stall.
+            const int lateFrames = 8;
+            for (var i = 0; i < lateFrames; i++)
+                await Http2FrameWriter.WriteAsync(wire, Http2FrameType.Data, Http2FrameFlags.None, 1, new byte[16_384], budget.Token);
+
+            // Frames are handled in wire order, so the PING's answer means the late DATA was seen.
+            await Http2FrameWriter.WriteAsync(wire, Http2FrameType.Ping, Http2FrameFlags.None, 0, new byte[8], budget.Token);
+            var after = Piper.Core.Http2.Hpack.HpackEncoder.Encode(Http2MessageAdapter.ToHeaderFields(
+                new HttpRequestData { Method = "GET", RequestTarget = "/after", Url = new Uri(url, "/after"), HttpVersion = "HTTP/2" }));
+            await Http2FrameWriter.WriteHeadersAsync(wire, 3, after, endStream: true, 16_384, budget.Token);
+
+            var resets = new List<Http2ErrorCode>();
+            var goAway = false;
+            string? afterBody = null;
+            long credited = 0, creditedByPing = -1;
+            try
+            {
+                while (afterBody is null || creditedByPing < 0)
+                {
+                    var frame = await Http2FrameReader.ReadRequiredAsync(wire, 16_384, budget.Token);
+                    if (frame.Type == Http2FrameType.GoAway) { goAway = true; break; }
+                    if (frame.Type == Http2FrameType.WindowUpdate && frame.StreamId == 0)
+                    {
+                        var span = frame.Payload.Span;
+                        credited += ((span[0] & 0x7f) << 24) | (span[1] << 16) | (span[2] << 8) | span[3];
+                    }
+                    if (frame.Type == Http2FrameType.Ping && frame.HasFlag(Http2FrameFlags.Ack)) creditedByPing = credited;
+                    if (frame.Type == Http2FrameType.RstStream && frame.StreamId == 1)
+                        resets.Add((Http2ErrorCode)System.Buffers.Binary.BinaryPrimitives.ReadUInt32BigEndian(frame.Payload.Span));
+                    if (frame.Type == Http2FrameType.Data && frame.StreamId == 3 && frame.HasFlag(Http2FrameFlags.EndStream))
+                        afterBody = System.Text.Encoding.Latin1.GetString(frame.DataPayload.Span);
+                }
+            }
+            catch (Exception ex) when (ex is OperationCanceledException or IOException) { /* reported below */ }
+
+            runner.IsTrue(!goAway, "the connection is not ended");
+            runner.AreEqual($"{Http2ErrorCode.StreamClosed}", string.Join(",", resets), "stream 1 is reset once, with STREAM_CLOSED");
+            runner.IsTrue(handlerCancelled.Task.Wait(TimeSpan.FromSeconds(5)), "its handler is cancelled");
+            runner.AreEqual("after", afterBody, "a later stream is still answered");
+            // Credit is batched in 32 KB steps, so at most one step can still be owed.
+            runner.IsTrue(creditedByPing >= lateFrames * 16_384 - 32 * 1024,
+                $"the dropped bytes are credited to the connection window ({creditedByPing:N0} of {lateFrames * 16_384:N0})");
         });
 
         await runner.RunAsync("a malformed request is reset with PROTOCOL_ERROR and never reaches the handler", async () =>
@@ -594,20 +768,30 @@ internal static class Http2ConnectionTests
         private readonly List<Task> _connections = [];
         private readonly Lock _gate = new();
 
-        private Harness(TcpListener listener, Func<HttpRequestData, CancellationToken, Task<HttpResponseData>> handler)
+        private readonly long? _maxRequestBodyBytes;
+        private readonly long? _maxBufferedRequestBytes;
+        private readonly Action<string>? _log;
+
+        private Harness(TcpListener listener, Func<HttpRequestData, CancellationToken, Task<HttpResponseData>> handler,
+            long? maxRequestBodyBytes, long? maxBufferedRequestBytes, Action<string>? log)
         {
             _listener = listener;
+            _maxRequestBodyBytes = maxRequestBodyBytes;
+            _maxBufferedRequestBytes = maxBufferedRequestBytes;
+            _log = log;
             _acceptLoop = AcceptLoopAsync(handler);
         }
 
         public int Port => ((IPEndPoint)_listener.LocalEndpoint).Port;
         public string BaseUrl => $"http://127.0.0.1:{Port}";
 
-        public static Task<Harness> StartAsync(Func<HttpRequestData, CancellationToken, Task<HttpResponseData>> handler)
+        public static Task<Harness> StartAsync(
+            Func<HttpRequestData, CancellationToken, Task<HttpResponseData>> handler, long? maxRequestBodyBytes = null,
+            Action<string>? log = null, long? maxBufferedRequestBytes = null)
         {
             var listener = new TcpListener(IPAddress.Loopback, 0);
             listener.Start();
-            return Task.FromResult(new Harness(listener, handler));
+            return Task.FromResult(new Harness(listener, handler, maxRequestBodyBytes, maxBufferedRequestBytes, log));
         }
 
         public HttpClient CreateClient() => new(new SocketsHttpHandler
@@ -633,7 +817,12 @@ internal static class Http2ConnectionTests
                 {
                     using var c = client;
                     c.NoDelay = true;
-                    var connection = new Http2Connection(c.GetStream(), async (r, t) => await handler(r, t).ConfigureAwait(false));
+                    var connection = new Http2Connection(c.GetStream(), async (r, t) => await handler(r, t).ConfigureAwait(false))
+                    {
+                        MaxRequestBodyBytes = _maxRequestBodyBytes ?? Http2Connection.DefaultMaxRequestBodyBytes,
+                        MaxBufferedRequestBytes = _maxBufferedRequestBytes ?? Http2Connection.DefaultMaxBufferedRequestBytes,
+                        Log = _log,
+                    };
                     try { await connection.RunAsync(_cts.Token).ConfigureAwait(false); }
                     catch { /* test asserts on the client side */ }
                 }, _cts.Token);
