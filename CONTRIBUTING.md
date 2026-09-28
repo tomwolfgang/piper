@@ -6,7 +6,10 @@ can install a local certificate authority, security and failure behavior are par
 ## Before opening a pull request
 
 1. Read [CLAUDE.md](CLAUDE.md), including the protocol and certificate safety rules.
-2. Add a regression or behavior test under `tests/Piper.SmokeTests`.
+2. Add a regression or behavior test under `tests/Piper.SmokeTests`, or under `tests/Piper.UiTests`
+   when the behavior lives in a native WinForms control. The UI tests open windows, so they need
+   an interactive desktop session; where there is none, pass `-SkipUiTests` to the gate below and
+   let CI run them.
 3. Run the same deterministic gate as CI:
 
    ```powershell

@@ -1,7 +1,9 @@
 [CmdletBinding()]
 param(
     [switch]$SkipRestore,
-    [switch]$IncludeInstaller
+    [switch]$IncludeInstaller,
+    # The UI tests open windows, so they need an interactive desktop session. CI always runs them.
+    [switch]$SkipUiTests
 )
 
 Set-StrictMode -Version Latest
@@ -42,6 +44,7 @@ try {
     $projects = @(
         'src/Piper.App/Piper.App.csproj',
         'tests/Piper.SmokeTests/Piper.SmokeTests.csproj',
+        'tests/Piper.UiTests/Piper.UiTests.csproj',
         'tools/Piper.TrafficGen/Piper.TrafficGen.csproj'
     )
 
@@ -69,6 +72,18 @@ try {
         '--configuration', 'Release',
         '--no-build'
     )
+
+    if ($SkipUiTests) {
+        Write-Host 'Skipping UI tests (-SkipUiTests).' -ForegroundColor Yellow
+    }
+    else {
+        Invoke-DotNet @(
+            'run',
+            '--project', 'tests/Piper.UiTests/Piper.UiTests.csproj',
+            '--configuration', 'Release',
+            '--no-build'
+        )
+    }
 
     Write-Host 'Verification passed.' -ForegroundColor Green
 }

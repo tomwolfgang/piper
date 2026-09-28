@@ -55,6 +55,7 @@ src/Piper.App/           WinForms shell, targets net10.0-windows
   Controls/                 session grid, inspectors, composer, autoresponder
   Theme/                    dark palette and owner-drawn list/tab controls
 tests/Piper.SmokeTests/  end-to-end tests, no test framework needed
+tests/Piper.UiTests/     drives real WinForms controls; needs a desktop session
 tools/Piper.TrafficGen/  local origin + traffic generator for manual UI testing
 ```
 
@@ -163,6 +164,7 @@ is still reachable.
 
 ```bash
 dotnet run --project tests/Piper.SmokeTests/Piper.SmokeTests.csproj
+dotnet run --project tests/Piper.UiTests/Piper.UiTests.csproj
 ```
 
 Stands up real origin servers, runs the real proxy, and drives a real `HttpClient` through it -

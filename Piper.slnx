@@ -5,6 +5,7 @@
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/Piper.SmokeTests/Piper.SmokeTests.csproj" />
+    <Project Path="tests/Piper.UiTests/Piper.UiTests.csproj" />
   </Folder>
   <Folder Name="/tools/">
     <Project Path="tools/Piper.TrafficGen/Piper.TrafficGen.csproj" />
