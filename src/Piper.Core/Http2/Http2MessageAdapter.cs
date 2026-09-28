@@ -63,9 +63,17 @@ public static class Http2MessageAdapter
         return false;
     }
 
+    // RFC 9113 §8.2.2: connection-specific fields make an h2 message malformed. TE is checked
+    // separately because "trailers" is the one value it may carry.
+    private static readonly string[] ConnectionSpecificFields =
+        ["connection", "keep-alive", "proxy-connection", "transfer-encoding", "upgrade"];
+
     /// <summary>Rebuilds a request from a decoded h2 field list.</summary>
-    /// <exception cref="HttpParseException">The pseudo-headers make the request malformed (RFC 9113
-    /// §8.3.1): one missing, repeated, unknown, empty, or placed after a regular field.</exception>
+    /// <exception cref="HttpParseException">The message is malformed (RFC 9113 §8.2, §8.3): a
+    /// pseudo-header missing, repeated, unknown, invalid or placed after a regular field, or a
+    /// regular field that is not well-formed. These fields are written verbatim onto an HTTP/1.1
+    /// wire when the origin speaks it, so a CR or LF let through here would smuggle headers or a
+    /// whole second request upstream.</exception>
     public static HttpRequestData ToRequest(IReadOnlyList<(string Name, string Value)> fields)
     {
         var request = new HttpRequestData { HttpVersion = "HTTP/2" };
@@ -76,39 +84,67 @@ public static class Http2MessageAdapter
         {
             if (name.Length > 0 && name[0] == ':')
             {
-                if (sawRegular) throw new HttpParseException($"Pseudo-header {name} follows a regular field.");
+                // RFC 9113 §8.3: pseudo-headers come first, each at most once, or which one wins
+                // is ambiguous.
+                if (sawRegular) throw Malformed($"pseudo-header {name} follows a regular field");
                 switch (name)
                 {
-                    case ":method": method = Once(method, name, value); break;
-                    case ":scheme": scheme = Once(scheme, name, value); break;
-                    case ":authority": authority = Once(authority, name, value); break;
-                    case ":path": path = Once(path, name, value); break;
+                    case ":method":
+                        method = Once(method, name, value);
+                        // Written verbatim into the HTTP/1.1 request line.
+                        if (!IsToken(value)) throw Malformed(":method is not a token");
+                        break;
+                    case ":scheme":
+                        scheme = Once(scheme, name, value);
+                        // RFC 3986 §3.1: ALPHA *( ALPHA / DIGIT / "+" / "-" / "." ).
+                        if (value.Length == 0 || !char.IsAsciiLetter(value[0])
+                            || !value.All(c => char.IsAsciiLetterOrDigit(c) || c is '+' or '-' or '.'))
+                            throw Malformed(":scheme is not a valid scheme");
+                        break;
+                    case ":authority":
+                        authority = Once(authority, name, value);
+                        // Names the upstream socket and is compared with Host below.
+                        if (value.Length == 0 || value.Any(c => c <= ' ' || c == '\x7f'))
+                            throw Malformed(":authority is empty or contains whitespace or a control character");
+                        break;
+                    case ":path":
+                        path = Once(path, name, value);
+                        // Becomes the HTTP/1.1 request target when the URL does not resolve.
+                        if (value.Length == 0 || value.Any(c => c <= ' ' || c == '\x7f'))
+                            throw Malformed(":path is empty or contains whitespace or a control character");
+                        break;
                     // Includes :protocol (RFC 8441 extended CONNECT), which a peer may send only
                     // once SETTINGS_ENABLE_CONNECT_PROTOCOL is advertised; Http2Settings.Advertised()
                     // does not. Advertising it means accepting :protocol here too.
-                    default: throw new HttpParseException($"Pseudo-header {name} is not valid in a request.");
+                    default: throw Malformed($"pseudo-header {name} is not valid in a request");
                 }
                 continue;
             }
 
             sawRegular = true;
+            ValidateRegularField(name, value);
+            if (ConnectionSpecificFields.Contains(name))
+                throw Malformed($"connection-specific field '{name}'");
+            if (name == "te" && !string.Equals(value, "trailers", StringComparison.OrdinalIgnoreCase))
+                throw Malformed("te other than \"trailers\"");
             request.Headers.Add(name, value);
         }
 
-        // A token (RFC 9110 §9.1): it is written verbatim into the request line when the origin
-        // speaks HTTP/1.1, so a space or CR/LF here would forge a second request.
-        if (string.IsNullOrEmpty(method) || !method.All(IsTokenChar)) throw new HttpParseException("Request has no valid :method.");
+        // The upstream socket follows :authority but an HTTP/1.1 origin routes on Host, so two
+        // Hosts, or one naming a different entity, would send the request somewhere other than
+        // where the session, the filters and the AutoResponder believe it went (RFC 9113 §8.3.1).
+        var hosts = request.Headers.GetValues("host").ToList();
+        if (hosts.Count > 1) throw Malformed("more than one host field");
+        if (hosts.Count == 1 && authority is not null && !string.Equals(hosts[0], authority, StringComparison.OrdinalIgnoreCase))
+            throw Malformed("host differs from :authority");
 
-        // :path and :authority reach the same request line (and :authority the Host header), so
-        // they may not carry spaces or control characters either.
-        if (!IsVisible(path) || !IsVisible(authority))
-            throw new HttpParseException("Request :path or :authority contains a space or control character.");
+        if (method is null) throw Malformed("no :method");
 
         if (method == "CONNECT")
         {
             // §8.5: CONNECT names only the authority it tunnels to.
-            if (scheme is not null || path is not null || string.IsNullOrEmpty(authority))
-                throw new HttpParseException("CONNECT must carry :authority and neither :scheme nor :path.");
+            if (scheme is not null || path is not null || authority is null)
+                throw Malformed("CONNECT must carry :authority and neither :scheme nor :path");
             request.Method = method;
             request.RequestTarget = authority;
             // Url stays null, as it always has for h2 CONNECT (ResolveUrl needs a :path).
@@ -116,12 +152,9 @@ public static class Http2MessageAdapter
             return request;
         }
 
-        // RFC 3986 §3.1: ALPHA *( ALPHA / DIGIT / "+" / "-" / "." ).
-        if (string.IsNullOrEmpty(scheme) || !char.IsAsciiLetter(scheme[0])
-            || !scheme.All(c => char.IsAsciiLetterOrDigit(c) || c is '+' or '-' or '.'))
-            throw new HttpParseException("Request has no valid :scheme.");
+        if (scheme is null) throw Malformed("no :scheme");
         if (path is null || !(path.StartsWith('/') || (path == "*" && method == "OPTIONS")))
-            throw new HttpParseException("Request has no valid :path.");
+            throw Malformed("no valid :path");
 
         request.Method = method;
         request.RequestTarget = path;
@@ -129,12 +162,8 @@ public static class Http2MessageAdapter
         return request;
     }
 
-    private static bool IsVisible(string? value) => value is null || !value.Any(c => c < 0x21 || c == 0x7F);
-
-    private static bool IsTokenChar(char c) => char.IsAsciiLetterOrDigit(c) || "!#$%&'*+-.^_`|~".Contains(c);
-
     private static string Once(string? current, string name, string value) =>
-        current is null ? value : throw new HttpParseException($"Pseudo-header {name} is repeated.");
+        current is null ? value : throw Malformed($"duplicate {name}");
 
     public static HttpResponseData ToResponse(IReadOnlyList<(string Name, string Value)> fields)
     {
@@ -144,6 +173,7 @@ public static class Http2MessageAdapter
         {
             if (string.Equals(name, ":status", StringComparison.Ordinal))
             {
+                if (value.Length != 3 || !value.All(char.IsAsciiDigit)) throw Malformed(":status is not three digits");
                 response.StatusCode = int.Parse(value, CultureInfo.InvariantCulture);
                 response.ReasonPhrase = ReasonPhraseFor(response.StatusCode);
             }
@@ -153,12 +183,35 @@ public static class Http2MessageAdapter
             }
             else
             {
+                // Relayed verbatim to HTTP/1.1 clients by HeadAsText(), so the same CR/LF danger as
+                // in ToRequest. Connection-specific fields are tolerated here: the proxy strips them
+                // as hop-by-hop before a response reaches a client.
+                ValidateRegularField(name, value);
                 response.Headers.Add(name, value);
             }
         }
 
         return response;
     }
+
+    // RFC 9113 §8.2.1: a name is a lowercase token; a value has no NUL, CR or LF and no leading or
+    // trailing SP/HTAB.
+    private static void ValidateRegularField(string name, string value)
+    {
+        if (!IsToken(name) || name.Any(char.IsAsciiLetterUpper))
+            throw Malformed("field name is not a lowercase token");
+        if (value.Any(c => c is '\0' or '\r' or '\n'))
+            throw Malformed($"field '{name}' value contains NUL, CR or LF");
+        if (value.Length > 0 && (value[0] is ' ' or '\t' || value[^1] is ' ' or '\t'))
+            throw Malformed($"field '{name}' value has leading or trailing whitespace");
+    }
+
+    // RFC 9110 §5.6.2 tchar.
+    private static bool IsToken(string s) =>
+        s.Length > 0 && s.All(c => char.IsAsciiLetterOrDigit(c) || "!#$%&'*+-.^_`|~".Contains(c));
+
+    // Names only, never values: a value is captured data and must stay out of diagnostics.
+    private static HttpParseException Malformed(string what) => new($"Malformed HTTP/2 message: {what}.");
 
     /// <summary>h2's counterpart to <see cref="HttpParser.ResolveUrl"/>: builds an absolute URL
     /// from the scheme/authority/path pseudo-headers instead of a request line and Host header.</summary>

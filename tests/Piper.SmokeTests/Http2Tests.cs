@@ -80,6 +80,78 @@ internal static class Http2Tests
                 runner.AreEqual($"GET /item/{i}", body, $"request {i} got exactly its own response");
         });
 
+        await runner.RunAsync("a CR/LF smuggled in an h2 request never reaches the HTTP/1.1 origin", async () =>
+        {
+            // HttpClient refuses to send these fields, so this is a hand-built h2 client: CONNECT
+            // through the proxy, TLS with ALPN h2 against Piper's MITM leaf, then raw frames.
+            using var tcp = new TcpClient();
+            await tcp.ConnectAsync(IPAddress.Loopback, proxyPort);
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+            var ct = timeout.Token;
+            var authority = $"127.0.0.1:{origin.Port}";
+
+            var raw = tcp.GetStream();
+            await raw.WriteAsync(Encoding.ASCII.GetBytes($"CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\n\r\n"), ct);
+            var connectReply = new List<byte>();
+            var one = new byte[1];
+            while (connectReply.Count < 4 || !connectReply.TakeLast(4).SequenceEqual("\r\n\r\n"u8.ToArray()))
+            {
+                if (await raw.ReadAsync(one, ct) == 0) throw new IOException("proxy closed during CONNECT");
+                connectReply.Add(one[0]);
+            }
+            runner.IsTrue(Encoding.ASCII.GetString(connectReply.ToArray()).Contains(" 200 "), "CONNECT accepted");
+
+            await using var ssl = new SslStream(raw, leaveInnerStreamOpen: false);
+            await ssl.AuthenticateAsClientAsync(new SslClientAuthenticationOptions
+            {
+                TargetHost = "127.0.0.1",
+                ApplicationProtocols = [SslApplicationProtocol.Http2],
+                RemoteCertificateValidationCallback = (_, cert, _, _) => TrustsRoot(ca.RootCertificate, cert),
+            }, ct);
+            runner.AreEqual(SslApplicationProtocol.Http2, ssl.NegotiatedApplicationProtocol, "h2 negotiated with the proxy");
+
+            await ssl.WriteAsync("PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"u8.ToArray(), ct);
+            await Http2FrameWriter.WriteAsync(ssl, Http2FrameType.Settings, Http2FrameFlags.None, 0, ReadOnlyMemory<byte>.Empty, ct);
+
+            List<(string, string)> Request(string path, params (string, string)[] extra) =>
+                [(":method", "POST"), (":scheme", "https"), (":authority", authority), (":path", path), .. extra];
+
+            // Stream 1: header injection. Stream 3: a smuggled request line in :path. Stream 5: a
+            // body that would be a second request if the CR/LF split the head. Stream 7: valid.
+            await Http2FrameWriter.WriteHeadersAsync(ssl, 1, Piper.Core.Http2.Hpack.HpackEncoder.Encode(
+                Request("/smuggle-a", ("x-a", "1\r\nx-injected: yes"))), endStream: true, 16384, ct);
+            await Http2FrameWriter.WriteHeadersAsync(ssl, 3, Piper.Core.Http2.Hpack.HpackEncoder.Encode(
+                Request("/smuggle-b HTTP/1.1\r\nx-injected: yes\r\n\r\nGET /smuggled")), endStream: true, 16384, ct);
+            await Http2FrameWriter.WriteHeadersAsync(ssl, 5, Piper.Core.Http2.Hpack.HpackEncoder.Encode(
+                Request("/smuggle-c", ("x-a", "1\r\ncontent-length: 0\r\n"))), endStream: false, 16384, ct);
+            await Http2FrameWriter.WriteDataAsync(ssl, 5, "GET /smuggled HTTP/1.1\r\nHost: x\r\n\r\n"u8.ToArray(), endStream: true, 16384, ct);
+            await Http2FrameWriter.WriteHeadersAsync(ssl, 7, Piper.Core.Http2.Hpack.HpackEncoder.Encode(
+                Request("/after-smuggle")), endStream: true, 16384, ct);
+            await ssl.FlushAsync(ct);
+
+            var resets = new Dictionary<int, uint>();
+            var validAnswered = false;
+            while (!validAnswered || resets.Count < 3)
+            {
+                var frame = await Http2FrameReader.ReadRequiredAsync(ssl, 1 << 20, ct);
+                if (frame.Type == Http2FrameType.GoAway) { runner.IsTrue(false, "the proxy did not tear the connection down"); return; }
+                if (frame.Type == Http2FrameType.Settings && !frame.HasFlag(Http2FrameFlags.Ack))
+                    await Http2FrameWriter.WriteAsync(ssl, Http2FrameType.Settings, Http2FrameFlags.Ack, 0, ReadOnlyMemory<byte>.Empty, ct);
+                if (frame.Type == Http2FrameType.RstStream)
+                    resets[frame.StreamId] = System.Buffers.Binary.BinaryPrimitives.ReadUInt32BigEndian(frame.Payload.Span);
+                if (frame.Type == Http2FrameType.Headers && frame.StreamId == 7) validAnswered = true;
+            }
+
+            foreach (var id in new[] { 1, 3, 5 })
+                runner.AreEqual((uint)Http2ErrorCode.ProtocolError, resets.GetValueOrDefault(id), $"stream {id} reset with PROTOCOL_ERROR");
+
+            var received = origin.Received.ToArray();
+            runner.IsTrue(received.Any(r => r.RequestTarget == "/after-smuggle"), "the valid request after them was forwarded");
+            runner.IsTrue(!received.Any(r => r.RequestTarget.Contains("smuggle", StringComparison.Ordinal) && r.RequestTarget != "/after-smuggle"),
+                "neither a malformed request nor a smuggled one reached the origin");
+            runner.IsTrue(!received.Any(r => r.Headers.Contains("x-injected")), "no injected header reached the origin");
+        });
+
         await runner.RunAsync("a bodiless response from an HTTP/1.1 origin ends on the h2 HEADERS frame", async () =>
         {
             // HEAD, 204 and 304 end after their header section (RFC 9110 6.4.1). Handed a relay
@@ -196,6 +268,32 @@ internal static class Http2Tests
             runner.AreEqual("HTTP/1.1", session.Request!.HttpVersion, "downstream leg recorded as h1.1 (the browser's actual choice)");
             runner.AreEqual("HTTP/2", session.Response!.HttpVersion, "upstream leg recorded as h2 (the origin's actual choice)");
             runner.IsTrue(!session.Response.Headers.Contains("Connection"), "no Connection header leaks into an h2-sourced response");
+        });
+
+        await runner.RunAsync("a CR/LF in an h2 origin's response fails that session with a 502 and splits nothing", async () =>
+        {
+            // The upstream h2 connection is per request, so the HttpParseException from ToResponse
+            // is contained by the forwarder's 502 path rather than a shared reader loop.
+            using var h1Client = new HttpClient(new HttpClientHandler
+            {
+                Proxy = new WebProxy($"http://127.0.0.1:{proxyPort}"),
+                UseProxy = true,
+                ServerCertificateCustomValidationCallback = (_, cert, _, _) => TrustsRoot(ca.RootCertificate, cert),
+            })
+            { DefaultRequestVersion = HttpVersion.Version11, DefaultVersionPolicy = HttpVersionPolicy.RequestVersionExact };
+
+            var split = await h1Client.GetAsync($"{h2OriginBase}/split-response");
+            runner.AreEqual(HttpStatusCode.BadGateway, split.StatusCode, "h1.1 client gets a 502");
+            runner.IsTrue(!split.Headers.Contains("Set-Cookie"), "the injected header did not reach the h1.1 client");
+
+            var h2Split = await client.GetAsync($"{h2OriginBase}/split-response");
+            runner.AreEqual(HttpStatusCode.BadGateway, h2Split.StatusCode, "h2 client gets a 502 too");
+
+            var session = await WaitForSessionAsync(store, s => s.Path == "/split-response");
+            runner.AreEqual(SessionState.Failed, session.State, "the session is recorded as failed");
+
+            var after = await client.GetAsync($"{h2OriginBase}/after-split");
+            runner.AreEqual(HttpStatusCode.OK, after.StatusCode, "the same h2 client connection still serves the next request");
         });
 
         await runner.RunAsync("both legs negotiate h2: full translation matrix corner", async () =>
@@ -347,6 +445,14 @@ internal static class Http2Tests
         if (path.StartsWith("/upload", StringComparison.Ordinal))
             return Task.FromResult(HttpResponseData.Simple(200, "OK", $"received {request.Body.Length}"));
 
+        if (path.StartsWith("/split-response", StringComparison.Ordinal))
+        {
+            // A malformed h2 response: ToHeaderFields puts the value on the wire verbatim.
+            var split = HttpResponseData.Simple(200, "OK", "should never be relayed");
+            split.Headers.Add("X-A", "1\r\nSet-Cookie: injected=1");
+            return Task.FromResult(split);
+        }
+
         var body = request.Body.Length > 0
             ? $"{request.Method} {path} body={Encoding.UTF8.GetString(request.Body)}"
             : $"{request.Method} {path}";
@@ -419,6 +525,9 @@ internal static class Http2Tests
 
         public int Port => ((IPEndPoint)_listener.LocalEndpoint).Port;
 
+        /// <summary>Every request this HTTP/1.1 origin parsed, in arrival order.</summary>
+        public System.Collections.Concurrent.ConcurrentQueue<HttpRequestData> Received { get; } = new();
+
         private async Task AcceptLoopAsync()
         {
             while (!_cts.IsCancellationRequested)
@@ -455,6 +564,7 @@ internal static class Http2Tests
                 {
                     var request = await HttpParser.ReadRequestAsync(reader, _cts.Token).ConfigureAwait(false);
                     if (request is null) break;
+                    Received.Enqueue(request);
 
                     var response = BuildResponse(request);
                     await ssl.WriteAsync(response.ToBytes(), _cts.Token).ConfigureAwait(false);

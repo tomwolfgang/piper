@@ -124,5 +124,137 @@ internal static class Http2MessageAdapterTests
             runner.IsTrue(Http2MessageAdapter.ResolveUrl("https", "example.com", "/x") is not null, "all present resolves");
             return Task.CompletedTask;
         });
+
+        await runner.RunAsync("ToRequest rejects malformed fields that would inject into an HTTP/1.1 upstream", () =>
+        {
+            // Each would otherwise be written verbatim by HeaderCollection.ToRawString() or the
+            // request line (RFC 9113 §8.2.1, §8.2.2, §8.3.1).
+            var malformed = new (string What, string Name, string Value)[]
+            {
+                ("CRLF in value", "x-a", "1\r\nx-injected: yes"),
+                ("bare LF in value", "x-a", "1\nGET /smuggled HTTP/1.1"),
+                ("bare CR in value", "x-a", "1\rx"),
+                ("NUL in value", "x-a", "1\0"),
+                ("leading SP in value", "x-a", " 1"),
+                ("trailing HTAB in value", "x-a", "1\t"),
+                ("uppercase name", "X-A", "1"),
+                ("colon in name", "x:a", "1"),
+                ("space in name", "x a", "1"),
+                ("CRLF in name", "x\r\ny", "1"),
+                ("empty name", "", "1"),
+                ("connection", "connection", "close"),
+                ("keep-alive", "keep-alive", "timeout=5"),
+                ("proxy-connection", "proxy-connection", "keep-alive"),
+                ("transfer-encoding", "transfer-encoding", "chunked"),
+                ("upgrade", "upgrade", "websocket"),
+                ("te other than trailers", "te", "gzip"),
+                ("CRLF in :method", ":method", "GET / HTTP/1.1\r\nx: y"),
+                ("space in :method", ":method", "G ET"),
+                ("CRLF in :path", ":path", "/\r\nx: y"),
+                ("space in :path", ":path", "/a b"),
+                ("empty :path", ":path", ""),
+                ("host naming another entity", "host", "other.example"),
+                ("CRLF in :scheme", ":scheme", "https\r\nx: y"),
+                ("space in :scheme", ":scheme", "ht tps"),
+                ("CRLF in :authority", ":authority", "example.com\r\nx: y"),
+                ("space in :authority", ":authority", "example.com evil"),
+                ("empty :authority", ":authority", ""),
+            };
+
+            foreach (var (what, name, value) in malformed)
+            {
+                var fields = new List<(string Name, string Value)>
+                {
+                    (":method", "GET"), (":scheme", "https"), (":authority", "example.com"), (":path", "/"),
+                };
+                if (name.StartsWith(':')) fields.RemoveAll(f => f.Name == name);
+                fields.Add((name, value));
+
+                var threw = false;
+                try { Http2MessageAdapter.ToRequest(fields); }
+                catch (HttpParseException) { threw = true; }
+                runner.IsTrue(threw, $"{what} is rejected");
+            }
+            return Task.CompletedTask;
+        });
+
+        await runner.RunAsync("ToRequest rejects duplicated pseudo-headers and Host fields", () =>
+        {
+            List<(string Name, string Value)> Base() =>
+                [(":method", "GET"), (":scheme", "https"), (":authority", "example.com"), (":path", "/")];
+
+            foreach (var duplicate in new[] { ":method", ":scheme", ":authority", ":path" })
+            {
+                var fields = Base();
+                fields.Add((duplicate, fields.First(f => f.Name == duplicate).Value));
+                var threw = false;
+                try { Http2MessageAdapter.ToRequest(fields); }
+                catch (HttpParseException) { threw = true; }
+                runner.IsTrue(threw, $"duplicate {duplicate} is rejected, even with the same value");
+            }
+
+            var twoHosts = Base();
+            twoHosts.Add(("host", "example.com"));
+            twoHosts.Add(("host", "example.com"));
+            var rejected = false;
+            try { Http2MessageAdapter.ToRequest(twoHosts); }
+            catch (HttpParseException) { rejected = true; }
+            runner.IsTrue(rejected, "two host fields are rejected");
+
+            var matching = Base();
+            matching.Add(("host", "EXAMPLE.com"));
+            runner.AreEqual("EXAMPLE.com", Http2MessageAdapter.ToRequest(matching).Headers["host"], "a host matching :authority is kept");
+            return Task.CompletedTask;
+        });
+
+        await runner.RunAsync("ToRequest accepts the legal edge cases next to the malformed ones", () =>
+        {
+            var fields = new List<(string Name, string Value)>
+            {
+                (":method", "GET"), (":scheme", "https"), (":authority", "example.com"), (":path", "/"),
+                ("te", "trailers"), ("x-empty", ""), ("x-inner", "a \t b"), ("x-tchar!#$%&'*+-.^_`|~", "v"),
+                ("x-obs-text", "café"),
+            };
+            var request = Http2MessageAdapter.ToRequest(fields);
+            runner.AreEqual("trailers", request.Headers["te"], "te: trailers is allowed");
+            var capitalised = Http2MessageAdapter.ToRequest(
+                [(":method", "GET"), (":scheme", "https"), (":authority", "example.com"), (":path", "/"), ("te", "Trailers")]);
+            runner.AreEqual("Trailers", capitalised.Headers["te"], "te token is case-insensitive");
+            runner.AreEqual("", request.Headers["x-empty"], "empty value is allowed");
+            runner.AreEqual("a \t b", request.Headers["x-inner"], "inner whitespace is allowed");
+            runner.AreEqual("v", request.Headers["x-tchar!#$%&'*+-.^_`|~"], "every tchar is allowed in a name");
+            return Task.CompletedTask;
+        });
+
+        await runner.RunAsync("ToResponse rejects fields that would split an HTTP/1.1 response", () =>
+        {
+            var malformed = new (string What, string Name, string Value)[]
+            {
+                ("CRLF in value", "x-a", "1\r\nset-cookie: evil=1"),
+                ("NUL in value", "x-a", "\0"),
+                ("uppercase name", "Set-Cookie", "a=1"),
+                ("colon in name", "x:a", "1"),
+                ("non-numeric :status", ":status", "2x0"),
+                ("four-digit :status", ":status", "2000"),
+                ("CRLF in :status", ":status", "200\r\nx: y"),
+            };
+            foreach (var (what, name, value) in malformed)
+            {
+                var fields = new List<(string Name, string Value)>();
+                if (name != ":status") fields.Add((":status", "200"));
+                fields.Add((name, value));
+
+                var threw = false;
+                try { Http2MessageAdapter.ToResponse(fields); }
+                catch (HttpParseException) { threw = true; }
+                runner.IsTrue(threw, $"{what} is rejected");
+            }
+
+            // Hop-by-hop fields are stripped later by the proxy, so a response carrying one is
+            // tolerated rather than failed.
+            var tolerated = Http2MessageAdapter.ToResponse([(":status", "200"), ("connection", "close")]);
+            runner.AreEqual(200, tolerated.StatusCode, "connection-specific response field is tolerated");
+            return Task.CompletedTask;
+        });
     }
 }
