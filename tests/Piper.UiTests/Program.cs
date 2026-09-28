@@ -34,10 +34,9 @@ internal static class Program
 
         Run("a filter that matches far fewer rows shows them from the top", (store, grid, list) =>
         {
-            grid.FilterText = "/item/29"; // a handful of rows, all fewer than the old top row
+            grid.FilterText = $"host:{RareHost}"; // every 30th setup row: 10 rows, fewer than the old top row
             PumpUntil(() => list.VirtualListSize < 300);
-            Check(list.VirtualListSize is > 0 and < 50, $"the filter leaves a few rows (got {list.VirtualListSize})");
-            ExpectRowsFromTop(list, list.VirtualListSize);
+            ExpectRowsFromTop(list, 10);
         });
 
         Console.WriteLine(_failures == 0 ? "UI tests passed." : $"{_failures} UI check(s) failed.");
@@ -73,18 +72,22 @@ internal static class Program
         Check(topIndex == 0, $"the view starts at row 0 (top index {topIndex})");
         // Just under the header: one row height at most, not partway down the grid.
         Check(first.Top >= 0 && first.Top <= first.Height * 2, $"row 0 is drawn at the top (y={first.Top})");
-        Check(list.GetItemRect(rows - 1).Bottom <= list.ClientSize.Height, "the newest row is on screen");
+        // Only where every row fits, so a high-DPI runner with taller rows does not fail it spuriously.
+        if (first.Top + rows * first.Height <= list.ClientSize.Height)
+            Check(list.GetItemRect(rows - 1).Bottom <= list.ClientSize.Height, "the newest row is on screen");
     }
 
+    private const string RareHost = "rare.test";
     private static int _next;
 
     private static void AddSessions(SessionStore store, int count)
     {
         for (var i = 0; i < count; i++)
         {
+            var host = _next % 30 == 0 ? RareHost : "example.test";
             var session = new Session
             {
-                Request = new HttpRequestData { Method = "GET", Url = new Uri($"http://example.test/item/{_next++}") },
+                Request = new HttpRequestData { Method = "GET", Url = new Uri($"http://{host}/item/{_next++}") },
                 Response = new HttpResponseData { StatusCode = 200 },
             };
             session.Completed = DateTimeOffset.Now;
