@@ -225,6 +225,34 @@ internal static class Http2ConnectionTests
             var after = await peer.ReadUntilAsync(f => f.Type == Http2FrameType.GoAway || (f.StreamId == 3 && f.HasFlag(Http2FrameFlags.EndStream)));
             runner.IsTrue(after is { Type: not Http2FrameType.GoAway }, "a later stream is still answered");
             runner.AreEqual(2, peer.Requests.Count, "no second request for stream 1: /slow and /after only");
+
+            // Stream 1's handler has stopped by now (its reset cancelled it), so the stream is gone.
+            // One more late HEADERS on it must still be discarded, not taken for a reused id.
+            await Task.Delay(200);
+            await peer.SendHeadersAsync(1, endStream: true, HpackEncoder.Encode([("x-later", "1")]));
+            await peer.SendHeadersAsync(5, endStream: true, Get("/last"));
+            var last = await peer.ReadUntilAsync(f => f.Type == Http2FrameType.GoAway || (f.StreamId == 5 && f.HasFlag(Http2FrameFlags.EndStream)));
+            runner.IsTrue(last is { Type: not Http2FrameType.GoAway }, "a late HEADERS after the handler stopped does not end the connection");
+        });
+
+        await runner.RunAsync("Http2Connection discards trailers the peer sent before seeing a body-cap reset", async () =>
+        {
+            await using var peer = await RawPeer.StartAsync(maxRequestBodyBytes: 4);
+
+            await peer.SendHeadersAsync(1, endStream: false, Get("/upload", "POST"));
+            await peer.SendAsync(Http2FrameType.Data, Http2FrameFlags.None, 1, "far too long"u8.ToArray());
+            await peer.SendHeadersAsync(1, endStream: true, HpackEncoder.Encode([("x-checksum", "abc")]));
+            await peer.SendHeadersAsync(3, endStream: true, Get("/after"));
+
+            Http2ErrorCode? reset = null;
+            var outcome = await peer.ReadUntilAsync(f =>
+            {
+                if (f.Type == Http2FrameType.RstStream && f.StreamId == 1) reset = ErrorCodeAt(f, 0);
+                return f.Type == Http2FrameType.GoAway || (f.StreamId == 3 && f.HasFlag(Http2FrameFlags.EndStream));
+            });
+            runner.AreEqual(Http2ErrorCode.EnhanceYourCalm, reset, "the oversized body is reset");
+            runner.IsTrue(outcome is { Type: not Http2FrameType.GoAway }, "its trailers do not end the connection, and stream 3 is answered");
+            runner.AreEqual("/after", peer.Requests.Single().RequestTarget, "only stream 3 reached the handler");
         });
 
         await runner.RunAsync("Http2Connection keeps a reset stream counted until its handler stops (Rapid Reset)", async () =>
@@ -654,7 +682,7 @@ internal static class Http2ConnectionTests
         public ConcurrentQueue<HttpRequestData> Requests { get; } = new();
         private NetworkStream Wire => _client.GetStream();
 
-        private RawPeer(TcpClient client, TcpClient server, TimeSpan delay, bool honourCancellation)
+        private RawPeer(TcpClient client, TcpClient server, TimeSpan delay, bool honourCancellation, long? maxRequestBodyBytes)
         {
             _client = client;
             _server = server;
@@ -663,7 +691,10 @@ internal static class Http2ConnectionTests
                 Requests.Enqueue(request);
                 if (delay > TimeSpan.Zero) await Task.Delay(delay, honourCancellation ? ct : CancellationToken.None).ConfigureAwait(false);
                 return (Http2StreamResponse)HttpResponseData.Simple(200, "OK", "ok");
-            });
+            })
+            {
+                MaxRequestBodyBytes = maxRequestBodyBytes ?? Http2Connection.DefaultMaxRequestBodyBytes,
+            };
             _run = Task.Run(async () =>
             {
                 try { await connection.RunAsync(_cts.Token).ConfigureAwait(false); }
@@ -671,7 +702,7 @@ internal static class Http2ConnectionTests
             });
         }
 
-        public static async Task<RawPeer> StartAsync(TimeSpan delay = default, bool honourCancellation = true)
+        public static async Task<RawPeer> StartAsync(TimeSpan delay = default, bool honourCancellation = true, long? maxRequestBodyBytes = null)
         {
             using var listener = new TcpListener(IPAddress.Loopback, 0);
             listener.Start();
@@ -681,7 +712,7 @@ internal static class Http2ConnectionTests
             var server = await accept.ConfigureAwait(false);
             listener.Stop();
 
-            var peer = new RawPeer(client, server, delay, honourCancellation);
+            var peer = new RawPeer(client, server, delay, honourCancellation, maxRequestBodyBytes);
             await peer.Wire.WriteAsync("PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"u8.ToArray()).ConfigureAwait(false);
             await peer.SendAsync(Http2FrameType.Settings, Http2FrameFlags.None, 0, ReadOnlyMemory<byte>.Empty).ConfigureAwait(false);
             return peer;

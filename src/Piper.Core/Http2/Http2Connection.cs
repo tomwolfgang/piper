@@ -452,7 +452,9 @@ public sealed class Http2Connection(Stream stream, Func<HttpRequestData, Cancell
         if (!http2Stream.Dispatched) return false;
         if (!http2Stream.Cancellation.IsCancellationRequested)
         {
-            EnqueueRstStream(http2Stream.Id, Http2ErrorCode.StreamClosed);
+            // Remembered too: once the handler stops and the stream is gone, a further late
+            // HEADERS must still be discarded, not taken for a reused id.
+            ResetStream(http2Stream.Id, Http2ErrorCode.StreamClosed, peerStillSending: true);
             http2Stream.Cancellation.Cancel();
         }
         return true;
@@ -496,7 +498,9 @@ public sealed class Http2Connection(Stream stream, Func<HttpRequestData, Cancell
                 Log?.Invoke($"HTTP/2 stream {frame.StreamId} reset: request bodies on this connection exceed the " +
                             $"{MaxBufferedRequestBytes} byte cap. Later resets for this cap on the connection are not logged.");
             }
-            EnqueueRstStream(frame.StreamId, Http2ErrorCode.EnhanceYourCalm);
+            // Remembered, so request trailers the peer already had in flight are discarded rather
+            // than taken for a reused id, which would end every other stream too.
+            ResetStream(frame.StreamId, Http2ErrorCode.EnhanceYourCalm, peerStillSending: !frame.HasFlag(Http2FrameFlags.EndStream));
             return;
         }
 
