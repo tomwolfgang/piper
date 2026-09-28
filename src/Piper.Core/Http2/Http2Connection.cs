@@ -117,6 +117,14 @@ public sealed class Http2Connection(Stream stream, Func<HttpRequestData, Cancell
     internal Action<string>? Log { get; init; }
 
     /// <summary>
+    /// Whether a reset for <see cref="MaxBufferedRequestBytes"/> has been logged on this connection.
+    /// Once the peer holds the budget full, every fresh stream it opens is reset for a few bytes, so
+    /// logging each one would let it flood the log, and the UI thread that shows it, almost for
+    /// free. A reset for the per-stream cap costs the peer that cap each time, so each is logged.
+    /// </summary>
+    private bool _bufferedCapLogged;
+
+    /// <summary>
     /// Completed and replaced whenever the peer grants more send window, so a sender waiting for
     /// credit is woken by the grant itself.
     /// </summary>
@@ -473,18 +481,21 @@ public sealed class Http2Connection(Stream stream, Func<HttpRequestData, Cancell
         if (ResetIfDispatched(http2Stream)) return;
 
         var incoming = frame.DataPayload.Length;
-        var overCap = http2Stream.Body.Length + incoming > MaxRequestBodyBytes
-            ? $"request body exceeds the {MaxRequestBodyBytes} byte cap"
-            : BufferedRequestBytes() + incoming > MaxBufferedRequestBytes
-                ? $"request bodies on this connection exceed the {MaxBufferedRequestBytes} byte cap"
-                : null;
-        if (overCap is not null)
+        var overStreamCap = http2Stream.Body.Length + incoming > MaxRequestBodyBytes;
+        if (overStreamCap || BufferedRequestBytes() + incoming > MaxBufferedRequestBytes)
         {
             // No handler owns the stream yet. Forgetting it is what makes its later DATA frames fall
             // into the drop above.
             _streams.TryRemove(frame.StreamId, out _);
             http2Stream.Body.Dispose();
-            Log?.Invoke($"HTTP/2 stream {frame.StreamId} reset: {overCap}.");
+            if (overStreamCap)
+                Log?.Invoke($"HTTP/2 stream {frame.StreamId} reset: request body exceeds the {MaxRequestBodyBytes} byte cap.");
+            else if (!_bufferedCapLogged)
+            {
+                _bufferedCapLogged = true;
+                Log?.Invoke($"HTTP/2 stream {frame.StreamId} reset: request bodies on this connection exceed the " +
+                            $"{MaxBufferedRequestBytes} byte cap. Later resets for this cap on the connection are not logged.");
+            }
             EnqueueRstStream(frame.StreamId, Http2ErrorCode.EnhanceYourCalm);
             return;
         }
