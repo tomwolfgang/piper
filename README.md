@@ -38,7 +38,7 @@ response to the last send is shown in the Composer itself rather than only in th
 To start from something you captured, drag it in from the grid and drop it anywhere on the
 Composer -- or onto its tab, which works from whichever tab you are on. A body you send from the
 Composer that is a JSON object or array goes out as `Content-Type: application/json` unless you set
-a Content-Type yourself; a `Ctrl+R` replay is sent with the captured headers unchanged.
+a Content-Type yourself; a `Ctrl+R` replay is sent without one unless the capture carried one.
 
 The same query grammar drives the session-list filter and the composer search, so a query
 you learn in one place works in the other.
