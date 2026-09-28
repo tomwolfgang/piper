@@ -68,55 +68,66 @@ public static class Http2MessageAdapter
     private static readonly string[] ConnectionSpecificFields =
         ["connection", "keep-alive", "proxy-connection", "transfer-encoding", "upgrade"];
 
-    /// <summary>Rebuilds a request from a decoded h2 field list. <paramref name="isHttps"/> is used
-    /// only as a fallback when a peer omits <c>:scheme</c>, which compliant peers never do.
-    /// Throws <see cref="HttpParseException"/> for a malformed message (RFC 9113 §8.2): these
-    /// fields are written verbatim onto an HTTP/1.1 wire when the origin speaks it, so a CR or LF
-    /// let through here would smuggle headers or a whole second request upstream.</summary>
-    public static HttpRequestData ToRequest(IReadOnlyList<(string Name, string Value)> fields, bool isHttps = true)
+    /// <summary>Rebuilds a request from a decoded h2 field list.</summary>
+    /// <exception cref="HttpParseException">The message is malformed (RFC 9113 §8.2, §8.3): a
+    /// pseudo-header missing, repeated, unknown, invalid or placed after a regular field, or a
+    /// regular field that is not well-formed. These fields are written verbatim onto an HTTP/1.1
+    /// wire when the origin speaks it, so a CR or LF let through here would smuggle headers or a
+    /// whole second request upstream.</exception>
+    public static HttpRequestData ToRequest(IReadOnlyList<(string Name, string Value)> fields)
     {
         var request = new HttpRequestData { HttpVersion = "HTTP/2" };
         string? method = null, scheme = null, authority = null, path = null;
+        var sawRegular = false;
 
         foreach (var (name, value) in fields)
         {
-            switch (name)
+            if (name.Length > 0 && name[0] == ':')
             {
-                // RFC 9113 §8.3: each pseudo-header at most once, or which one wins is ambiguous.
-                case ":method":
-                    if (method is not null) throw Malformed("duplicate :method");
-                    if (!IsToken(value)) throw Malformed(":method is not a token");
-                    method = value;
-                    break;
-                case ":scheme":
-                    if (scheme is not null) throw Malformed("duplicate :scheme");
-                    if (!IsToken(value)) throw Malformed(":scheme is not a token");
-                    scheme = value;
-                    break;
-                case ":authority":
-                    if (authority is not null) throw Malformed("duplicate :authority");
-                    // Names the upstream socket and is compared with Host below.
-                    if (value.Length == 0 || value.Any(c => c <= ' ' || c == '\x7f'))
-                        throw Malformed(":authority is empty or contains whitespace or a control character");
-                    authority = value;
-                    break;
-                case ":path":
-                    if (path is not null) throw Malformed("duplicate :path");
-                    // Becomes the HTTP/1.1 request target when the URL does not resolve.
-                    if (value.Length == 0 || value.Any(c => c <= ' ' || c == '\x7f'))
-                        throw Malformed(":path is empty or contains whitespace or a control character");
-                    path = value;
-                    break;
-                default:
-                    if (name.Length > 0 && name[0] == ':') break; // unknown pseudo-header: ignore
-                    ValidateRegularField(name, value);
-                    if (ConnectionSpecificFields.Contains(name))
-                        throw Malformed($"connection-specific field '{name}'");
-                    if (name == "te" && !string.Equals(value, "trailers", StringComparison.OrdinalIgnoreCase))
-                        throw Malformed("te other than \"trailers\"");
-                    request.Headers.Add(name, value);
-                    break;
+                // RFC 9113 §8.3: pseudo-headers come first, each at most once, or which one wins
+                // is ambiguous.
+                if (sawRegular) throw Malformed($"pseudo-header {name} follows a regular field");
+                switch (name)
+                {
+                    case ":method":
+                        method = Once(method, name, value);
+                        // Written verbatim into the HTTP/1.1 request line.
+                        if (!IsToken(value)) throw Malformed(":method is not a token");
+                        break;
+                    case ":scheme":
+                        scheme = Once(scheme, name, value);
+                        // RFC 3986 §3.1: ALPHA *( ALPHA / DIGIT / "+" / "-" / "." ).
+                        if (value.Length == 0 || !char.IsAsciiLetter(value[0])
+                            || !value.All(c => char.IsAsciiLetterOrDigit(c) || c is '+' or '-' or '.'))
+                            throw Malformed(":scheme is not a valid scheme");
+                        break;
+                    case ":authority":
+                        authority = Once(authority, name, value);
+                        // Names the upstream socket and is compared with Host below.
+                        if (value.Length == 0 || value.Any(c => c <= ' ' || c == '\x7f'))
+                            throw Malformed(":authority is empty or contains whitespace or a control character");
+                        break;
+                    case ":path":
+                        path = Once(path, name, value);
+                        // Becomes the HTTP/1.1 request target when the URL does not resolve.
+                        if (value.Length == 0 || value.Any(c => c <= ' ' || c == '\x7f'))
+                            throw Malformed(":path is empty or contains whitespace or a control character");
+                        break;
+                    // Includes :protocol (RFC 8441 extended CONNECT), which a peer may send only
+                    // once SETTINGS_ENABLE_CONNECT_PROTOCOL is advertised; Http2Settings.Advertised()
+                    // does not. Advertising it means accepting :protocol here too.
+                    default: throw Malformed($"pseudo-header {name} is not valid in a request");
+                }
+                continue;
             }
+
+            sawRegular = true;
+            ValidateRegularField(name, value);
+            if (ConnectionSpecificFields.Contains(name))
+                throw Malformed($"connection-specific field '{name}'");
+            if (name == "te" && !string.Equals(value, "trailers", StringComparison.OrdinalIgnoreCase))
+                throw Malformed("te other than \"trailers\"");
+            request.Headers.Add(name, value);
         }
 
         // The upstream socket follows :authority but an HTTP/1.1 origin routes on Host, so two
@@ -127,11 +138,32 @@ public static class Http2MessageAdapter
         if (hosts.Count == 1 && authority is not null && !string.Equals(hosts[0], authority, StringComparison.OrdinalIgnoreCase))
             throw Malformed("host differs from :authority");
 
-        if (method is not null) request.Method = method;
-        request.RequestTarget = path ?? "/";
-        request.Url = ResolveUrl(scheme ?? (isHttps ? "https" : "http"), authority, path);
+        if (method is null) throw Malformed("no :method");
+
+        if (method == "CONNECT")
+        {
+            // §8.5: CONNECT names only the authority it tunnels to.
+            if (scheme is not null || path is not null || authority is null)
+                throw Malformed("CONNECT must carry :authority and neither :scheme nor :path");
+            request.Method = method;
+            request.RequestTarget = authority;
+            // Url stays null, as it always has for h2 CONNECT (ResolveUrl needs a :path).
+            // Http2RequestForwarder answers a request without one with 400.
+            return request;
+        }
+
+        if (scheme is null) throw Malformed("no :scheme");
+        if (path is null || !(path.StartsWith('/') || (path == "*" && method == "OPTIONS")))
+            throw Malformed("no valid :path");
+
+        request.Method = method;
+        request.RequestTarget = path;
+        request.Url = ResolveUrl(scheme, authority, path);
         return request;
     }
+
+    private static string Once(string? current, string name, string value) =>
+        current is null ? value : throw Malformed($"duplicate {name}");
 
     public static HttpResponseData ToResponse(IReadOnlyList<(string Name, string Value)> fields)
     {

@@ -70,14 +70,49 @@ internal static class Http2MessageAdapterTests
             return Task.CompletedTask;
         });
 
-        await runner.RunAsync("ToRequest falls back to the tunnel's scheme when :scheme is missing", () =>
+        await runner.RunAsync("ToRequest rejects malformed request pseudo-headers", () =>
         {
-            var fields = new List<(string Name, string Value)>
+            (string, string) m = (":method", "GET"), s = (":scheme", "https"), a = (":authority", "example.com"), p = (":path", "/");
+            var cases = new (string What, (string, string)[] Fields)[]
             {
-                (":method", "GET"), (":authority", "example.com"), (":path", "/"),
+                ("missing :method", [s, a, p]),
+                ("missing :scheme", [m, a, p]),
+                ("missing :path", [m, s, a]),
+                ("empty :method", [(":method", ""), s, a, p]),
+                ("request line smuggled in :method", [(":method", "GET / HTTP/1.1\r\nHost: evil\r\n\r\nGET"), s, a, p]),
+                (":method with a space", [(":method", "G ET"), s, a, p]),
+                ("CR/LF in :scheme", [m, (":scheme", "https\r\nX: 1"), a, p]),
+                (":scheme with a space", [m, (":scheme", "ht tps"), a, p]),
+                (":scheme starting with a digit", [m, (":scheme", "1http"), a, p]),
+                ("request line smuggled in :path", [m, s, a, (":path", "/a HTTP/1.1\r\nHost: evil\r\n\r\nGET /b")]),
+                (":path with a space", [m, s, a, (":path", "/a b")]),
+                (":path with DEL", [m, s, a, (":path", "/a\x7f")]),
+                ("CR/LF in :authority", [m, s, (":authority", "example.com\r\nX-Evil: 1"), p]),
+                ("CR/LF in CONNECT :authority", [(":method", "CONNECT"), (":authority", "example.com:443\r\nX-Evil: 1")]),
+                ("empty :path", [m, s, a, (":path", "")]),
+                ("relative :path", [m, s, a, (":path", "x")]),
+                ("asterisk :path on GET", [m, s, a, (":path", "*")]),
+                ("duplicate :path", [m, s, a, p, (":path", "/other")]),
+                ("duplicate :method", [m, m, s, a, p]),
+                ("pseudo-header after a regular field", [m, s, a, ("accept", "*/*"), p]),
+                ("response pseudo-header", [m, s, a, p, (":status", "200")]),
+                ("unknown pseudo-header", [m, s, a, p, (":protocol", "websocket")]),
+                ("CONNECT with :path", [(":method", "CONNECT"), a, p]),
+                ("CONNECT without :authority", [(":method", "CONNECT")]),
             };
-            var rebuilt = Http2MessageAdapter.ToRequest(fields, isHttps: true);
-            runner.AreEqual("https", rebuilt.Url!.Scheme, "falls back to https");
+            foreach (var (what, fields) in cases)
+            {
+                var rejected = false;
+                try { Http2MessageAdapter.ToRequest(fields); }
+                catch (HttpParseException) { rejected = true; }
+                runner.IsTrue(rejected, $"rejects {what}");
+            }
+
+            runner.AreEqual("OPTIONS", Http2MessageAdapter.ToRequest([(":method", "OPTIONS"), s, a, (":path", "*")]).Method,
+                "OPTIONS * is accepted");
+            var connect = Http2MessageAdapter.ToRequest([(":method", "CONNECT"), (":authority", "example.com:443")]);
+            runner.AreEqual("example.com:443", connect.RequestTarget, "CONNECT carries only :authority");
+            runner.IsTrue(connect.Url is null, "CONNECT has no Url, which the forwarder answers with 400");
             return Task.CompletedTask;
         });
 
