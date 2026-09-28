@@ -462,11 +462,12 @@ public sealed class Http2Connection(Stream stream, Func<HttpRequestData, Cancell
         http2Stream.Request.Body = http2Stream.Body.ToArray();
         // The copy is all the handler reads, and the stream stays registered until the response is
         // sent, so holding the buffer would keep the body in memory twice for that long. Disposing
-        // alone would not free it: a closed MemoryStream keeps its buffer.
+        // alone would not free it: a closed MemoryStream keeps its buffer. The flag goes first, so
+        // nothing that skips dispatched streams can read the buffer once it is disposed.
+        http2Stream.Dispatched = true;
         http2Stream.Body.SetLength(0);
         http2Stream.Body.Capacity = 0;
         http2Stream.Body.Dispose();
-        http2Stream.Dispatched = true;
 
         var task = Task.Run(() => ProcessStreamAsync(http2Stream));
         lock (_inFlightGate) _inFlight.Add(task);
