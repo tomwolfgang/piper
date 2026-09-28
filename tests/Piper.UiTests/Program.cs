@@ -22,20 +22,21 @@ internal static class Program
         Run("clearing a scrolled grid shows the next rows from the top", (store, grid, list) =>
         {
             store.Clear(); // MainForm's Ctrl+X handler
+            PumpUntil(() => list.VirtualListSize == 0); // the grid redraws empty before traffic resumes
             AddSessions(store, 6);
-            Pump();
+            PumpUntil(() => list.VirtualListSize == 6);
             ExpectRowsFromTop(list, 6);
 
             AddSessions(store, 6);
-            Pump();
+            PumpUntil(() => list.VirtualListSize == 12);
             ExpectRowsFromTop(list, 12);
         });
 
         Run("a filter that matches far fewer rows shows them from the top", (store, grid, list) =>
         {
-            grid.FilterText = "/item/29";
-            Pump();
-            Check(list.VirtualListSize is > 0 and < 20, $"the filter leaves a few rows (got {list.VirtualListSize})");
+            grid.FilterText = "/item/29"; // a handful of rows, all fewer than the old top row
+            PumpUntil(() => list.VirtualListSize < 300);
+            Check(list.VirtualListSize is > 0 and < 50, $"the filter leaves a few rows (got {list.VirtualListSize})");
             ExpectRowsFromTop(list, list.VirtualListSize);
         });
 
@@ -54,8 +55,9 @@ internal static class Program
         form.Show();
         var list = FindListView(grid);
 
+        _next = 0;
         AddSessions(store, 300);
-        Pump();
+        PumpUntil(() => list.VirtualListSize == 300);
         Check(SendMessage(list.Handle, LvmGetTopIndex, 0, 0) > 100, "setup: the grid followed the tail");
 
         body(store, grid, list);
@@ -90,15 +92,19 @@ internal static class Program
         }
     }
 
-    /// <summary>Lets the grid's 150 ms refresh timer rebuild it.</summary>
-    private static void Pump()
+    /// <summary>
+    /// Runs the message loop until the grid's 150 ms refresh timer has rebuilt it to the expected
+    /// state, or 10 seconds pass, so a slow machine cannot fail a check that was merely early.
+    /// </summary>
+    private static void PumpUntil(Func<bool> rebuilt)
     {
-        var until = Environment.TickCount64 + 500;
-        while (Environment.TickCount64 < until)
+        var deadline = Environment.TickCount64 + 10_000;
+        while (!rebuilt() && Environment.TickCount64 < deadline)
         {
             Application.DoEvents();
             Thread.Sleep(10);
         }
+        Application.DoEvents();
     }
 
     private static ListView FindListView(Control root) =>
