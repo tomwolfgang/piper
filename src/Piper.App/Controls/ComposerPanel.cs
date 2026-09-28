@@ -634,7 +634,7 @@ public sealed class ComposerPanel : UserControl
 
         try
         {
-            var session = await _executor.ExecuteAsync(template, _inFlight.Token);
+            var session = await _executor.ExecuteAsync(template, _inFlight.Token, labelJsonBody: fromEditor);
             if (fromEditor)
             {
                 // The explicit Composer Send action owns this history. Ctrl+R replays are

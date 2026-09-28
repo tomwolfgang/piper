@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Text;
+using System.Text.Json;
 using Piper.Core.Http;
 using Piper.Core.Sessions;
 
@@ -16,8 +17,13 @@ namespace Piper.Core.Proxy;
 public sealed class RequestExecutor(ProxyOptions options, SessionStore store)
 {
     /// <summary>Sends <paramref name="request"/> and records the exchange as a composed session.</summary>
+    /// <param name="labelJsonBody">
+    /// Adds <c>Content-Type: application/json</c> to an unlabelled JSON body. Only for a request
+    /// typed in the Composer: a replay must reproduce the captured request, missing header and all.
+    /// </param>
     public async Task<Session> ExecuteAsync(
-        HttpRequestData request, CancellationToken ct = default, bool isUpdateCheck = false)
+        HttpRequestData request, CancellationToken ct = default, bool isUpdateCheck = false,
+        bool labelJsonBody = false)
     {
         var session = new Session
         {
@@ -54,7 +60,7 @@ public sealed class RequestExecutor(ProxyOptions options, SessionStore store)
             session.ConnectTime = stopwatch.Elapsed;
             session.ServerEndpoint = upstream.RemoteEndpoint;
 
-            PrepareHeaders(request, url);
+            PrepareHeaders(request, url, labelJsonBody);
 
             await upstream.Stream.WriteAsync(request.ToOriginFormBytes(), ct).ConfigureAwait(false);
             await upstream.Stream.FlushAsync(ct).ConfigureAwait(false);
@@ -87,7 +93,7 @@ public sealed class RequestExecutor(ProxyOptions options, SessionStore store)
         $"Piper/{System.Reflection.Assembly.GetEntryAssembly()?.GetName().Version?.ToString(3) ?? "0.0.0"}";
 
     /// <summary>Fills in only the headers a request cannot go out without, leaving the rest untouched.</summary>
-    private static void PrepareHeaders(HttpRequestData request, Uri url)
+    private static void PrepareHeaders(HttpRequestData request, Uri url, bool labelJsonBody)
     {
         // Always overwritten, never just filled in when absent: editing the URL after loading a
         // captured session (or after typing a stale Host by hand) must not leave a Host that
@@ -105,10 +111,35 @@ public sealed class RequestExecutor(ProxyOptions options, SessionStore store)
         if (request.Body.Length > 0)
         {
             request.Headers.Set("Content-Length", request.Body.Length.ToString());
+
+            // Also a default: the Composer's starting headers name no Content-Type, and origins
+            // (Express json(), ASP.NET [FromBody], ...) treat an unlabelled JSON body as no body.
+            // Runs after the connect await, so a large body is scanned off the UI thread.
+            if (labelJsonBody && !request.Headers.Contains("Content-Type") && IsJsonDocument(request.Body))
+                request.Headers.Add("Content-Type", "application/json");
         }
         else if (request.Headers.Contains("Content-Length"))
         {
             request.Headers.Set("Content-Length", "0");
+        }
+    }
+
+    /// <summary>True for a single, complete JSON object or array, the only bodies worth labelling.</summary>
+    /// <remarks>A forward-only reader: no DOM is built, and its default depth limit bounds nesting.</remarks>
+    private static bool IsJsonDocument(byte[] body)
+    {
+        try
+        {
+            var reader = new Utf8JsonReader(body);
+            if (!reader.Read() || reader.TokenType is not (JsonTokenType.StartObject or JsonTokenType.StartArray))
+                return false;
+            reader.Skip();
+            // Throws on anything but whitespace after the root value.
+            return !reader.Read();
+        }
+        catch (JsonException)
+        {
+            return false;
         }
     }
 

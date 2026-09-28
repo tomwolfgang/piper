@@ -561,6 +561,7 @@ await ConnectionLifetimeTests.RunAsync(runner);
 await StreamingResponseTests.RunAsync(runner);
 await BoundedCaptureTests.RunAsync(runner);
 await ComposerRawRoundTripTests.RunAsync(runner);
+await ComposerBodyTests.RunAsync(runner);
 await JsonEditingTests.RunAsync(runner);
 await HostRemappingTests.RunAsync(runner);
 await SessionStoreAdmissionTests.RunAsync(runner);
