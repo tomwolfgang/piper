@@ -12,10 +12,6 @@ using Piper.Core.Sessions;
 
 namespace Piper.Core.Proxy;
 
-/// <summary>
-/// HTTP/1.1 forward proxy with optional TLS termination. One task per accepted client
-/// connection; each connection loops over keep-alive requests until the peer closes.
-/// </summary>
 /// <summary>Why <see cref="ProxyServer.Start"/> could not listen, as far as the bind error says.</summary>
 public enum ProxyStartFailure
 {
@@ -29,6 +25,10 @@ public enum ProxyStartFailure
     PortDenied,
 }
 
+/// <summary>
+/// HTTP/1.1 forward proxy with optional TLS termination. One task per accepted client
+/// connection; each connection loops over keep-alive requests until the peer closes.
+/// </summary>
 public sealed class ProxyServer : IAsyncDisposable
 {
     /// <summary>Hop-by-hop headers that must not be forwarded (RFC 9110 7.6.1).</summary>
