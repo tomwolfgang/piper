@@ -85,6 +85,20 @@ public static class AutoResponderSettingsStore
     public static string ResponseDirectory => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Piper", "autoresponder");
 
+    /// <summary>
+    /// Whether <paramref name="settings"/> is within the limits <see cref="Save"/> enforces:
+    /// <see cref="AutoResponderSaveStatus.Saved"/> when it is, otherwise the limit it breaks. For a
+    /// caller that must refuse a change before applying it, not after it can no longer be saved.
+    /// </summary>
+    public static AutoResponderSaveStatus CheckLimits(AutoResponderSettings settings)
+    {
+        ArgumentNullException.ThrowIfNull(settings);
+        if (settings.Rules.Count > MaxRules) return AutoResponderSaveStatus.TooManyRules;
+        return JsonSerializer.SerializeToUtf8Bytes(settings, ExportOptions).LongLength > MaxFileBytes
+            ? AutoResponderSaveStatus.TooLarge
+            : AutoResponderSaveStatus.Saved;
+    }
+
     public static AutoResponderSaveResult Save(AutoResponderSettings settings, string? path = null)
     {
         ArgumentNullException.ThrowIfNull(settings);
@@ -112,7 +126,7 @@ public static class AutoResponderSettingsStore
             temporary = $"{path}.{Guid.NewGuid():N}.tmp";
             File.WriteAllBytes(temporary, bytes);
             File.Move(temporary, path, overwrite: true);
-            if (usingDefaultPath) SweepStaleTemporaries(path);
+            if (usingDefaultPath) SweepOnce(path, ref s_swept);
             return new AutoResponderSaveResult(AutoResponderSaveStatus.Saved);
         }
         catch (Exception ex) when (IsFileFailure(ex))
@@ -149,7 +163,7 @@ public static class AutoResponderSettingsStore
             if (settings is null) return new AutoResponderLoadResult(AutoResponderLoadStatus.Malformed);
 
             EnsureUniqueIds(settings);
-            if (usingDefaultPath) SweepStaleTemporaries(path);
+            if (usingDefaultPath) SweepOnce(path, ref s_swept);
             return new AutoResponderLoadResult(AutoResponderLoadStatus.Loaded, settings);
         }
         catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException)
@@ -238,6 +252,19 @@ public static class AutoResponderSettingsStore
     /// what a save leaves behind when the process is killed between writing and moving. Only that
     /// exact shape is touched, and a recent one may be another instance's save in flight. Best effort.
     /// </summary>
+    private static int s_swept;
+
+    /// <summary>
+    /// Runs <see cref="SweepStaleTemporaries"/> the first time it is called with a given
+    /// <paramref name="gate"/>, so a process enumerates the folder once, not on every edit.
+    /// </summary>
+    internal static bool SweepOnce(string path, ref int gate)
+    {
+        if (Interlocked.Exchange(ref gate, 1) != 0) return false;
+        SweepStaleTemporaries(path);
+        return true;
+    }
+
     public static void SweepStaleTemporaries(string path)
     {
         try

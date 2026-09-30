@@ -873,6 +873,7 @@ internal static class Strings
             AutoResponderLoadStatus.Missing => I18n.T("autoResponder.loadMissing"),
             AutoResponderLoadStatus.Malformed when result.Detail is null => UnreadableRuleSet,
             AutoResponderLoadStatus.Malformed => I18n.T("autoResponder.loadMalformed", ("detail", result.Detail)),
+            AutoResponderLoadStatus.Unreadable when result.Detail is null => UnreadableRuleSet,
             AutoResponderLoadStatus.Unreadable => I18n.T("autoResponder.loadUnreadable", ("detail", result.Detail)),
             AutoResponderLoadStatus.TooLarge => I18n.T("autoResponder.loadTooLarge", ("limit", MaxFileMegabytes)),
             AutoResponderLoadStatus.TooManyRules =>
@@ -908,7 +909,9 @@ internal static class Strings
         public static string ImportReplace => I18n.T("autoResponder.importReplace");
         public static string ImportAppend => I18n.T("autoResponder.importAppend");
         public static string ImportTooManyRules(int count) =>
-            I18n.T("autoResponder.importTooManyRules", ("added", count), ("limit", AutoResponderSettingsStore.MaxRules));
+            I18n.T("autoResponder.importTooManyRules", ("count", count), ("limit", AutoResponderSettingsStore.MaxRules));
+
+        public static string ImportTooLarge => I18n.T("autoResponder.importTooLarge", ("limit", MaxFileMegabytes));
 
         public static string ChooseFileCaption => I18n.T("autoResponder.chooseFileCaption");
 

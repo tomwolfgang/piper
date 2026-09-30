@@ -747,10 +747,18 @@ public sealed class AutoResponderPanel : UserControl
 
             case ImportChoice.Append:
                 var merged = Settings.Appended(imported);
-                if (merged.Rules.Count > AutoResponderSettingsStore.MaxRules)
+
+                // Refused here, before it is applied: a set over either limit is one Save refuses,
+                // so every later edit would fail to persist.
+                var tooBig = AutoResponderSettingsStore.CheckLimits(merged) switch
                 {
-                    MessageBox.Show(this, Strings.AutoResponder.ImportTooManyRules(imported.Rules.Count),
-                        Strings.App.Name, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    AutoResponderSaveStatus.TooManyRules => Strings.AutoResponder.ImportTooManyRules(imported.Rules.Count),
+                    AutoResponderSaveStatus.TooLarge => Strings.AutoResponder.ImportTooLarge,
+                    _ => null,
+                };
+                if (tooBig is not null)
+                {
+                    MessageBox.Show(this, tooBig, Strings.App.Name, MessageBoxButtons.OK, MessageBoxIcon.Warning);
                     return;
                 }
 

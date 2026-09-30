@@ -13,6 +13,8 @@ internal static class AutoResponderSettingsStoreTests
         await RunRuleCountDuringReadAsync(runner);
         await RunStaleTemporariesAsync(runner);
         await RunUserFacingTextAsync(runner);
+        await RunAppendLimitsAsync(runner);
+        await RunSweepOnceAsync(runner);
         await RunSetAsideAsync(runner);
         await RunAppendAsync(runner);
         await RunHostileExpressionsAsync(runner);
@@ -444,6 +446,19 @@ internal static class AutoResponderSettingsStoreTests
             var tooMany = Piper.App.Strings.AutoResponder.ImportTooManyRules(5001);
             runner.IsTrue(!tooMany.StartsWith("autoResponder.", StringComparison.Ordinal), "the too-many message is not a raw key");
             runner.IsTrue(tooMany.Contains(AutoResponderSettingsStore.MaxRules.ToString("N0")), "and names the limit");
+            runner.IsTrue(tooMany.Contains(" rules would"), "several rules are plural");
+
+            var one = Piper.App.Strings.AutoResponder.ImportTooManyRules(1);
+            runner.IsTrue(!one.StartsWith("autoResponder.", StringComparison.Ordinal), "the singular message is not a raw key");
+            runner.IsTrue(one.Contains("1 rule would") && !one.Contains("rules would"), "one rule is singular");
+
+            var tooLarge = Piper.App.Strings.AutoResponder.ImportTooLarge;
+            runner.IsTrue(!tooLarge.StartsWith("autoResponder.", StringComparison.Ordinal), "the too-large message is not a raw key");
+            runner.IsTrue(tooLarge.Contains((AutoResponderSettingsStore.MaxFileBytes / (1024 * 1024)).ToString("N0")), "and names the size limit");
+
+            runner.AreEqual(Piper.App.Strings.AutoResponder.UnreadableRuleSet,
+                Piper.App.Strings.AutoResponder.LoadProblem(new AutoResponderLoadResult(AutoResponderLoadStatus.Unreadable)),
+                "an unreadable file without a detail falls back to the generic sentence");
 
             foreach (var (text, what) in new[] { ("null", "a null document"), ("""{"Rules":5}""", "Rules that is not an array") })
             {
@@ -470,6 +485,62 @@ internal static class AutoResponderSettingsStoreTests
         }
         finally
         {
+            DeleteAll(path);
+        }
+
+        return Task.CompletedTask;
+    });
+
+    // Two sets that each save fine can add up to one that Save refuses, and once such a set is applied
+    // every later edit fails to persist. The import checks the merged set first.
+    private static Task RunAppendLimitsAsync(TestRunner runner) => runner.RunAsync("AutoResponder import: append checks the limits Save enforces", () =>
+    {
+        static AutoResponderSettings WithBody(int bytes) => new()
+        {
+            Rules = [new AutoResponderRule { Match = "/x", Action = "*inline", Body = new string('b', bytes) }],
+        };
+
+        var current = WithBody(5 * 1024 * 1024);
+        var imported = WithBody(5 * 1024 * 1024);
+        runner.AreEqual(AutoResponderSaveStatus.Saved, AutoResponderSettingsStore.CheckLimits(current), "each set is within the limits");
+        runner.AreEqual(AutoResponderSaveStatus.Saved, AutoResponderSettingsStore.CheckLimits(imported), "on its own");
+        runner.AreEqual(AutoResponderSaveStatus.TooLarge, AutoResponderSettingsStore.CheckLimits(current.Appended(imported)),
+            "but two 5 MB sets together are too large to save");
+
+        var many = new AutoResponderSettings
+        {
+            Rules = [.. Enumerable.Range(0, AutoResponderSettingsStore.MaxRules).Select(_ => new AutoResponderRule())],
+        };
+        runner.AreEqual(AutoResponderSaveStatus.Saved, AutoResponderSettingsStore.CheckLimits(many), "a set at the rule cap is fine");
+        runner.AreEqual(AutoResponderSaveStatus.TooManyRules,
+            AutoResponderSettingsStore.CheckLimits(many.Appended(new AutoResponderSettings { Rules = [new AutoResponderRule()] })),
+            "one more rule is over it");
+        return Task.CompletedTask;
+    });
+
+    // The sweep enumerates a folder on the UI thread; a process needs it once, not per edit.
+    private static Task RunSweepOnceAsync(TestRunner runner) => runner.RunAsync("AutoResponder rules file: the stale-temporary sweep runs once", () =>
+    {
+        var path = TempPath();
+        var first = $"{path}.{Guid.NewGuid():N}.tmp";
+        var second = $"{path}.{Guid.NewGuid():N}.tmp";
+        try
+        {
+            File.WriteAllText(first, "x");
+            File.SetLastWriteTimeUtc(first, DateTime.UtcNow.AddDays(-1));
+
+            var gate = 0;
+            runner.IsTrue(AutoResponderSettingsStore.SweepOnce(path, ref gate), "the first call sweeps");
+            runner.IsTrue(!File.Exists(first), "removing the stale temporary");
+
+            File.WriteAllText(second, "x");
+            File.SetLastWriteTimeUtc(second, DateTime.UtcNow.AddDays(-1));
+            runner.IsTrue(!AutoResponderSettingsStore.SweepOnce(path, ref gate), "a later call does nothing");
+            runner.IsTrue(File.Exists(second), "and enumerates nothing");
+        }
+        finally
+        {
+            foreach (var file in new[] { first, second }) if (File.Exists(file)) File.Delete(file);
             DeleteAll(path);
         }
 

@@ -680,7 +680,9 @@
     "importChoiceText": "The list already has rules. Replace them with the imported ones, or add the imported ones after them?",
     "importReplace": "Replace",
     "importAppend": "Append",
-    "importTooManyRules": "Adding {{added, N0}} rules would go past the {{limit, N0}} Piper allows. Remove some rules first, or replace the list instead.",
+    "importTooManyRules_one": "Adding {{count, N0}} rule would go past the {{limit, N0}} Piper allows. Remove some rules first, or replace the list instead.",
+    "importTooManyRules_other": "Adding {{count, N0}} rules would go past the {{limit, N0}} Piper allows. Remove some rules first, or replace the list instead.",
+    "importTooLarge": "The combined rules would be larger than the {{limit, N0}} MB Piper can save. Remove some rules first, or replace the list instead.",
     "chooseFileCaption": "Choose the file to serve",
 
     "helpCaption": "AutoResponder",
