@@ -115,6 +115,9 @@ internal static class SazImportLimitTests
                     runner.AreEqual(SazImportFailure.Unreadable, result.Failure, $"{label} is unreadable");
                     runner.AreEqual(0, result.Sessions.Count, $"{label} imports nothing");
                     runner.IsTrue(result.Warnings.Count >= 1, $"{label} is explained");
+                    runner.IsTrue(result.Warnings.All(w => !w.Contains(Path.GetTempPath(), StringComparison.OrdinalIgnoreCase)),
+                        $"{label}: the logged warnings do not name the local path");
+                    runner.IsTrue(!string.IsNullOrEmpty(result.FailureDetail), $"{label}: the detail is kept for the dialog");
                 }
             }
             finally

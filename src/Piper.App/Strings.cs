@@ -238,8 +238,13 @@ internal static class Strings
             I18n.T("sazImport.tooManyEntries", ("fileName", fileName), ("limit", limit));
         public static string TooLarge(string fileName, string limit) =>
             I18n.T("sazImport.tooLarge", ("fileName", fileName), ("limit", limit));
+        public static string MoreProblems(int count) => I18n.T("sazImport.moreProblems", ("count", count));
+        public static string UnreadableLogged(string fileName) =>
+            I18n.T("sazImport.unreadableLogged", ("fileName", fileName));
         public static string Failed(string fileName, string message) =>
             I18n.T("sazImport.failed", ("fileName", fileName), ("message", message));
+        public static string FailedLogged(string fileName, string errorType) =>
+            I18n.T("sazImport.failedLogged", ("fileName", fileName), ("errorType", errorType));
     }
 
     public static class Certificates
