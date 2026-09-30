@@ -343,17 +343,19 @@ public sealed class MainForm : Form, IMessageFilter
         base.OnShown(e);
         _mainSplit.SplitterDistance = (int)(_mainSplit.Width * 0.55);
 
-        if (_pendingRulesNotice is { } rulesNotice)
-        {
-            _pendingRulesNotice = null;
-            MessageBox.Show(this, rulesNotice, Strings.App.Name, MessageBoxButtons.OK, MessageBoxIcon.Warning);
-        }
-
         // A run that was killed, crashed, or was still open when Windows shut down leaves the
         // machine pointed at a Piper that is no longer listening, which the user sees as having
         // lost their connection. Undo it before anything else touches the settings.
         if (SystemProxy.RestoreLeftovers() is { } leftover)
             AppendLog(Strings.Log.RestoredLeftoverProxy(leftover));
+
+        // After the restore, not before: this dialog stays up until it is dismissed, and behind it
+        // the user's connection must already be back.
+        if (_pendingRulesNotice is { } rulesNotice)
+        {
+            _pendingRulesNotice = null;
+            MessageBox.Show(this, rulesNotice, Strings.App.Name, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
 
         AskAnalyticsConsentIfNeeded();
 

@@ -10,6 +10,8 @@ internal static class AutoResponderSettingsStoreTests
         await RunHostileContentAsync(runner);
         await RunSizeBoundsAsync(runner);
         await RunSaveFailureAsync(runner);
+        await RunRuleCountDuringReadAsync(runner);
+        await RunStaleTemporariesAsync(runner);
         await RunSetAsideAsync(runner);
         await RunAppendAsync(runner);
         await RunHostileExpressionsAsync(runner);
@@ -319,6 +321,94 @@ internal static class AutoResponderSettingsStoreTests
         {
             DeleteAll(path);
             if (File.Exists(blocker)) File.Delete(blocker);
+        }
+
+        return Task.CompletedTask;
+    });
+
+    // The rule cap is only a bound if it stops the read: a file of empty rules just under the byte cap
+    // holds millions of them, and each used to be allocated (with a generated id) before the count
+    // was looked at.
+    private static Task RunRuleCountDuringReadAsync(TestRunner runner) => runner.RunAsync("AutoResponder rules file: the rule cap stops the read", () =>
+    {
+        var path = TempPath();
+        try
+        {
+            var head = Encoding.UTF8.GetBytes("{\"Rules\":[");
+            var tail = Encoding.UTF8.GetBytes("]}");
+            var bytes = new byte[AutoResponderSettingsStore.MaxFileBytes - 16];
+            head.CopyTo(bytes, 0);
+            tail.CopyTo(bytes, bytes.Length - tail.Length);
+            Array.Fill(bytes, (byte)' ', head.Length, bytes.Length - head.Length - tail.Length);
+            var commaCount = (bytes.Length - head.Length - tail.Length - 2) / 3;
+            var at = head.Length;
+            for (var i = 0; i < commaCount; i++)
+            {
+                bytes[at++] = (byte)'{';
+                bytes[at++] = (byte)'}';
+                bytes[at++] = (byte)',';
+            }
+
+            bytes[at++] = (byte)'{';
+            bytes[at] = (byte)'}';
+            File.WriteAllBytes(path, bytes);
+
+            var allocatedBefore = GC.GetAllocatedBytesForCurrentThread();
+            var (result, elapsed) = Timed(() => AutoResponderSettingsStore.Load(path));
+            var allocated = GC.GetAllocatedBytesForCurrentThread() - allocatedBefore;
+
+            runner.AreEqual(AutoResponderLoadStatus.TooManyRules, result?.Status ?? AutoResponderLoadStatus.Loaded,
+                "a file just under the byte cap full of {} is TooManyRules");
+            runner.IsTrue(result?.Settings is null, "and none of it is used");
+            runner.IsTrue(elapsed < TimeSpan.FromSeconds(5), $"quickly ({elapsed.TotalMilliseconds:N0} ms)");
+
+            // Timed runs on another thread, so measure the same load here for its allocations.
+            allocatedBefore = GC.GetAllocatedBytesForCurrentThread();
+            AutoResponderSettingsStore.Load(path);
+            allocated = GC.GetAllocatedBytesForCurrentThread() - allocatedBefore;
+            runner.IsTrue(allocated < 100L * 1024 * 1024,
+                $"without building millions of rules ({allocated / (1024 * 1024):N0} MB allocated)");
+        }
+        finally
+        {
+            DeleteAll(path);
+        }
+
+        return Task.CompletedTask;
+    });
+
+    // A hard kill between writing the temporary file and moving it leaves the temporary behind, and
+    // nothing else ever removes it.
+    private static Task RunStaleTemporariesAsync(TestRunner runner) => runner.RunAsync("AutoResponder rules file: stale temporaries are swept", () =>
+    {
+        var path = TempPath();
+        var directory = Path.GetDirectoryName(path)!;
+        var name = Path.GetFileName(path);
+        var stale = $"{path}.{Guid.NewGuid():N}.tmp";
+        var fresh = $"{path}.{Guid.NewGuid():N}.tmp";
+        var otherRules = Path.Combine(directory, $"{name}.notaguid.tmp");
+        var unrelated = Path.Combine(directory, $"{name}.keep");
+        var otherFile = Path.Combine(directory, $"other-{name}.{Guid.NewGuid():N}.tmp");
+        try
+        {
+            foreach (var file in new[] { stale, fresh, otherRules, unrelated, otherFile }) File.WriteAllText(file, "x");
+            File.SetLastWriteTimeUtc(stale, DateTime.UtcNow.AddDays(-1));
+            File.SetLastWriteTimeUtc(otherRules, DateTime.UtcNow.AddDays(-1));
+            File.SetLastWriteTimeUtc(unrelated, DateTime.UtcNow.AddDays(-1));
+            File.SetLastWriteTimeUtc(otherFile, DateTime.UtcNow.AddDays(-1));
+
+            runner.IsTrue(AutoResponderSettingsStore.Save(new AutoResponderSettings(), path).Succeeded, "saved");
+            runner.IsTrue(!File.Exists(stale), "an old temporary from a killed save is removed");
+            runner.IsTrue(File.Exists(fresh), "a recent one may belong to a save in progress and stays");
+            runner.IsTrue(File.Exists(otherRules), "a file that only looks like one stays");
+            runner.IsTrue(File.Exists(unrelated), "an unrelated sibling stays");
+            runner.IsTrue(File.Exists(otherFile), "another file's temporary stays");
+        }
+        finally
+        {
+            DeleteAll(path);
+            foreach (var file in new[] { stale, fresh, otherRules, unrelated, otherFile })
+                if (File.Exists(file)) File.Delete(file);
         }
 
         return Task.CompletedTask;

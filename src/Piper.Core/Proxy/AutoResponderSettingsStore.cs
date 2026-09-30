@@ -108,6 +108,7 @@ public static class AutoResponderSettingsStore
             temporary = $"{path}.{Guid.NewGuid():N}.tmp";
             File.WriteAllBytes(temporary, bytes);
             File.Move(temporary, path, overwrite: true);
+            SweepStaleTemporaries(path);
             return new AutoResponderSaveResult(AutoResponderSaveStatus.Saved);
         }
         catch (Exception ex) when (IsFileFailure(ex))
@@ -119,6 +120,7 @@ public static class AutoResponderSettingsStore
 
     public static AutoResponderLoadResult Load(string? path = null)
     {
+        var usingDefaultPath = path is null;
         path ??= DefaultPath;
         try
         {
@@ -129,17 +131,31 @@ public static class AutoResponderSettingsStore
             // File.ReadAllText used to drop a UTF-8 byte order mark that Notepad and friends write;
             // the JSON reader treats it as garbage, so it is dropped here instead.
             var start = length >= 3 && content[0] == 0xEF && content[1] == 0xBB && content[2] == 0xBF ? 3 : 0;
-            var settings = JsonSerializer.Deserialize<AutoResponderSettings>(content.AsSpan(start, length - start));
+            AutoResponderSettings? settings;
+            try
+            {
+                settings = JsonSerializer.Deserialize<AutoResponderSettings>(content.AsSpan(start, length - start));
+            }
+            catch (ArgumentException ex)
+            {
+                // From a property setter given hostile content, not from the file system.
+                return new AutoResponderLoadResult(AutoResponderLoadStatus.Malformed, Detail: ex.Message);
+            }
+
             if (settings is null)
                 return new AutoResponderLoadResult(AutoResponderLoadStatus.Malformed, Detail: "the document is null");
-            if (settings.Rules.Count > MaxRules) return new AutoResponderLoadResult(AutoResponderLoadStatus.TooManyRules);
 
             EnsureUniqueIds(settings);
+            if (usingDefaultPath) SweepStaleTemporaries(path);
             return new AutoResponderLoadResult(AutoResponderLoadStatus.Loaded, settings);
         }
         catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException)
         {
             return new AutoResponderLoadResult(AutoResponderLoadStatus.Missing);
+        }
+        catch (RuleCountExceededException)
+        {
+            return new AutoResponderLoadResult(AutoResponderLoadStatus.TooManyRules);
         }
         catch (JsonException ex)
         {
@@ -209,6 +225,43 @@ public static class AutoResponderSettingsStore
                 seen.Add(rule.Id);
             }
     }
+
+    /// <summary>
+    /// Removes <c>{file}.{32 hex digits}.tmp</c> siblings older than <see cref="StaleTemporaryAge"/>:
+    /// what a save leaves behind when the process is killed between writing and moving. Only that
+    /// exact shape is touched, and a recent one may be another instance's save in flight. Best effort.
+    /// </summary>
+    private static void SweepStaleTemporaries(string path)
+    {
+        try
+        {
+            var directory = Path.GetDirectoryName(Path.GetFullPath(path));
+            if (string.IsNullOrEmpty(directory)) return;
+
+            var prefix = Path.GetFileName(path) + ".";
+            foreach (var candidate in Directory.EnumerateFiles(directory, prefix + "*.tmp"))
+            {
+                var middle = Path.GetFileName(candidate).AsSpan(prefix.Length);
+                middle = middle[..^".tmp".Length];
+                if (middle.Length != 32 || !IsHex(middle)) continue;
+                if (DateTime.UtcNow - File.GetLastWriteTimeUtc(candidate) < StaleTemporaryAge) continue;
+                DeleteQuietly(candidate);
+            }
+        }
+        catch (Exception ex) when (IsFileFailure(ex))
+        {
+            // Housekeeping only: the caller's own work has already succeeded.
+        }
+
+        static bool IsHex(ReadOnlySpan<char> text)
+        {
+            foreach (var c in text)
+                if (!char.IsAsciiHexDigit(c)) return false;
+            return true;
+        }
+    }
+
+    private static readonly TimeSpan StaleTemporaryAge = TimeSpan.FromMinutes(10);
 
     private static bool IsFileFailure(Exception ex) =>
         ex is IOException or UnauthorizedAccessException or NotSupportedException or ArgumentException

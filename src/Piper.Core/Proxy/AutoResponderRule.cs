@@ -1,3 +1,5 @@
+using System.Text.Json.Serialization;
+
 namespace Piper.Core.Proxy;
 
 /// <summary>
@@ -15,7 +17,13 @@ public sealed class AutoResponderRule
     /// Stable across edits so per-rule hit counts survive a change to the rule's text. Generated on
     /// creation; rules restored from disk keep the id they were saved with.
     /// </summary>
-    public string Id { get; set; } = Guid.NewGuid().ToString("N");
+    public string Id
+    {
+        get => _id;
+        set => _id = string.IsNullOrWhiteSpace(value) ? Guid.NewGuid().ToString("N") : value;
+    }
+
+    private string _id = Guid.NewGuid().ToString("N");
 
     public bool Enabled { get; set; } = true;
 
@@ -67,6 +75,7 @@ public sealed class AutoResponderSettings
     /// nulls: <c>"Rules": null</c> and <c>[null]</c> both deserialise happily from a hand-edited file
     /// and would otherwise throw on the first read, which for the saved file is the app's constructor.
     /// </summary>
+    [JsonConverter(typeof(AutoResponderRuleListConverter))]
     public List<AutoResponderRule> Rules
     {
         get => _rules;
