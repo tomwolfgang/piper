@@ -229,6 +229,15 @@ internal static class Strings
         public static string SaveCaption => I18n.T("sazImport.saveCaption");
         public static string SaveFilter => I18n.T("sazImport.saveFilter");
         public static string SuggestedFileName(DateTime now) => I18n.T("sazImport.suggestedFileName", ("now", now));
+
+        public static string Unreadable(string fileName, string detail) =>
+            I18n.T("sazImport.unreadable", ("fileName", fileName), ("detail", detail));
+        public static string TooManyEntries(string fileName, int limit) =>
+            I18n.T("sazImport.tooManyEntries", ("fileName", fileName), ("limit", limit));
+        public static string TooLarge(string fileName, string limit) =>
+            I18n.T("sazImport.tooLarge", ("fileName", fileName), ("limit", limit));
+        public static string Failed(string fileName, string message) =>
+            I18n.T("sazImport.failed", ("fileName", fileName), ("message", message));
     }
 
     public static class Certificates
@@ -321,6 +330,9 @@ internal static class Strings
         public static string ImportedSessions(int count, string fileName, bool intoComposer) => intoComposer
             ? I18n.T("log.importedSessionsToComposer", ("count", count), ("fileName", fileName))
             : I18n.T("log.importedSessions", ("count", count), ("fileName", fileName));
+
+        public static string ImportedSessionsDropped(int count, int capacity) =>
+            I18n.T("log.importedSessionsDropped", ("count", count), ("capacity", capacity));
 
         public static string SazImportWarning(string fileName, string warning) =>
             I18n.T("log.sazImportWarning", ("fileName", fileName), ("warning", warning));

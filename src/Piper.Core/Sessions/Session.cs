@@ -84,6 +84,12 @@ public sealed class Session
     /// <summary>Set when this session was produced by the Composer rather than captured.</summary>
     public bool IsComposed { get; set; }
 
+    /// <summary>
+    /// Set when the user opened this session from a capture file. Like <see cref="IsComposed"/> it is
+    /// a deliberate act, not intercepted traffic, so the capture scope and filterset do not apply.
+    /// </summary>
+    public bool IsImported { get; set; }
+
     /// <summary>True when Piper itself checked for a published update.</summary>
     public bool IsUpdateCheck { get; set; }
 

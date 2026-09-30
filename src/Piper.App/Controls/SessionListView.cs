@@ -842,8 +842,11 @@ public sealed class SessionListView : UserControl
             // A check initiated by Piper must remain auditable in the grid. It is deliberately
             // visible even when an ad-hoc or capture-scope filter would otherwise omit it.
             if (!session.IsUpdateCheck && !_query.IsEmpty && !_query.Matches(session)) continue;
-            if (!session.IsUpdateCheck && _visibilityFilter is not null && !_visibilityFilter(session)) continue;
-            if (!session.IsUpdateCheck && _filtersetFilter is not null && !_filtersetFilter(session)) continue;
+            // The capture scope and the applied filterset decide what is captured. A session the user
+            // opened from a file was not captured, and dropping it here would make the import look
+            // like it did nothing. The search box and hidden hosts are the user's own view and still apply.
+            if (!session.IsUpdateCheck && !session.IsImported && _visibilityFilter is not null && !_visibilityFilter(session)) continue;
+            if (!session.IsUpdateCheck && !session.IsImported && _filtersetFilter is not null && !_filtersetFilter(session)) continue;
             if (!session.IsUpdateCheck && _sessionHiddenHostsFilter is not null && !_sessionHiddenHostsFilter(session)) continue;
             _visible[writeIndex++] = session;
         }
