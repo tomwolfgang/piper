@@ -233,13 +233,16 @@ public sealed class MainForm : Form, IMessageFilter
         {
             var settings = _autoResponder.Settings;
             _options.AutoResponder.Apply(settings);
-            AutoResponderSettingsStore.Save(settings);
+            ReportAutoResponderSave(AutoResponderSettingsStore.Save(settings));
             _rightTabs.SetTabChecked(_autoResponderPage, settings.Enabled && settings.Rules.Count > 0);
             foreach (var warning in _options.AutoResponder.Warnings) AppendLog(Strings.Log.AutoResponderWarning(warning));
         };
 
-        if (AutoResponderSettingsStore.Load() is { } autoResponderSettings)
+        var savedRules = AutoResponderSettingsStore.Load();
+        if (savedRules.Settings is { } autoResponderSettings)
             _autoResponder.ApplySettings(autoResponderSettings);
+        else if (savedRules.Status != AutoResponderLoadStatus.Missing)
+            ReportUnusableSavedRules(savedRules);
 
         _sessionList.SendToAutoResponderRequested += (_, session) =>
         {
@@ -292,10 +295,59 @@ public sealed class MainForm : Form, IMessageFilter
         Palette.ApplyWindowChrome(this);
     }
 
+    /// <summary>
+    /// A problem with the AutoResponder rules file found while the constructor ran. A dialog there
+    /// would run before the window is shown, so the log gets it at once and the user gets it in
+    /// <see cref="OnShown"/>.
+    /// </summary>
+    private string? _pendingRulesNotice;
+
+    /// <summary>True while saving the rules keeps failing, so one broken disk is reported once, not per keystroke.</summary>
+    private bool _autoResponderSaveFailing;
+
+    private void ReportUnusableSavedRules(AutoResponderLoadResult result)
+    {
+        var path = AutoResponderSettingsStore.DefaultPath;
+        var problem = Strings.AutoResponder.LoadProblem(result);
+
+        // Only a file that is present but wrong is moved aside. One that is merely locked or
+        // unreadable right now is left alone: it may be fine a minute later.
+        var keptAs = result.Status == AutoResponderLoadStatus.Unreadable ? null : AutoResponderSettingsStore.SetAside(path);
+        _pendingRulesNotice = keptAs is null
+            ? Strings.AutoResponder.StartedWithoutRulesInPlace(problem, path)
+            : Strings.AutoResponder.StartedWithoutRulesKept(problem, keptAs);
+        AppendLog(_pendingRulesNotice);
+    }
+
+    private void ReportAutoResponderSave(AutoResponderSaveResult result)
+    {
+        if (result.Succeeded)
+        {
+            _autoResponderSaveFailing = false;
+            return;
+        }
+
+        if (_autoResponderSaveFailing) return;
+        _autoResponderSaveFailing = true;
+
+        var message = Strings.AutoResponder.SaveFailed(AutoResponderSettingsStore.DefaultPath, result);
+        AppendLog(message);
+
+        // Rules are first saved while the constructor applies the saved set, before the window exists.
+        if (Visible) MessageBox.Show(this, message, Strings.App.Name, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        else _pendingRulesNotice = _pendingRulesNotice is null ? message : $"{_pendingRulesNotice}\n\n{message}";
+    }
+
     protected override void OnShown(EventArgs e)
     {
         base.OnShown(e);
         _mainSplit.SplitterDistance = (int)(_mainSplit.Width * 0.55);
+
+        if (_pendingRulesNotice is { } rulesNotice)
+        {
+            _pendingRulesNotice = null;
+            MessageBox.Show(this, rulesNotice, Strings.App.Name, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
 
         // A run that was killed, crashed, or was still open when Windows shut down leaves the
         // machine pointed at a Piper that is no longer listening, which the user sees as having

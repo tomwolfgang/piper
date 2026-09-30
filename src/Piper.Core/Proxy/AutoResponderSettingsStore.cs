@@ -2,6 +2,55 @@ using System.Text.Json;
 
 namespace Piper.Core.Proxy;
 
+/// <summary>Why a rule set could not be read.</summary>
+public enum AutoResponderLoadStatus
+{
+    Loaded,
+
+    /// <summary>There is no file. Not a problem: nothing was ever saved.</summary>
+    Missing,
+
+    /// <summary>The file could not be opened or read (locked, denied, a directory).</summary>
+    Unreadable,
+
+    /// <summary>The file is not a JSON rule set.</summary>
+    Malformed,
+
+    /// <summary>The file is larger than <see cref="AutoResponderSettingsStore.MaxFileBytes"/>.</summary>
+    TooLarge,
+
+    /// <summary>The file holds more than <see cref="AutoResponderSettingsStore.MaxRules"/> rules.</summary>
+    TooManyRules,
+}
+
+/// <param name="Status">Whether the rules were read, and if not, why.</param>
+/// <param name="Settings">The rules when <paramref name="Status"/> is <see cref="AutoResponderLoadStatus.Loaded"/>.</param>
+/// <param name="Detail">The system's or parser's wording, for <c>Unreadable</c> and <c>Malformed</c>.</param>
+public sealed record AutoResponderLoadResult(
+    AutoResponderLoadStatus Status, AutoResponderSettings? Settings = null, string? Detail = null);
+
+/// <summary>Why a rule set could not be written.</summary>
+public enum AutoResponderSaveStatus
+{
+    Saved,
+
+    /// <summary>The disk or the path refused the write. The previous file is untouched.</summary>
+    Failed,
+
+    /// <summary>More rules than <see cref="AutoResponderSettingsStore.MaxRules"/>: it could not be loaded back.</summary>
+    TooManyRules,
+
+    /// <summary>Larger than <see cref="AutoResponderSettingsStore.MaxFileBytes"/>: it could not be loaded back.</summary>
+    TooLarge,
+}
+
+/// <param name="Status">Whether the rules were written, and if not, why.</param>
+/// <param name="Detail">The system's wording for <see cref="AutoResponderSaveStatus.Failed"/>.</param>
+public readonly record struct AutoResponderSaveResult(AutoResponderSaveStatus Status, string? Detail = null)
+{
+    public bool Succeeded => Status == AutoResponderSaveStatus.Saved;
+}
+
 /// <summary>
 /// Persists the AutoResponder rule set under the user's local app-data directory.
 /// </summary>
@@ -9,9 +58,24 @@ namespace Piper.Core.Proxy;
 /// Kept out of configuration.json deliberately: that file holds small, stable proxy settings, while
 /// a rule set is user data with an unbounded size and its own import/export story. The same
 /// serialisation serves both, so exporting a rule set is this file written somewhere else.
+///
+/// The file is hostile input. It is read at launch, on the UI thread, before any window exists, and
+/// Import reads whatever the user points it at, so <see cref="Load"/> never throws, reads at most
+/// <see cref="MaxFileBytes"/>, and reports what went wrong instead of returning an empty answer that
+/// looks like "no rules". <see cref="Save"/> refuses what <see cref="Load"/> would refuse, so a rule
+/// set can never be written that cannot be read back.
 /// </remarks>
 public static class AutoResponderSettingsStore
 {
+    /// <summary>
+    /// Largest rule file that is read or written. Generous for rules with inline bodies, small enough
+    /// that reading it, and the several copies the panel and the engine make of it, stay cheap.
+    /// </summary>
+    public const long MaxFileBytes = 8L * 1024 * 1024;
+
+    /// <summary>Most rules a set may hold. Every request walks the list, so it is also a latency bound.</summary>
+    public const int MaxRules = 5000;
+
     private static readonly JsonSerializerOptions ExportOptions = new() { WriteIndented = true };
 
     public static string DefaultPath => Path.Combine(
@@ -21,54 +85,146 @@ public static class AutoResponderSettingsStore
     public static string ResponseDirectory => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Piper", "autoresponder");
 
-    public static void Save(AutoResponderSettings settings, string? path = null)
+    public static AutoResponderSaveResult Save(AutoResponderSettings settings, string? path = null)
     {
         ArgumentNullException.ThrowIfNull(settings);
         path ??= DefaultPath;
 
+        if (settings.Rules.Count > MaxRules) return new AutoResponderSaveResult(AutoResponderSaveStatus.TooManyRules);
+
+        // Indented: a rule set is meant to be read, diffed and hand-edited, unlike the other
+        // settings files which are pure machine state.
+        var bytes = JsonSerializer.SerializeToUtf8Bytes(settings, ExportOptions);
+        if (bytes.LongLength > MaxFileBytes) return new AutoResponderSaveResult(AutoResponderSaveStatus.TooLarge);
+
+        // Written beside the target and moved over it, so a failure or a crash half way leaves the
+        // previous file whole. Truncating it in place is how a rule set ends up as truncated JSON.
+        string? temporary = null;
         try
         {
             var directory = Path.GetDirectoryName(path);
             if (!string.IsNullOrEmpty(directory)) Directory.CreateDirectory(directory);
 
-            // Indented: a rule set is meant to be read, diffed and hand-edited, unlike the other
-            // settings files which are pure machine state.
-            File.WriteAllText(path, JsonSerializer.Serialize(settings, ExportOptions));
+            temporary = $"{path}.{Guid.NewGuid():N}.tmp";
+            File.WriteAllBytes(temporary, bytes);
+            File.Move(temporary, path, overwrite: true);
+            return new AutoResponderSaveResult(AutoResponderSaveStatus.Saved);
         }
-        catch (IOException)
+        catch (Exception ex) when (IsFileFailure(ex))
         {
-        }
-        catch (UnauthorizedAccessException)
-        {
+            DeleteQuietly(temporary);
+            return new AutoResponderSaveResult(AutoResponderSaveStatus.Failed, ex.Message);
         }
     }
 
-    public static AutoResponderSettings? Load(string? path = null)
+    public static AutoResponderLoadResult Load(string? path = null)
     {
         path ??= DefaultPath;
         try
         {
-            if (!File.Exists(path)) return null;
-            var settings = JsonSerializer.Deserialize<AutoResponderSettings>(File.ReadAllText(path));
-            if (settings is null) return null;
+            using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            if (!TryReadBounded(stream, out var content, out var length))
+                return new AutoResponderLoadResult(AutoResponderLoadStatus.TooLarge);
 
-            // Rules written before ids existed, or hand-edited in, still need one to key hit counts.
-            foreach (var rule in settings.Rules)
-                if (string.IsNullOrWhiteSpace(rule.Id)) rule.Id = Guid.NewGuid().ToString("N");
+            // File.ReadAllText used to drop a UTF-8 byte order mark that Notepad and friends write;
+            // the JSON reader treats it as garbage, so it is dropped here instead.
+            var start = length >= 3 && content[0] == 0xEF && content[1] == 0xBB && content[2] == 0xBF ? 3 : 0;
+            var settings = JsonSerializer.Deserialize<AutoResponderSettings>(content.AsSpan(start, length - start));
+            if (settings is null)
+                return new AutoResponderLoadResult(AutoResponderLoadStatus.Malformed, Detail: "the document is null");
+            if (settings.Rules.Count > MaxRules) return new AutoResponderLoadResult(AutoResponderLoadStatus.TooManyRules);
 
-            return settings;
+            EnsureUniqueIds(settings);
+            return new AutoResponderLoadResult(AutoResponderLoadStatus.Loaded, settings);
         }
-        catch (IOException)
+        catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException)
+        {
+            return new AutoResponderLoadResult(AutoResponderLoadStatus.Missing);
+        }
+        catch (JsonException ex)
+        {
+            return new AutoResponderLoadResult(AutoResponderLoadStatus.Malformed, Detail: ex.Message);
+        }
+        catch (Exception ex) when (IsFileFailure(ex))
+        {
+            return new AutoResponderLoadResult(AutoResponderLoadStatus.Unreadable, Detail: ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// Moves a rule file that cannot be used aside as <c>*.invalid</c> and returns where it went, or
+    /// null when it could not be moved. Without this the first edit made after a failed load would
+    /// overwrite the only copy of rules the user may have spent an afternoon writing.
+    /// </summary>
+    public static string? SetAside(string? path = null)
+    {
+        path ??= DefaultPath;
+        var destination = path + ".invalid";
+        try
+        {
+            File.Move(path, destination, overwrite: true);
+            return destination;
+        }
+        catch (Exception ex) when (IsFileFailure(ex))
         {
             return null;
         }
-        catch (JsonException)
+    }
+
+    /// <summary>Reads at most <see cref="MaxFileBytes"/>; false when the stream holds more.</summary>
+    private static bool TryReadBounded(Stream stream, out byte[] content, out int length)
+    {
+        content = [];
+        length = 0;
+
+        // The length is checked while reading rather than up front: it is only a hint, and a file
+        // that grows after it was asked for must not be read past the cap.
+        using var buffer = new MemoryStream();
+        var chunk = new byte[64 * 1024];
+        var remaining = MaxFileBytes + 1;
+        int read;
+        while (remaining > 0 && (read = stream.Read(chunk, 0, (int)Math.Min(chunk.Length, remaining))) > 0)
         {
-            return null;
+            buffer.Write(chunk, 0, read);
+            remaining -= read;
         }
-        catch (UnauthorizedAccessException)
+
+        if (buffer.Length > MaxFileBytes) return false;
+        content = buffer.GetBuffer();
+        length = (int)buffer.Length;
+        return true;
+    }
+
+    /// <summary>
+    /// Every rule needs an id to key its hit counts. Rules written before ids existed, or hand-edited
+    /// in, have none, and two rules pasted from one another share one; either would merge counters.
+    /// </summary>
+    private static void EnsureUniqueIds(AutoResponderSettings settings)
+    {
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var rule in settings.Rules)
+            if (string.IsNullOrWhiteSpace(rule.Id) || !seen.Add(rule.Id))
+            {
+                rule.Id = Guid.NewGuid().ToString("N");
+                seen.Add(rule.Id);
+            }
+    }
+
+    private static bool IsFileFailure(Exception ex) =>
+        ex is IOException or UnauthorizedAccessException or NotSupportedException or ArgumentException
+            or System.Security.SecurityException;
+
+    private static void DeleteQuietly(string? path)
+    {
+        if (path is null) return;
+        try
         {
-            return null;
+            File.Delete(path);
+        }
+        catch (Exception ex) when (IsFileFailure(ex))
+        {
+            // Best effort: a stray temporary file beside the rules is harmless, and the failure that
+            // brought us here is the one worth reporting.
         }
     }
 }

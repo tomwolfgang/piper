@@ -19,9 +19,14 @@ public sealed class AutoResponderRule
 
     public bool Enabled { get; set; } = true;
 
-    public string Match { get; set; } = string.Empty;
+    // A rule file is hostile input: "Match": null deserialises straight into a non-nullable
+    // property, so the setters keep the promise the type makes to every reader downstream.
+    private string _match = string.Empty;
+    private string _action = string.Empty;
 
-    public string Action { get; set; } = string.Empty;
+    public string Match { get => _match; set => _match = value ?? string.Empty; }
+
+    public string Action { get => _action; set => _action = value ?? string.Empty; }
 
     /// <summary>Response body for the <c>*inline</c> action, stored with the rule so a rule set is portable.</summary>
     public string? Body { get; set; }
@@ -55,7 +60,18 @@ public sealed class AutoResponderSettings
     /// </summary>
     public bool PassthroughUnmatched { get; set; } = true;
 
-    public List<AutoResponderRule> Rules { get; set; } = [];
+    private List<AutoResponderRule> _rules = [];
+
+    /// <summary>
+    /// The ordered rules. Assigning null, or a list containing nulls, keeps the rules and drops the
+    /// nulls: <c>"Rules": null</c> and <c>[null]</c> both deserialise happily from a hand-edited file
+    /// and would otherwise throw on the first read, which for the saved file is the app's constructor.
+    /// </summary>
+    public List<AutoResponderRule> Rules
+    {
+        get => _rules;
+        set => _rules = value is null ? [] : [.. value.Where(rule => rule is not null)];
+    }
 
     public AutoResponderSettings Clone() => new()
     {
@@ -63,4 +79,30 @@ public sealed class AutoResponderSettings
         PassthroughUnmatched = PassthroughUnmatched,
         Rules = [.. Rules.Select(rule => rule.Clone())],
     };
+
+    /// <summary>
+    /// A copy of this set with <paramref name="imported"/>'s rules added after its own, for an import
+    /// that must not discard what is already here. This set's toggles win. An imported rule whose id
+    /// is already in use gets a fresh one, or the two would share one hit counter.
+    /// </summary>
+    public AutoResponderSettings Appended(AutoResponderSettings imported)
+    {
+        ArgumentNullException.ThrowIfNull(imported);
+
+        var merged = Clone();
+        var used = merged.Rules.Select(rule => rule.Id).ToHashSet(StringComparer.Ordinal);
+        foreach (var rule in imported.Rules)
+        {
+            var copy = rule.Clone();
+            if (!used.Add(copy.Id))
+            {
+                copy.Id = Guid.NewGuid().ToString("N");
+                used.Add(copy.Id);
+            }
+
+            merged.Rules.Add(copy);
+        }
+
+        return merged;
+    }
 }

@@ -723,15 +723,62 @@ public sealed class AutoResponderPanel : UserControl
         };
         if (dialog.ShowDialog(this) != DialogResult.OK) return;
 
-        var imported = AutoResponderSettingsStore.Load(dialog.FileName);
-        if (imported is null)
+        var loaded = AutoResponderSettingsStore.Load(dialog.FileName);
+        if (loaded.Settings is not { } imported)
         {
-            MessageBox.Show(this, Strings.AutoResponder.UnreadableRuleSet,
+            MessageBox.Show(this, Strings.AutoResponder.LoadProblem(loaded),
                 Strings.App.Name, MessageBoxButtons.OK, MessageBoxIcon.Error);
             return;
         }
 
-        ApplySettings(imported);
+        // An empty list has nothing to lose, so only a list with rules in it is worth a question.
+        // Replacing used to be the only outcome, and it was silent.
+        if (_rules.Count == 0)
+        {
+            ApplySettings(imported);
+            return;
+        }
+
+        switch (AskReplaceOrAppend(imported.Rules.Count))
+        {
+            case ImportChoice.Replace:
+                ApplySettings(imported);
+                break;
+
+            case ImportChoice.Append:
+                var merged = Settings.Appended(imported);
+                if (merged.Rules.Count > AutoResponderSettingsStore.MaxRules)
+                {
+                    MessageBox.Show(this, Strings.AutoResponder.ImportTooManyRules(imported.Rules.Count),
+                        Strings.App.Name, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
+
+                ApplySettings(merged);
+                break;
+        }
+    }
+
+    private enum ImportChoice { Cancel, Replace, Append }
+
+    private ImportChoice AskReplaceOrAppend(int importedCount)
+    {
+        var replace = new TaskDialogButton(Strings.AutoResponder.ImportReplace);
+        var append = new TaskDialogButton(Strings.AutoResponder.ImportAppend);
+        var page = new TaskDialogPage
+        {
+            Caption = Strings.AutoResponder.ImportChoiceCaption,
+            Heading = Strings.AutoResponder.ImportChoiceHeading(importedCount),
+            Text = Strings.AutoResponder.ImportChoiceText,
+            Icon = TaskDialogIcon.Information,
+            AllowCancel = true,
+            // Appending loses nothing, so it is what Enter does.
+            DefaultButton = append,
+            Buttons = { replace, append, TaskDialogButton.Cancel },
+        };
+
+        var pressed = TaskDialog.ShowDialog(this, page);
+        return pressed == replace ? ImportChoice.Replace : pressed == append ? ImportChoice.Append : ImportChoice.Cancel;
     }
 
     private void ExportRules()
@@ -746,7 +793,10 @@ public sealed class AutoResponderPanel : UserControl
         };
         if (dialog.ShowDialog(this) != DialogResult.OK) return;
 
-        AutoResponderSettingsStore.Save(Settings, dialog.FileName);
+        var result = AutoResponderSettingsStore.Save(Settings, dialog.FileName);
+        if (!result.Succeeded)
+            MessageBox.Show(this, Strings.AutoResponder.ExportFailed(dialog.FileName, result),
+                Strings.App.Name, MessageBoxButtons.OK, MessageBoxIcon.Error);
     }
 
     private void BrowseForFile()
