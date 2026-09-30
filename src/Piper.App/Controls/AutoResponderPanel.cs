@@ -714,7 +714,7 @@ public sealed class AutoResponderPanel : UserControl
 
     // ------------------------------------------------------------ import / export
 
-    private void ImportRules()
+    private async void ImportRules()
     {
         using var dialog = new OpenFileDialog
         {
@@ -723,7 +723,8 @@ public sealed class AutoResponderPanel : UserControl
         };
         if (dialog.ShowDialog(this) != DialogResult.OK) return;
 
-        var loaded = AutoResponderSettingsStore.Load(dialog.FileName);
+        var fileName = dialog.FileName;
+        var loaded = await OffThreadAsync(() => AutoResponderSettingsStore.Load(fileName));
         if (loaded.Settings is not { } imported)
         {
             MessageBox.Show(this, Strings.AutoResponder.LoadProblem(loaded),
@@ -750,7 +751,7 @@ public sealed class AutoResponderPanel : UserControl
 
                 // Refused here, before it is applied: a set over either limit is one Save refuses,
                 // so every later edit would fail to persist.
-                var tooBig = AutoResponderSettingsStore.CheckLimits(merged) switch
+                var tooBig = await OffThreadAsync(() => AutoResponderSettingsStore.CheckLimits(merged)) switch
                 {
                     AutoResponderSaveStatus.TooManyRules => Strings.AutoResponder.ImportTooManyRules(imported.Rules.Count),
                     AutoResponderSaveStatus.TooLarge => Strings.AutoResponder.ImportTooLarge,
@@ -764,6 +765,23 @@ public sealed class AutoResponderPanel : UserControl
 
                 ApplySettings(merged);
                 break;
+        }
+    }
+
+    /// <summary>
+    /// Runs file reading and serialising, which take real time on a large rule set, off the UI thread.
+    /// The panel is disabled meanwhile so the list cannot change under the result.
+    /// </summary>
+    private async Task<T> OffThreadAsync<T>(Func<T> work)
+    {
+        Enabled = false;
+        try
+        {
+            return await Task.Run(work);
+        }
+        finally
+        {
+            Enabled = true;
         }
     }
 
