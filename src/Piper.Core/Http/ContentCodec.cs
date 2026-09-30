@@ -100,29 +100,14 @@ public static class ContentCodec
 
     /// <summary>
     /// Servers disagree on whether "deflate" means zlib (RFC 1950) or raw (RFC 1951). Zlib is tried
-    /// first, then raw, and the first one that reads the whole stream cleanly wins. When neither does
-    /// (the output hit the cap, or both hit corruption), what zlib managed to decode is kept in
-    /// preference to raw's, since zlib is what the RFC names.
+    /// first. Raw is tried only when zlib produced nothing and failed, which is what a stream without a
+    /// zlib header does. A stream that yields any zlib output, or fills the cap, is a zlib stream: there
+    /// is nothing raw could add, and trying it would hold a second cap's worth of memory (and let crafted
+    /// bytes that also parse as a short raw stream win over zlib's correct prefix).
     /// </summary>
-    private static bool TryDecodeDeflate(byte[] input, int maxBytes, out byte[] output, out bool truncated)
-    {
-        var zlib = Run(input, s => new ZLibStream(s, CompressionMode.Decompress), maxBytes, out var zlibOutput, out var zlibCut);
-        if (zlib && !zlibCut)
-        {
-            (output, truncated) = (zlibOutput, false);
-            return true;
-        }
-
-        var raw = Run(input, s => new DeflateStream(s, CompressionMode.Decompress), maxBytes, out var rawOutput, out var rawCut);
-        if (raw && (!rawCut || !zlib))
-        {
-            (output, truncated) = (rawOutput, rawCut);
-            return true;
-        }
-
-        (output, truncated) = zlib ? (zlibOutput, zlibCut) : (input, false);
-        return zlib;
-    }
+    private static bool TryDecodeDeflate(byte[] input, int maxBytes, out byte[] output, out bool truncated) =>
+        Run(input, s => new ZLibStream(s, CompressionMode.Decompress), maxBytes, out output, out truncated)
+        || Run(input, s => new DeflateStream(s, CompressionMode.Decompress), maxBytes, out output, out truncated);
 
     /// <summary>
     /// Decodes <paramref name="input"/> with the decompressor <paramref name="wrap"/> builds. False
@@ -197,10 +182,19 @@ public static class ContentCodec
 
     // Decoded bodies outlive the read that made them, for as long as their session does, so the cache is
     // held to a budget of its own: only a body that decoded to at most MaxCachedEntryBytes is kept, and
-    // none once MaxCachedTotalBytes are held. A body that misses the cache is simply decoded again.
+    // once MaxCachedTotalBytes are held the oldest entries make room for new ones. A body that misses
+    // the cache is simply decoded again.
     private const int MaxCachedEntryBytes = 8 * 1024 * 1024;
     private const long MaxCachedTotalBytes = 64L * 1024 * 1024;
     private static long _cachedBytes;
+
+    // Guards admission and eviction (not reads). EvictionOrder lists cached entries oldest first;
+    // it holds them weakly, so an entry whose body was collected is simply skipped.
+    private static readonly object CacheLock = new();
+    // A stale entry replaced after its Content-Encoding changed leaves a dead reference behind until an
+    // eviction walks past it; that takes an edit of a message's headers per leftover (~48 bytes), which
+    // captured traffic cannot cause.
+    private static readonly Queue<WeakReference<CachedDecode>> EvictionOrder = new();
 
     /// <summary>Bytes of decoded bodies the cache holds now; read by the tests that pin its budget.</summary>
     internal static long CachedDecodeBytes => Volatile.Read(ref _cachedBytes);
@@ -219,55 +213,87 @@ public static class ContentCodec
         {
             if (string.Equals(hit.ContentEncoding, contentEncoding, StringComparison.Ordinal)) return hit.Content;
 
-            // The header changed since this was cached; its bytes go back to the budget once collected.
-            DecodeCache.Remove(body);
+            // The header changed since this was cached: drop the stale entry and give its budget back.
+            Remove(body, hit);
         }
 
         var content = DecodeBounded(body, contentEncoding);
         var size = ReferenceEquals(content.Bytes, body) ? 0 : content.Bytes.LongLength;
-        if (size <= MaxCachedEntryBytes && TryReserve(size))
-        {
-            // Two threads can decode the same body at once; the loser gives its reservation back at
-            // once rather than holding it until the collector finds the discarded entry.
-            var entry = new CachedDecode(contentEncoding, content, size);
-            if (!DecodeCache.TryAdd(body, entry)) entry.Release();
-        }
+        if (size <= MaxCachedEntryBytes) Admit(body, new CachedDecode(body, contentEncoding, content, size));
         return content;
     }
 
     /// <summary>
-    /// Claims <paramref name="size"/> bytes of the cache budget, or reports that there are none left. The
-    /// claim is one compare-and-swap, and every claim ends up owned by a cached entry or handed straight
-    /// back, so threads decoding at once cannot together pass the ceiling.
+    /// Puts <paramref name="entry"/> in the cache, first evicting the oldest entries until it fits, so
+    /// the cache keeps serving what was decoded most recently however long the capture runs. Eviction
+    /// is oldest-first (not least-recently-used), which keeps a hit lock-free.
     /// </summary>
-    private static bool TryReserve(long size)
+    private static void Admit(byte[] body, CachedDecode entry)
     {
-        if (size == 0) return true;
-        while (true)
+        lock (CacheLock)
         {
-            var held = Volatile.Read(ref _cachedBytes);
-            if (held + size > MaxCachedTotalBytes) return false;
-            if (Interlocked.CompareExchange(ref _cachedBytes, held + size, held) == held) return true;
+            // Nothing is held for a body that decoded to itself, so it needs neither room nor a place in
+            // the eviction order.
+            if (entry.Size > 0)
+            {
+                while (EvictionOrder.TryPeek(out var head) && !head.TryGetTarget(out _)) EvictionOrder.Dequeue();
+
+                while (Volatile.Read(ref _cachedBytes) + entry.Size > MaxCachedTotalBytes && EvictionOrder.TryDequeue(out var oldest))
+                    if (oldest.TryGetTarget(out var victim)) Remove(victim.Key, victim);
+
+                if (Volatile.Read(ref _cachedBytes) + entry.Size > MaxCachedTotalBytes) return;
+                Interlocked.Add(ref _cachedBytes, entry.Size);
+                entry.Reserved = true;
+            }
+
+            // Two threads can decode the same body at once; the loser hands its budget straight back.
+            if (!DecodeCache.TryAdd(body, entry)) entry.Release();
+            else if (entry.Size > 0) EvictionOrder.Enqueue(new WeakReference<CachedDecode>(entry));
         }
     }
 
-    /// <summary>An entry owns the <paramref name="size"/> bytes of budget its creator reserved for it.</summary>
-    private sealed class CachedDecode(string contentEncoding, DecodedContent content, long size)
+    /// <summary>Takes <paramref name="entry"/> out of the cache, if it is still the one held for its body.</summary>
+    private static void Remove(byte[]? body, CachedDecode entry)
     {
+        if (body is not null && DecodeCache.TryGetValue(body, out var current) && ReferenceEquals(current, entry))
+            DecodeCache.Remove(body);
+        entry.Release();
+    }
+
+    /// <summary>
+    /// A cached decode. It holds its body only weakly, so the cache never keeps a released body alive,
+    /// and it owns <see cref="Size"/> bytes of the budget once <see cref="Reserved"/>, which go back
+    /// when it is evicted, replaced, or finalised after its body was collected.
+    /// </summary>
+    private sealed class CachedDecode(byte[] body, string contentEncoding, DecodedContent content, long size)
+    {
+        private readonly WeakReference<byte[]> _body = new(body);
+        private int _released;
+
         public string ContentEncoding { get; } = contentEncoding;
 
         public DecodedContent Content { get; } = content;
 
-        /// <summary>Returns the entry's budget now, for an entry that never made it into the cache.</summary>
+        public long Size { get; } = size;
+
+        /// <summary>Set, under the cache lock, once the entry has been charged to the budget.</summary>
+        public bool Reserved { get; set; }
+
+        /// <summary>The body this was cached for, or null once it has been collected.</summary>
+        public byte[]? Key => _body.TryGetTarget(out var key) ? key : null;
+
+        /// <summary>Returns the entry's budget, once, however many paths get here.</summary>
         public void Release()
         {
             GC.SuppressFinalize(this);
-            Interlocked.Add(ref _cachedBytes, -size);
+            if (Reserved && Interlocked.Exchange(ref _released, 1) == 0) Interlocked.Add(ref _cachedBytes, -Size);
         }
 
-        // Runs once the body this was cached for is gone (or the entry was removed), returning its
-        // share of the budget.
-        ~CachedDecode() => Interlocked.Add(ref _cachedBytes, -size);
+        // Runs once the body this was cached for is gone, returning its share of the budget.
+        ~CachedDecode()
+        {
+            if (Reserved && Interlocked.Exchange(ref _released, 1) == 0) Interlocked.Add(ref _cachedBytes, -Size);
+        }
     }
 
     /// <summary>Resolves the charset from a Content-Type value, defaulting to UTF-8.</summary>
