@@ -707,6 +707,9 @@ internal static class AnalyticsTests
                 ProxyServer.IsAddressInUse(new AggregateException(new IOException("x", collision))),
                 "however deeply it is wrapped");
             runner.IsTrue(
+                ProxyServer.IsAddressInUse(new AggregateException(new TimeoutException(), new IOException("x", collision))),
+                "including behind a sibling in an aggregate, not only its first entry");
+            runner.IsTrue(
                 !ProxyServer.IsAddressInUse(new IOException("x", new SocketException((int)SocketError.AccessDenied))),
                 "another socket error is not");
 

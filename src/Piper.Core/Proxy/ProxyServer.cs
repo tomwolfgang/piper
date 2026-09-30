@@ -70,16 +70,29 @@ public sealed class ProxyServer : IAsyncDisposable
     }
 
     /// <summary>
-    /// Whether a <see cref="Start"/> failure means the port is already taken, however deeply the
-    /// socket error is wrapped. Kept here so the UI never has to reason about socket semantics.
+    /// Whether a <see cref="Start"/> failure means the port is already taken, anywhere among the
+    /// first 16 exceptions reachable through inner exceptions - every entry of an
+    /// <see cref="AggregateException"/>, not just its first. Kept here so the UI never has to reason
+    /// about socket semantics.
     /// </summary>
     public static bool IsAddressInUse(Exception exception)
     {
-        // Bounded: an exception chain is caller-built and nothing stops it being arbitrarily deep.
-        for (var (current, depth) = (exception, 0); current is not null && depth < 16;
-             (current, depth) = (current.InnerException, depth + 1))
+        // Bounded by exceptions visited rather than depth: a tree is caller-built and nothing stops
+        // it being arbitrarily deep or wide. Past the bound the answer degrades to "not a busy port".
+        var pending = new Queue<Exception>();
+        pending.Enqueue(exception);
+        for (var visited = 0; visited < 16 && pending.TryDequeue(out var current); visited++)
         {
             if (current is SocketException { SocketErrorCode: SocketError.AddressAlreadyInUse }) return true;
+
+            if (current is AggregateException aggregate)
+            {
+                foreach (var inner in aggregate.InnerExceptions) pending.Enqueue(inner);
+            }
+            else if (current.InnerException is { } inner)
+            {
+                pending.Enqueue(inner);
+            }
         }
 
         return false;
