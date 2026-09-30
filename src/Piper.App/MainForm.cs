@@ -1,6 +1,5 @@
 using System.Diagnostics;
 using System.Globalization;
-using System.Net.Sockets;
 using System.Runtime.InteropServices;
 using System.Security;
 using System.Security.Principal;
@@ -1251,8 +1250,7 @@ public sealed class MainForm : Form, IMessageFilter
             // The attempt is reported as well as the error, so the funnel step counts failures
             // rather than only the starts that worked.
             Analytics.Track(AnalyticsEvents.CaptureStarted, (AnalyticsProperties.Result,
-                (ex as SocketException ?? ex.InnerException as SocketException)
-                    is { SocketErrorCode: SocketError.AddressAlreadyInUse } ? "port_in_use" : "failed"));
+                ProxyServer.IsAddressInUse(ex) ? "port_in_use" : "failed"));
             Analytics.TrackError("capture_start", ex);
             // Reported in the log and the status bar rather than a dialog, so a busy port
             // never blocks the UI and the full exception stays available for diagnosis.

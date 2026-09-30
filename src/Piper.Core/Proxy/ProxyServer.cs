@@ -69,6 +69,22 @@ public sealed class ProxyServer : IAsyncDisposable
         Log?.Invoke(this, $"Listening on {Endpoint}. HTTPS decryption {(_options.DecryptHttps ? "enabled" : "disabled")}.");
     }
 
+    /// <summary>
+    /// Whether a <see cref="Start"/> failure means the port is already taken, however deeply the
+    /// socket error is wrapped. Kept here so the UI never has to reason about socket semantics.
+    /// </summary>
+    public static bool IsAddressInUse(Exception exception)
+    {
+        // Bounded: an exception chain is caller-built and nothing stops it being arbitrarily deep.
+        for (var (current, depth) = (exception, 0); current is not null && depth < 16;
+             (current, depth) = (current.InnerException, depth + 1))
+        {
+            if (current is SocketException { SocketErrorCode: SocketError.AddressAlreadyInUse }) return true;
+        }
+
+        return false;
+    }
+
     public async Task StopAsync()
     {
         if (!IsRunning) return;

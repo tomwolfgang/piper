@@ -27,6 +27,10 @@ public sealed class AnalyticsEvent
     /// Position within the run, from 1. Retries can deliver an event twice and the collector keeps
     /// no identifier of its own, so this is the deduplication key alongside the run; a gap is an
     /// event lost to the queue or spool caps.
+    ///
+    /// 0 is reserved for "position unknown": a spool line written before this field existed, or a
+    /// hand-edited negative value. Several such events can share a run, so (run, 0) must never be
+    /// deduplicated.
     /// </summary>
     [JsonPropertyName("seq")]
     public int Sequence { get; init; }

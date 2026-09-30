@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
+using Piper.Core.Proxy;
 using Piper.Core.Telemetry;
 
 /// <summary>
@@ -666,6 +667,31 @@ internal static class AnalyticsTests
             client.SetEnabled(false);
             runner.IsTrue(machineId is null, "opting out erases it, not just the installation id");
             runner.IsTrue(temp.Settings.InstallId is null, "and the installation id with it");
+        });
+
+        await runner.RunAsync("analytics: a busy port is told apart from other capture failures", () =>
+        {
+            // A real collision, bound the way ProxyServer.Start binds, rather than a hand-made error.
+            using var holder = new TcpListener(IPAddress.Loopback, 0);
+            holder.Start();
+            var port = ((IPEndPoint)holder.LocalEndpoint).Port;
+            using var second = new TcpListener(IPAddress.Loopback, port);
+            second.Server.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, false);
+            Exception? collision = null;
+            try { second.Start(); } catch (SocketException ex) { collision = ex; }
+
+            runner.IsTrue(collision is not null && ProxyServer.IsAddressInUse(collision), "a real bind collision is a busy port");
+            runner.IsTrue(
+                ProxyServer.IsAddressInUse(new AggregateException(new IOException("x", collision))),
+                "however deeply it is wrapped");
+            runner.IsTrue(
+                !ProxyServer.IsAddressInUse(new IOException("x", new SocketException((int)SocketError.AccessDenied))),
+                "another socket error is not");
+
+            Exception deep = collision!;
+            for (var i = 0; i < 100; i++) deep = new IOException("x", deep);
+            runner.IsTrue(!ProxyServer.IsAddressInUse(deep), "and the walk is bounded rather than following any chain");
+            return Task.CompletedTask;
         });
 
         await runner.RunAsync("analytics: an identifier that is not a GUID is never sent", async () =>
