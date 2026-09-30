@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
+using Piper.Core.Proxy;
 using Piper.Core.Telemetry;
 
 /// <summary>
@@ -13,14 +14,15 @@ internal static class AnalyticsTests
     {
         await runner.RunAsync("analytics: the schema drops unknown events and keys", () =>
         {
-            var unknown = AnalyticsSchema.Create("piper_traffic_captured", null, DateTimeOffset.UtcNow, "run");
+            var unknown = AnalyticsSchema.Create("piper_traffic_captured", null, DateTimeOffset.UtcNow, "run", 1);
             runner.IsTrue(unknown is null, "an event name outside the allowlist is dropped");
 
             var known = AnalyticsSchema.Create(
                 AnalyticsEvents.FeatureUsed,
                 [(AnalyticsProperties.Feature, "composer"), ("url", "https://bank.example/login")],
                 DateTimeOffset.UtcNow,
-                "run");
+                "run",
+                1);
             runner.IsTrue(known is not null, "an allowlisted event survives");
             runner.AreEqual(1, known!.Properties.Count, "the unknown property key is dropped");
             runner.AreEqual("composer", known.Properties[AnalyticsProperties.Feature], "the known property is kept");
@@ -29,7 +31,7 @@ internal static class AnalyticsTests
             // The run identifier travels outside the property bag, so it has to be sanitised by the
             // boundary itself rather than by whoever happens to call it.
             var hostileRun = AnalyticsSchema.Create(
-                AnalyticsEvents.AppStarted, null, DateTimeOffset.UtcNow, "https://bank.example/x?a=b");
+                AnalyticsEvents.AppStarted, null, DateTimeOffset.UtcNow, "https://bank.example/x?a=b", 1);
             runner.AreEqual(AnalyticsSchema.InvalidValue, hostileRun!.RunId, "a hostile run id is replaced");
             return Task.CompletedTask;
         });
@@ -74,7 +76,7 @@ internal static class AnalyticsTests
             var many = Enumerable.Range(0, 50)
                 .Select(_ => (AnalyticsProperties.Feature, "x"))
                 .ToArray();
-            var recorded = AnalyticsSchema.Create(AnalyticsEvents.FeatureUsed, many, DateTimeOffset.UtcNow, "run");
+            var recorded = AnalyticsSchema.Create(AnalyticsEvents.FeatureUsed, many, DateTimeOffset.UtcNow, "run", 1);
             runner.IsTrue(
                 recorded is not null && recorded.Properties.Count <= AnalyticsSchema.MaxProperties,
                 "property count stays within the cap");
@@ -225,6 +227,53 @@ internal static class AnalyticsTests
                 server.LastRequest.Contains("\"app_ver\"", StringComparison.Ordinal)
                     && server.LastRequest.Contains("\"app_type\":\"piper\"", StringComparison.Ordinal),
                 "and carries the base keys the shared dashboards expect");
+        });
+
+        await runner.RunAsync("analytics: every event carries its position in the run", async () =>
+        {
+            using var server = new LoopbackCollector();
+            using var temp = new TempAnalytics();
+            temp.Settings.Enabled = true;
+            temp.Settings.NoticeShownVersion = "0.4.0";
+            using var client = temp.CreateClient(server.Endpoint);
+
+            client.Track(AnalyticsEvents.AppStarted);
+            client.Track("piper_traffic_captured");
+            client.Track(AnalyticsEvents.CaptureStarted, (AnalyticsProperties.Result, "port_in_use"));
+            client.Track(AnalyticsEvents.CertTrusted,
+                (AnalyticsProperties.Source, "startup"), (AnalyticsProperties.Result, "declined"));
+            await client.FlushAsync();
+
+            runner.AreEqual(3, server.RequestCount, "the refused name is not sent");
+            runner.IsTrue(
+                server.Requests[1].Contains("\"result\":\"port_in_use\"", StringComparison.Ordinal),
+                "a capture outcome reaches the wire");
+            runner.IsTrue(
+                server.Requests[2].Contains("\"result\":\"declined\"", StringComparison.Ordinal)
+                    && server.Requests[2].Contains("\"source\":\"startup\"", StringComparison.Ordinal)
+                    && server.Requests[2].Contains("\"seq\":\"3\"", StringComparison.Ordinal),
+                "and so does a certificate outcome, which the allowlist must not drop");
+            runner.IsTrue(server.Requests[0].Contains("\"seq\":\"1\"", StringComparison.Ordinal), "the first event is 1");
+            runner.IsTrue(
+                server.Requests[1].Contains("\"seq\":\"2\"", StringComparison.Ordinal),
+                "and a refused name takes no number, so a gap means a lost event");
+
+            // The spool is user-editable: a negative number is clamped, and a line written before
+            // the field existed still delivers.
+            Directory.CreateDirectory(Path.GetDirectoryName(temp.SpoolPath)!);
+            File.WriteAllLines(temp.SpoolPath,
+            [
+                $"{{\"name\":\"{AnalyticsEvents.AppStarted}\",\"time\":\"2026-01-01T00:00:00+00:00\",\"run\":\"r1\",\"seq\":-7}}",
+                $"{{\"name\":\"{AnalyticsEvents.AppStarted}\",\"time\":\"2026-01-01T00:00:00+00:00\",\"run\":\"r2\"}}",
+            ]);
+            using var nextRun = temp.CreateClient(server.Endpoint);
+            await nextRun.FlushAsync();
+
+            runner.AreEqual(5, server.RequestCount, "both hand-written lines deliver");
+            runner.IsTrue(
+                server.Requests[3].Contains("\"seq\":\"0\"", StringComparison.Ordinal)
+                    && server.Requests[4].Contains("\"seq\":\"0\"", StringComparison.Ordinal),
+                "a negative or missing sequence reads as 0");
         });
 
         await runner.RunAsync("analytics: a failed upload keeps the spool", async () =>
@@ -604,19 +653,138 @@ internal static class AnalyticsTests
             temp.Settings.NoticeShownVersion = "0.4.0";
 
             // Stands in for the registry-backed machine identifier, which is what reaches the wire.
-            string? machineId = "aaaabbbbccccdddd";
+            // Stored undashed, as every version before the fix wrote it.
+            string? machineId = "aaaabbbbccccddddeeeeffff00001111";
             using var client = temp.CreateClient(
                 server.Endpoint, machineId: () => machineId, forgetMachineId: () => { machineId = null; return true; });
 
             client.Track(AnalyticsEvents.AppStarted);
             await client.FlushAsync();
             runner.IsTrue(
-                server.LastRequest.Contains("MUID=aaaabbbbccccdddd", StringComparison.Ordinal),
-                "the machine identifier is what gets reported");
+                server.LastRequest.Contains("MUID=aaaabbbb-cccc-dddd-eeee-ffff00001111&", StringComparison.Ordinal),
+                "the machine identifier is what gets reported, re-rendered dashed so the collector indexes it");
 
             client.SetEnabled(false);
             runner.IsTrue(machineId is null, "opting out erases it, not just the installation id");
             runner.IsTrue(temp.Settings.InstallId is null, "and the installation id with it");
+        });
+
+        await runner.RunAsync("analytics: consent is re-asked only of users who declined, once per update", () =>
+        {
+            using var temp = new TempAnalytics();
+            using var client = temp.CreateClient();
+
+            runner.IsTrue(client.ShouldAskConsent("0.9.0"), "someone never asked is asked");
+
+            temp.Settings.Enabled = true;
+            temp.Settings.NoticeShownVersion = "0.8.0";
+            runner.IsTrue(!client.ShouldAskConsent("0.8.0"), "someone who opted in is not asked on the same version");
+            runner.IsTrue(!client.ShouldAskConsent("0.9.0"), "nor after an update");
+
+            temp.Settings.Enabled = false;
+            runner.IsTrue(!client.ShouldAskConsent("0.8.0"), "someone who declined is not asked twice on one version");
+            runner.IsTrue(client.ShouldAskConsent("0.9.0"), "but is asked again after an update");
+
+            // Answering records the version, which is what stops the question repeating.
+            client.RecordNoticeShown("0.9.0");
+            runner.IsTrue(!client.ShouldAskConsent("0.9.0"), "and declining again settles it until the next update");
+
+            // Versions, not strings: ordinal comparison would call 0.10.0 older than 0.9.0.
+            runner.IsTrue(!client.ShouldAskConsent("0.8.5"), "a downgrade does not ask");
+            runner.IsTrue(!client.ShouldAskConsent("0.9.0.0"), "nor does the same version rendered differently");
+            runner.IsTrue(client.ShouldAskConsent("0.10.0"), "but a later minor version does");
+
+            temp.Settings.NoticeShownVersion = "not-a-version";
+            runner.IsTrue(client.ShouldAskConsent("0.10.0"), "and a hand-edited value errs toward asking");
+            return Task.CompletedTask;
+        });
+
+        await runner.RunAsync("analytics: a minted identifier is always accepted back unchanged", () =>
+        {
+            // The registry store and the settings store both mint with NewIdentifier and read back
+            // through TryNormaliseIdentifier, so this is the round trip that keeps an identity stable
+            // from one launch to the next. The registry I/O itself is Windows-only and lives in
+            // Piper.App, which the smoke tests do not build.
+            for (var i = 0; i < 100; i++)
+            {
+                var minted = AnalyticsSchema.NewIdentifier();
+                if (!AnalyticsSchema.TryNormaliseIdentifier(minted, out var readBack) || readBack != minted)
+                {
+                    runner.IsTrue(false, $"minted {minted} was not accepted back unchanged");
+                    return Task.CompletedTask;
+                }
+
+                if (minted.Length != 36 || AnalyticsSchema.SanitiseValue(minted) != minted)
+                {
+                    runner.IsTrue(false, $"minted {minted} is not a 36-character token");
+                    return Task.CompletedTask;
+                }
+            }
+
+            runner.IsTrue(true, "100 minted identifiers each read back as themselves");
+
+            runner.IsTrue(
+                AnalyticsSchema.TryNormaliseIdentifier("9ccc41f52c704a819d2c4f934b84f87f", out var legacy)
+                    && legacy == "9ccc41f5-2c70-4a81-9d2c-4f934b84f87f",
+                "an identifier stored undashed by an earlier build keeps its identity, dashed");
+            runner.IsTrue(
+                !AnalyticsSchema.TryNormaliseIdentifier("https://bank.example/x", out _)
+                    && !AnalyticsSchema.TryNormaliseIdentifier(null, out _)
+                    && !AnalyticsSchema.TryNormaliseIdentifier(new string('a', 10_000), out _),
+                "and anything that is not a GUID is refused");
+            return Task.CompletedTask;
+        });
+
+        await runner.RunAsync("analytics: a busy port is told apart from other capture failures", () =>
+        {
+            // A real collision, bound the way ProxyServer.Start binds, rather than a hand-made error.
+            using var holder = new TcpListener(IPAddress.Loopback, 0);
+            holder.Start();
+            var port = ((IPEndPoint)holder.LocalEndpoint).Port;
+            using var second = new TcpListener(IPAddress.Loopback, port);
+            second.Server.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, false);
+            Exception? collision = null;
+            try { second.Start(); } catch (SocketException ex) { collision = ex; }
+
+            runner.AreEqual(ProxyStartFailure.PortInUse, collision is null ? ProxyStartFailure.Other : ProxyServer.ClassifyStartFailure(collision),
+                "a real bind collision, as a second Piper would hit, is a busy port");
+            runner.IsTrue(
+                ProxyServer.ClassifyStartFailure(new AggregateException(new IOException("x", collision))) == ProxyStartFailure.PortInUse,
+                "however deeply it is wrapped");
+            runner.IsTrue(
+                ProxyServer.ClassifyStartFailure(new AggregateException(new TimeoutException(), new IOException("x", collision))) == ProxyStartFailure.PortInUse,
+                "including behind a sibling in an aggregate, not only its first entry");
+            runner.IsTrue(
+                ProxyServer.ClassifyStartFailure(new IOException("x", new SocketException((int)SocketError.AccessDenied))) == ProxyStartFailure.PortDenied,
+                "a Windows-reserved port is counted apart from a busy one");
+            runner.IsTrue(
+                ProxyServer.ClassifyStartFailure(new IOException("x", new SocketException((int)SocketError.NetworkDown))) == ProxyStartFailure.Other,
+                "and any other socket error is neither");
+
+            Exception deep = collision!;
+            for (var i = 0; i < 100; i++) deep = new IOException("x", deep);
+            runner.IsTrue(ProxyServer.ClassifyStartFailure(deep) == ProxyStartFailure.Other, "and the walk is bounded rather than following any chain");
+            return Task.CompletedTask;
+        });
+
+        await runner.RunAsync("analytics: an identifier that is not a GUID is never sent", async () =>
+        {
+            using var server = new LoopbackCollector();
+            using var temp = new TempAnalytics();
+            temp.Settings.Enabled = true;
+            temp.Settings.NoticeShownVersion = "0.4.0";
+
+            // Both are user-editable: a registry value and a settings file.
+            temp.Settings.InstallId = "not-a-guid";
+            using var client = temp.CreateClient(server.Endpoint, machineId: () => "https://bank.example/x");
+
+            client.Track(AnalyticsEvents.AppStarted);
+            await client.FlushAsync();
+
+            runner.IsTrue(
+                Guid.TryParseExact(temp.Settings.InstallId, "D", out var minted)
+                    && server.LastRequest.Contains($"MUID={minted:D}&", StringComparison.Ordinal),
+                "a fresh dashed identifier is minted and sent in place of both");
         });
 
         await runner.RunAsync("analytics: a run reports its start exactly once", async () =>

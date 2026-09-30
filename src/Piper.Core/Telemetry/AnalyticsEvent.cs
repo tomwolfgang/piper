@@ -23,6 +23,18 @@ public sealed class AnalyticsEvent
     [JsonPropertyName("run")]
     public required string RunId { get; init; }
 
+    /// <summary>
+    /// Position within the run, from 1. Retries can deliver an event twice and the collector keeps
+    /// no identifier of its own, so this is the deduplication key alongside the run; a gap is an
+    /// event lost to the queue or spool caps.
+    ///
+    /// 0 is reserved for "position unknown": a spool line written before this field existed, or a
+    /// hand-edited negative value. Several such events can share a run, so (run, 0) must never be
+    /// deduplicated.
+    /// </summary>
+    [JsonPropertyName("seq")]
+    public int Sequence { get; init; }
+
     [JsonPropertyName("props")]
     public IReadOnlyDictionary<string, string> Properties { get; init; } =
         new Dictionary<string, string>(StringComparer.Ordinal);
@@ -43,10 +55,17 @@ public static class AnalyticsEvents
     /// <summary>One run began. With the machine identifier this yields actives and retention.</summary>
     public const string AppStarted = "piper_usage_app_started";
 
-    /// <summary>The root certificate was trusted - the step most likely to lose a new user.</summary>
+    /// <summary>
+    /// The root-certificate step - the one most likely to lose a new user.
+    /// <see cref="AnalyticsProperties.Result"/> is "ok", "declined", "failed", or "already" when a
+    /// run starts with the root trusted, so returning users are not read as having skipped it.
+    /// </summary>
     public const string CertTrusted = "piper_usage_cert_trusted";
 
-    /// <summary>Capture was attempted; <see cref="AnalyticsProperties.Result"/> says how it went.</summary>
+    /// <summary>
+    /// Capture was attempted; <see cref="AnalyticsProperties.Result"/> is "ok", "port_in_use",
+    /// "port_denied" (a Windows-reserved port) or "failed".
+    /// </summary>
     public const string CaptureStarted = "piper_usage_capture_started";
 
     /// <summary>Traffic actually appeared. The end of the funnel: Piper works for this user.</summary>
@@ -64,7 +83,8 @@ public static class AnalyticsEvents
 ///
 /// The first three are attached to every event, matching the keys the CurseForge analytics service
 /// merges in automatically, so the same dashboards read both. Piper reports directly rather than
-/// through that service, so it has to add them itself.
+/// through that service, so it has to add them itself. Both send them in snake_case; the collector's
+/// pipeline indexes every Extra key in camelCase (app_ver as appVer), so they must stay snake_case.
 /// </summary>
 public static class AnalyticsProperties
 {
@@ -109,6 +129,9 @@ public static class AnalyticsProperties
 
     /// <summary>When the event happened, as Unix seconds - not when it was received.</summary>
     public const string Timestamp = "ts";
+
+    /// <summary>The event's position within its run. On every event.</summary>
+    public const string Sequence = "seq";
 }
 
 /// <summary>
@@ -171,7 +194,8 @@ public static class AnalyticsSchema
         string? name,
         IReadOnlyList<(string Key, string Value)>? properties,
         DateTimeOffset timestamp,
-        string runId)
+        string runId,
+        int sequence)
     {
         if (name is null || !EventNames.Contains(name)) return null;
 
@@ -196,8 +220,30 @@ public static class AnalyticsSchema
             // string that would otherwise reach the query string without passing the boundary this
             // method is documented to be.
             RunId = SanitiseValue(runId),
+
+            // Read back from a user-editable spool, so it is bounded here like everything else.
+            Sequence = Math.Max(sequence, 0),
             Properties = sanitised,
         };
+    }
+
+    /// <summary>
+    /// Mints a machine or installation identifier: random, and dashed, because the collector's
+    /// pipeline indexes an event only when its MUID is a dashed GUID.
+    /// </summary>
+    public static string NewIdentifier() => Guid.NewGuid().ToString("D");
+
+    /// <summary>
+    /// Accepts a stored identifier only if it is a GUID, and hands back its dashed rendering rather
+    /// than the stored text. The single rule every store reads back through, so what Piper writes
+    /// is always what it will accept - and an identifier from a build that stored the undashed form
+    /// is the same GUID, so it keeps its identity.
+    /// </summary>
+    public static bool TryNormaliseIdentifier(string? stored, out string identifier)
+    {
+        var parsed = Guid.TryParse(stored, out var guid);
+        identifier = parsed ? guid.ToString("D") : string.Empty;
+        return parsed;
     }
 
     /// <summary>

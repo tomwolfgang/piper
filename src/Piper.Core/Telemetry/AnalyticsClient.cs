@@ -102,6 +102,9 @@ public sealed class AnalyticsClient : IDisposable
     /// <summary>Set once the run's start has been reported, so it cannot be reported twice.</summary>
     private int _appStartedReported;
 
+    /// <summary>The last sequence number handed out in this run.</summary>
+    private int _sequence;
+
     private int _queued;
     private int _consecutiveFailures;
     private int _consecutiveRejections;
@@ -191,6 +194,30 @@ public sealed class AnalyticsClient : IDisposable
         }
     }
 
+    /// <summary>
+    /// Whether the consent question should be put to the user on this launch: when they have never
+    /// been asked, or when they have reporting off and this is a newer version than the one they
+    /// last answered in. Someone who opted in is never asked again - their answer stands until they
+    /// change it in the Privacy tab. Someone who declined is asked once per update, never twice on
+    /// the same version, because declining records the version it was given in.
+    /// </summary>
+    public bool ShouldAskConsent(string currentVersion)
+    {
+        var answered = _settings.NoticeShownVersion;
+        if (string.IsNullOrEmpty(answered)) return true;
+        if (_settings.Enabled) return false;
+
+        // Compared as versions, so only a genuine upgrade asks: a downgrade, or the same version
+        // rendered differently, does not. A value that is not a version (hand-edited) is treated as
+        // a different one, which errs toward asking - the choice that collects nothing meanwhile.
+        return Version.TryParse(answered, out var then) && Version.TryParse(currentVersion, out var now)
+            ? Padded(now) > Padded(then)
+            : !string.Equals(answered, currentVersion, StringComparison.Ordinal);
+
+        // Version counts a missing component as -1, which would make 0.9.0.0 newer than 0.9.0.
+        static Version Padded(Version v) => new(v.Major, v.Minor, Math.Max(v.Build, 0), Math.Max(v.Revision, 0));
+    }
+
     /// <summary>Records that the user has been told what is collected. Until this runs, nothing uploads.</summary>
     public void RecordNoticeShown(string version)
     {
@@ -252,7 +279,12 @@ public sealed class AnalyticsClient : IDisposable
             return;
         }
 
-        var recorded = AnalyticsSchema.Create(name, properties, DateTimeOffset.UtcNow, _runId);
+        // Checked before a number is taken, so a gap in the sequence only ever means an event that
+        // was recorded and then lost, never one that was refused at the door.
+        if (name is null || !AnalyticsSchema.EventNames.Contains(name)) return;
+
+        var recorded = AnalyticsSchema.Create(
+            name, properties, DateTimeOffset.UtcNow, _runId, Interlocked.Increment(ref _sequence));
         if (recorded is null) return;
 
         _queue.Enqueue(recorded);
@@ -569,7 +601,8 @@ public sealed class AnalyticsClient : IDisposable
                     parsed.Name,
                     properties,
                     parsed.Timestamp,
-                    parsed.RunId);
+                    parsed.RunId,
+                    parsed.Sequence);
                 if (revalidated is not null)
                 {
                     batch.Add(revalidated);
@@ -733,6 +766,8 @@ public sealed class AnalyticsClient : IDisposable
         extra[AnalyticsProperties.Run] = recorded.RunId;
         extra[AnalyticsProperties.Timestamp] =
             recorded.Timestamp.ToUnixTimeSeconds().ToString(System.Globalization.CultureInfo.InvariantCulture);
+        extra[AnalyticsProperties.Sequence] =
+            recorded.Sequence.ToString(System.Globalization.CultureInfo.InvariantCulture);
 
         var identity = ResolveIdentity();
         if (identity is null) return null;
@@ -759,8 +794,13 @@ public sealed class AnalyticsClient : IDisposable
     ///
     /// Both are validated on the way out, not just on the way in. They are read back from a registry
     /// value and a settings file the user can edit, which would otherwise make them the only
-    /// unbounded, unsanitised strings in the payload. Anything that is not a plain token is
-    /// discarded rather than echoed.
+    /// unbounded, unsanitised strings in the payload. Anything that is not a GUID is discarded
+    /// rather than echoed, and what is sent is re-rendered rather than passed through.
+    ///
+    /// Always sent in the dashed form. The collector answers 200 to any MUID, but its pipeline only
+    /// indexes events whose MUID is a dashed GUID: every report from the versions that sent the
+    /// undashed form was accepted and then silently dropped. Identifiers stored in that form are
+    /// the same GUID, so re-rendering them keeps each machine's identity rather than starting anew.
     /// </summary>
     private string? ResolveIdentity()
     {
@@ -771,19 +811,10 @@ public sealed class AnalyticsClient : IDisposable
             // SetEnabled(false) just deleted, moments after deleting it.
             if (!_settings.Enabled) return null;
 
-            var machine = _machineId?.Invoke();
-            if (!string.IsNullOrEmpty(machine) && AnalyticsSchema.SanitiseValue(machine) == machine)
-            {
-                return machine;
-            }
+            if (AnalyticsSchema.TryNormaliseIdentifier(_machineId?.Invoke(), out var machine)) return machine;
+            if (AnalyticsSchema.TryNormaliseIdentifier(_settings.InstallId, out var existing)) return existing;
 
-            var existing = _settings.InstallId;
-            if (!string.IsNullOrEmpty(existing) && AnalyticsSchema.SanitiseValue(existing) == existing)
-            {
-                return existing;
-            }
-
-            var minted = Guid.NewGuid().ToString("n");
+            var minted = AnalyticsSchema.NewIdentifier();
             _settings.InstallId = minted;
             AnalyticsSettingsStore.Save(_settings, _settingsPath);
             return minted;

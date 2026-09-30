@@ -12,6 +12,19 @@ using Piper.Core.Sessions;
 
 namespace Piper.Core.Proxy;
 
+/// <summary>Why <see cref="ProxyServer.Start"/> could not listen, as far as the bind error says.</summary>
+public enum ProxyStartFailure
+{
+    /// <summary>Anything that is not one of the bind errors below.</summary>
+    Other,
+
+    /// <summary>Another listener already holds the port - typically a second Piper.</summary>
+    PortInUse,
+
+    /// <summary>Windows refused the port: a reserved or excluded range, or an exclusive bind.</summary>
+    PortDenied,
+}
+
 /// <summary>
 /// HTTP/1.1 forward proxy with optional TLS termination. One task per accepted client
 /// connection; each connection loops over keep-alive requests until the peer closes.
@@ -67,6 +80,45 @@ public sealed class ProxyServer : IAsyncDisposable
         _acceptLoop = Task.Run(() => AcceptLoopAsync(_cts.Token));
 
         Log?.Invoke(this, $"Listening on {Endpoint}. HTTPS decryption {(_options.DecryptHttps ? "enabled" : "disabled")}.");
+    }
+
+    /// <summary>
+    /// Why a <see cref="Start"/> failure happened, from the first bind error among the first 16
+    /// exceptions reachable through inner exceptions - every entry of an
+    /// <see cref="AggregateException"/>, not just its first. Kept here so the UI never has to reason
+    /// about socket semantics.
+    /// </summary>
+    public static ProxyStartFailure ClassifyStartFailure(Exception exception)
+    {
+        // Bounded by exceptions visited rather than depth: a tree is caller-built and nothing stops
+        // it being arbitrarily deep or wide. Past the bound the answer degrades to Other.
+        var pending = new Queue<Exception>();
+        pending.Enqueue(exception);
+        for (var visited = 0; visited < 16 && pending.TryDequeue(out var current); visited++)
+        {
+            switch (current)
+            {
+                case SocketException { SocketErrorCode: SocketError.AddressAlreadyInUse }:
+                    return ProxyStartFailure.PortInUse;
+
+                // What Windows reports for a port inside a reserved or excluded range (Hyper-V and
+                // WSL reserve blocks that often cover proxy ports), or one another process holds
+                // with an exclusive bind. A different fix from a busy port, so counted apart.
+                case SocketException { SocketErrorCode: SocketError.AccessDenied }:
+                    return ProxyStartFailure.PortDenied;
+            }
+
+            if (current is AggregateException aggregate)
+            {
+                foreach (var inner in aggregate.InnerExceptions) pending.Enqueue(inner);
+            }
+            else if (current.InnerException is { } inner)
+            {
+                pending.Enqueue(inner);
+            }
+        }
+
+        return ProxyStartFailure.Other;
     }
 
     public async Task StopAsync()

@@ -22,9 +22,9 @@ public sealed class AnalyticsSettings
     public string? InstallId { get; set; }
 
     /// <summary>
-    /// The application version at which the user was asked. Null means the question has not been
-    /// put to them yet. Storing the version rather than a flag lets a later release that materially
-    /// changes what is collected ask again.
+    /// The application version at which the user was last asked. Null means the question has not
+    /// been put to them yet. Stored as a version rather than a flag because a user with reporting
+    /// off is asked again once each time they update - see AnalyticsClient.ShouldAskConsent.
     /// </summary>
     public string? NoticeShownVersion { get; set; }
 }
