@@ -3,7 +3,12 @@ using System.Text.Json.Serialization;
 
 namespace Piper.Core.Proxy;
 
-/// <summary>Raised from inside the read, the moment a rule set turns out to have too many rules.</summary>
+/// <summary>
+/// Raised from inside the read, the moment a rule set turns out to have too many rules. Deliberately
+/// not a <see cref="System.Text.Json.JsonException"/>: System.Text.Json lets other exception types
+/// from a converter through unwrapped, and the store's <c>Load</c> relies on that to tell "too many
+/// rules" from "malformed" (a smoke test pins it).
+/// </summary>
 internal sealed class RuleCountExceededException : Exception
 {
 }

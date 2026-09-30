@@ -664,7 +664,7 @@
     "exportFileName": "AutoResponder.json",
     "unreadableRuleSet": "That file does not contain a readable rule set.",
     "loadMissing": "That file no longer exists.",
-    "loadMalformed":"The rules file is not valid JSON ({{detail}}).",
+    "loadMalformed": "The rules file is not valid JSON ({{detail}}).",
     "loadUnreadable": "The rules file could not be opened ({{detail}}).",
     "loadTooLarge": "The rules file is larger than the {{limit, N0}} MB Piper reads.",
     "loadTooManyRules": "The rules file holds more than the {{limit, N0}} rules Piper allows.",
