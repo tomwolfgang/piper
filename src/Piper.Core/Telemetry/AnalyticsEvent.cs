@@ -63,8 +63,8 @@ public static class AnalyticsEvents
     public const string CertTrusted = "piper_usage_cert_trusted";
 
     /// <summary>
-    /// Capture was attempted; <see cref="AnalyticsProperties.Result"/> is "ok", "port_in_use" or
-    /// "failed".
+    /// Capture was attempted; <see cref="AnalyticsProperties.Result"/> is "ok", "port_in_use",
+    /// "port_denied" (a Windows-reserved port) or "failed".
     /// </summary>
     public const string CaptureStarted = "piper_usage_capture_started";
 

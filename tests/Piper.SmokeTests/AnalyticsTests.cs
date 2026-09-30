@@ -702,20 +702,24 @@ internal static class AnalyticsTests
             Exception? collision = null;
             try { second.Start(); } catch (SocketException ex) { collision = ex; }
 
-            runner.IsTrue(collision is not null && ProxyServer.IsAddressInUse(collision), "a real bind collision is a busy port");
+            runner.AreEqual(ProxyStartFailure.PortInUse, collision is null ? ProxyStartFailure.Other : ProxyServer.ClassifyStartFailure(collision),
+                "a real bind collision, as a second Piper would hit, is a busy port");
             runner.IsTrue(
-                ProxyServer.IsAddressInUse(new AggregateException(new IOException("x", collision))),
+                ProxyServer.ClassifyStartFailure(new AggregateException(new IOException("x", collision))) == ProxyStartFailure.PortInUse,
                 "however deeply it is wrapped");
             runner.IsTrue(
-                ProxyServer.IsAddressInUse(new AggregateException(new TimeoutException(), new IOException("x", collision))),
+                ProxyServer.ClassifyStartFailure(new AggregateException(new TimeoutException(), new IOException("x", collision))) == ProxyStartFailure.PortInUse,
                 "including behind a sibling in an aggregate, not only its first entry");
             runner.IsTrue(
-                !ProxyServer.IsAddressInUse(new IOException("x", new SocketException((int)SocketError.AccessDenied))),
-                "another socket error is not");
+                ProxyServer.ClassifyStartFailure(new IOException("x", new SocketException((int)SocketError.AccessDenied))) == ProxyStartFailure.PortDenied,
+                "a Windows-reserved port is counted apart from a busy one");
+            runner.IsTrue(
+                ProxyServer.ClassifyStartFailure(new IOException("x", new SocketException((int)SocketError.NetworkDown))) == ProxyStartFailure.Other,
+                "and any other socket error is neither");
 
             Exception deep = collision!;
             for (var i = 0; i < 100; i++) deep = new IOException("x", deep);
-            runner.IsTrue(!ProxyServer.IsAddressInUse(deep), "and the walk is bounded rather than following any chain");
+            runner.IsTrue(ProxyServer.ClassifyStartFailure(deep) == ProxyStartFailure.Other, "and the walk is bounded rather than following any chain");
             return Task.CompletedTask;
         });
 
