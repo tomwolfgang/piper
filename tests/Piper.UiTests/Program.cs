@@ -39,6 +39,31 @@ internal static class Program
             ExpectRowsFromTop(list, 10);
         });
 
+        Run("an imported session stays in the grid under a capture scope and a filterset", (store, grid, list) =>
+        {
+            // Live traffic is hidden by both; a file the user opened is not live traffic.
+            grid.VisibilityFilter = session => session.ProcessName == "browser";
+            grid.FiltersetFilter = _ => false;
+            PumpUntil(() => list.VirtualListSize == 0);
+            Check(list.VirtualListSize == 0, "setup: the scope and the filterset hide captured traffic");
+
+            var imported = new Session
+            {
+                IsImported = true,
+                ProcessName = "Fiddler SAZ",
+                Request = new HttpRequestData { Method = "GET", Url = new Uri("http://imported.test/one") },
+                Response = new HttpResponseData { StatusCode = 200 },
+                Completed = DateTimeOffset.Now,
+            };
+            store.AddRange([imported]);
+            PumpUntil(() => list.VirtualListSize == 1);
+            Check(list.VirtualListSize == 1, $"the imported session is listed (got {list.VirtualListSize})");
+
+            AddSessions(store, 3);
+            PumpFor(500);
+            Check(list.VirtualListSize == 1, $"live traffic stays hidden (got {list.VirtualListSize})");
+        });
+
         Console.WriteLine(_failures == 0 ? "UI tests passed." : $"{_failures} UI check(s) failed.");
         return _failures == 0 ? 0 : 1;
     }
@@ -108,6 +133,17 @@ internal static class Program
             Thread.Sleep(10);
         }
         Application.DoEvents();
+    }
+
+    /// <summary>Runs the message loop for a fixed time, for asserting that something does not happen.</summary>
+    private static void PumpFor(int milliseconds)
+    {
+        var deadline = Environment.TickCount64 + milliseconds;
+        while (Environment.TickCount64 < deadline)
+        {
+            Application.DoEvents();
+            Thread.Sleep(10);
+        }
     }
 
     private static ListView FindListView(Control root) =>

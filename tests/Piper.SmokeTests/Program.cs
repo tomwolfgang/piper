@@ -567,6 +567,7 @@ await HostRemappingTests.RunAsync(runner);
 await SessionStoreAdmissionTests.RunAsync(runner);
 await SazImporterTests.RunAsync(runner);
 await SazImporterTests.RunEmptyResponseAsync(runner);
+await SazImportHardeningTests.RunAsync(runner);
 await DiagnosticsBundleTests.RunAsync(runner);
 await DiagnosticsBundleTests.RunMissingCrashLogAsync(runner);
 await DiagnosticsBundleTests.RunHugeCrashLogAsync(runner);

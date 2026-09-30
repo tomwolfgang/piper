@@ -345,7 +345,8 @@ public sealed class ComposerPanel : UserControl
     /// Composer history, alongside whatever is already there. Each one is reduced to exactly what
     /// a reload from disk would produce - a composed, request-only entry - so an imported row does
     /// not read as a failed Composer send before the next restart and then change afterwards.</summary>
-    public void AppendToHistory(IEnumerable<Session> sessions)
+    /// <returns>How many of the sessions are now in the history, which stops at <see cref="ComposerHistoryStore.MaxEntries"/>.</returns>
+    public int AppendToHistory(IEnumerable<Session> sessions)
     {
         var added = sessions
             .Where(session => session.Request is not null)
@@ -356,7 +357,7 @@ public sealed class ComposerPanel : UserControl
                 Completed = session.Completed ?? session.Started,
             })
             .ToArray();
-        if (added.Length == 0) return;
+        if (added.Length == 0) return 0;
 
         _history.AddRange(added);
         // Keep memory and the file in step: Save persists only the newest MaxEntries, so a large
@@ -365,6 +366,7 @@ public sealed class ComposerPanel : UserControl
             _history.RemoveRange(0, _history.Count - ComposerHistoryStore.MaxEntries);
         ComposerHistoryStore.Save(_history);
         _searchDirty = true;
+        return Math.Min(added.Length, ComposerHistoryStore.MaxEntries);
     }
 
     /// <summary>Drops the given sends from the persisted history. The tree hands over every send
