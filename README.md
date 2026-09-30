@@ -430,9 +430,10 @@ captured traffic.
 ## Anonymous feedback
 
 Piper can report anonymous usage and error information so its rough edges can be found and fixed.
-**It is off unless you turn it on.** The first run asks once, with both answers given equal weight;
+**It is off unless you turn it on.** The first run asks, with both answers given equal weight;
 declining, closing the dialog, or pressing Escape all leave it off, and nothing is collected or
-transmitted until you agree.
+transmitted until you agree. If it is off, Piper asks again once after each update, never twice on
+the same version; if you turned it on, you are not asked again.
 
 **Where it goes:** `analyticsnew.overwolf.com`, over HTTPS, run by Overwolf. "Anonymous" describes
 the contents of the reports, not the connection: sending one is a web request like any other, so it

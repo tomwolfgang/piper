@@ -194,6 +194,20 @@ public sealed class AnalyticsClient : IDisposable
         }
     }
 
+    /// <summary>
+    /// Whether the consent question should be put to the user on this launch: when they have never
+    /// been asked, or when they have reporting off and this is a newer version than the one they
+    /// last answered in. Someone who opted in is never asked again - their answer stands until they
+    /// change it in the Privacy tab. Someone who declined is asked once per update, never twice on
+    /// the same version, because declining records the version it was given in.
+    /// </summary>
+    public bool ShouldAskConsent(string currentVersion)
+    {
+        var answered = _settings.NoticeShownVersion;
+        if (string.IsNullOrEmpty(answered)) return true;
+        return !_settings.Enabled && !string.Equals(answered, currentVersion, StringComparison.Ordinal);
+    }
+
     /// <summary>Records that the user has been told what is collected. Until this runs, nothing uploads.</summary>
     public void RecordNoticeShown(string version)
     {

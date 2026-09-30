@@ -342,7 +342,8 @@ public sealed class MainForm : Form, IMessageFilter
     {
         // A reporting subsystem that failed to start collects nothing, so there is nothing to ask
         // about - and without this the dialog would return on every launch with no way to settle it.
-        if (Analytics.SpoolPath is null || Analytics.NoticeShown) return;
+        var version = CurrentVersion.ToString(3);
+        if (Analytics.SpoolPath is null || !Analytics.ShouldAskConsent(version)) return;
 
         bool optedIn;
         using (var dialog = new AnalyticsConsentDialog())
@@ -363,8 +364,9 @@ public sealed class MainForm : Form, IMessageFilter
             Analytics.Track(AnalyticsEvents.AppStarted);
         }
 
-        // Recorded either way: the question is asked once, not repeated until the answer is yes.
-        Analytics.RecordNoticeShown(CurrentVersion.ToString(3));
+        // Recorded either way, with this version: a yes is never asked again, and a no is asked
+        // again only after the next update, never twice on the same version.
+        Analytics.RecordNoticeShown(version);
         AppendLog(optedIn ? Strings.Log.AnalyticsConsentOn : Strings.Log.AnalyticsConsentOff);
     }
 

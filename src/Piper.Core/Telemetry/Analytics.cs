@@ -51,8 +51,12 @@ public static class Analytics
     /// <summary>Whether events are being collected at all.</summary>
     public static bool IsEnabled => _client?.Settings.Enabled ?? false;
 
-    /// <summary>Whether the user has already been told what is collected.</summary>
-    public static bool NoticeShown => !string.IsNullOrEmpty(_client?.Settings.NoticeShownVersion);
+    /// <summary>
+    /// Whether to ask for consent on this launch: never asked, or opted out and since updated. False
+    /// when reporting failed to start, since there is then nothing to ask about.
+    /// </summary>
+    public static bool ShouldAskConsent(string currentVersion) =>
+        _client?.ShouldAskConsent(currentVersion) ?? false;
 
     /// <summary>
     /// Applies the user's choice. Turning it off also discards anything not yet delivered. Returns

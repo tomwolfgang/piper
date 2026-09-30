@@ -669,6 +669,28 @@ internal static class AnalyticsTests
             runner.IsTrue(temp.Settings.InstallId is null, "and the installation id with it");
         });
 
+        await runner.RunAsync("analytics: consent is re-asked only of users who declined, once per update", () =>
+        {
+            using var temp = new TempAnalytics();
+            using var client = temp.CreateClient();
+
+            runner.IsTrue(client.ShouldAskConsent("0.9.0"), "someone never asked is asked");
+
+            temp.Settings.Enabled = true;
+            temp.Settings.NoticeShownVersion = "0.8.0";
+            runner.IsTrue(!client.ShouldAskConsent("0.8.0"), "someone who opted in is not asked on the same version");
+            runner.IsTrue(!client.ShouldAskConsent("0.9.0"), "nor after an update");
+
+            temp.Settings.Enabled = false;
+            runner.IsTrue(!client.ShouldAskConsent("0.8.0"), "someone who declined is not asked twice on one version");
+            runner.IsTrue(client.ShouldAskConsent("0.9.0"), "but is asked again after an update");
+
+            // Answering records the version, which is what stops the question repeating.
+            client.RecordNoticeShown("0.9.0");
+            runner.IsTrue(!client.ShouldAskConsent("0.9.0"), "and declining again settles it until the next update");
+            return Task.CompletedTask;
+        });
+
         await runner.RunAsync("analytics: a busy port is told apart from other capture failures", () =>
         {
             // A real collision, bound the way ProxyServer.Start binds, rather than a hand-made error.
