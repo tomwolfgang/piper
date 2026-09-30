@@ -152,7 +152,11 @@
     "unreadable": "{{fileName}} was not imported: it is not a readable Fiddler capture archive.\n\n{{detail}}",
     "tooManyEntries": "{{fileName}} was not imported: it holds more than {{limit, N0}} entries, or its index is larger than any real capture's.",
     "tooLarge": "{{fileName}} was not imported: it expands to more than {{limit}} of data. Split the capture into smaller files.",
-    "failed": "{{fileName}} could not be imported: {{message}}"
+    "moreProblems_one": "{{count, N0}} more file could not be imported. The Log tab lists each one.",
+    "moreProblems_other": "{{count, N0}} more files could not be imported. The Log tab lists each one.",
+    "unreadableLogged": "{{fileName}} was not imported: it is not a readable Fiddler capture archive.",
+    "failed": "{{fileName}} could not be imported: {{message}}",
+    "failedLogged": "{{fileName}} could not be imported ({{errorType}})."
   },
 
   "certificates": {
