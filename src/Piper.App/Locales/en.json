@@ -716,7 +716,7 @@
     "openCertificateFolder": "Open certificate folder",
 
     "analyticsEnabled": "Send anonymous feedback",
-    "analyticsEnabledNote": "Sends which features you use, the type of any error, and the app version, tied only to a random ID stored on this machine, over HTTPS to analyticsnew.overwolf.com. Sending is a web request, so it reveals your IP address and when you used Piper. Never sends captured traffic, URLs, hostnames, headers, bodies, cookies, certificates, or your settings. Turning this off also deletes the identifiers it reports with and discards anything not yet sent.",
+    "analyticsEnabledNote": "Sends which features you use, the type of any error, and the app version, tied only to a random ID stored on this machine, over HTTPS to analyticsnew.overwolf.com. Sending is a web request, so it reveals your IP address and when you used Piper; the collector stores that address with the country and region it maps to. Never sends captured traffic, URLs, hostnames, headers, bodies, cookies, certificates, or your settings. Turning this off also deletes the identifiers it reports with and discards anything not yet sent.",
     "pendingFeedback": "Pending feedback",
     "pendingFeedbackNote": "Reports wait in a plain text file you can read before they are sent.",
     "openReportsFolder": "Open reports folder"
@@ -741,7 +741,7 @@
     "neverHeading": "What is never sent",
     "neverBullets": "\u2022  Captured traffic of any kind - URLs, hostnames, headers, bodies, cookies\n\u2022  Credentials, certificates, or private keys\n\u2022  File paths, error messages, or anything you typed\n\u2022  Your settings, rules, or saved sessions",
 
-    "notes": "Piper's reporting can only send short words from a fixed list, so captured traffic cannot be included even by mistake. Reports wait in a plain text file you can read before they are sent.\n\n\"Anonymous\" means the reports carry nothing that identifies you. Sending them is still a web request, so it reveals your IP address and when you were using Piper, the same as visiting a website would.",
+    "notes": "Piper's reporting can only send short words from a fixed list, so captured traffic cannot be included even by mistake. Reports wait in a plain text file you can read before they are sent.\n\n\"Anonymous\" means the reports carry nothing that identifies you. Sending them is still a web request, so it reveals your IP address and when you were using Piper, the same as visiting a website would. The collector stores that address alongside each report, with the country and region it maps to.",
     "changeLater": "You can change this at any time under Tools > Configurations > Privacy.",
 
     "accept": "Send anonymous feedback",

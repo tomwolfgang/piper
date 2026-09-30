@@ -436,7 +436,8 @@ transmitted until you agree.
 
 **Where it goes:** `analyticsnew.overwolf.com`, over HTTPS, run by Overwolf. "Anonymous" describes
 the contents of the reports, not the connection: sending one is a web request like any other, so it
-reveals your IP address and when you were using Piper.
+reveals your IP address and when you were using Piper. The collector stores that address alongside
+each report, together with the country and region it maps to.
 
 **What is sent:** which features you use, how a capture or certificate step turned out, the type of
 any error with its top few stack frames, Piper's version and your Windows version, and a random

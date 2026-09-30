@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Globalization;
+using System.Net.Sockets;
 using System.Runtime.InteropServices;
 using System.Security;
 using System.Security.Principal;
@@ -374,7 +375,14 @@ public sealed class MainForm : Form, IMessageFilter
     /// </summary>
     private bool EnsureTrustedRootForStartup()
     {
-        if (TrustStore.IsTrusted(_ca.RootCertificate)) return true;
+        if (TrustStore.IsTrusted(_ca.RootCertificate))
+        {
+            // Without this a returning user's run looks, in the funnel, like one that skipped the
+            // certificate step - which is also what the run after a successful trust's restart is.
+            Analytics.Track(AnalyticsEvents.CertTrusted,
+                (AnalyticsProperties.Source, "startup"), (AnalyticsProperties.Result, "already"));
+            return true;
+        }
 
         // Worth a line of its own: this dialog is modal, so while it is up the main window is
         // disabled and refuses every drop. That reads as "drag and drop is broken" to a user who
@@ -388,6 +396,8 @@ public sealed class MainForm : Form, IMessageFilter
 
         if (answer != DialogResult.OK)
         {
+            Analytics.Track(AnalyticsEvents.CertTrusted,
+                (AnalyticsProperties.Source, "startup"), (AnalyticsProperties.Result, "declined"));
             AppendLog(Strings.Log.StartupCaptureOff);
             return false;
         }
@@ -398,6 +408,9 @@ public sealed class MainForm : Form, IMessageFilter
         }
         catch (Exception ex)
         {
+            Analytics.Track(AnalyticsEvents.CertTrusted,
+                (AnalyticsProperties.Source, "startup"), (AnalyticsProperties.Result, "failed"));
+            Analytics.TrackError("cert_trust", ex);
             AppendLog(Strings.Log.TrustRootFailed(ex.Message));
             MessageBox.Show(this,
                 Strings.Certificates.StartupInstallFailed(ex.Message),
@@ -410,7 +423,8 @@ public sealed class MainForm : Form, IMessageFilter
         // must not skip the restart the installed certificate now requires.
         try
         {
-            Analytics.Track(AnalyticsEvents.CertTrusted, (AnalyticsProperties.Source, "startup"));
+            Analytics.Track(AnalyticsEvents.CertTrusted,
+                (AnalyticsProperties.Source, "startup"), (AnalyticsProperties.Result, "ok"));
 
             // Restarting ends the process without running the shutdown flush, and the timer has not
             // ticked this early in the run, so the event above only survives if it is written now.
@@ -1234,6 +1248,10 @@ public sealed class MainForm : Form, IMessageFilter
         }
         catch (Exception ex)
         {
+            // The attempt is reported as well as the error, so the funnel step counts failures
+            // rather than only the starts that worked.
+            Analytics.Track(AnalyticsEvents.CaptureStarted, (AnalyticsProperties.Result,
+                ex is SocketException { SocketErrorCode: SocketError.AddressAlreadyInUse } ? "port_in_use" : "failed"));
             Analytics.TrackError("capture_start", ex);
             // Reported in the log and the status bar rather than a dialog, so a busy port
             // never blocks the UI and the full exception stays available for diagnosis.
@@ -1419,16 +1437,25 @@ public sealed class MainForm : Form, IMessageFilter
             Strings.Certificates.TrustCaption,
             MessageBoxButtons.OKCancel, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2);
 
-        if (answer != DialogResult.OK) return;
+        if (answer != DialogResult.OK)
+        {
+            Analytics.Track(AnalyticsEvents.CertTrusted,
+                (AnalyticsProperties.Source, "manual"), (AnalyticsProperties.Result, "declined"));
+            return;
+        }
 
         try
         {
             TrustStore.Install(_ca.RootCertificate);
-            Analytics.Track(AnalyticsEvents.CertTrusted, (AnalyticsProperties.Source, "manual"));
+            Analytics.Track(AnalyticsEvents.CertTrusted,
+                (AnalyticsProperties.Source, "manual"), (AnalyticsProperties.Result, "ok"));
             AppendLog(Strings.Log.RootTrusted(_ca.RootCertificate.Thumbprint));
         }
         catch (Exception ex)
         {
+            Analytics.Track(AnalyticsEvents.CertTrusted,
+                (AnalyticsProperties.Source, "manual"), (AnalyticsProperties.Result, "failed"));
+            Analytics.TrackError("cert_trust", ex);
             AppendLog(Strings.Log.TrustingRootFailed(ex.Message));
             MessageBox.Show(this, ex.Message, Strings.App.Name, MessageBoxButtons.OK, MessageBoxIcon.Error);
         }

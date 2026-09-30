@@ -224,7 +224,44 @@ internal static class AnalyticsTests
             runner.IsTrue(
                 server.LastRequest.Contains("\"app_ver\"", StringComparison.Ordinal)
                     && server.LastRequest.Contains("\"app_type\":\"piper\"", StringComparison.Ordinal),
-                "and carries the base keys the shared dashboards expect");
+                "and carries the base keys on every event");
+        });
+
+        await runner.RunAsync("analytics: every event carries its position in the run", async () =>
+        {
+            using var server = new LoopbackCollector();
+            using var temp = new TempAnalytics();
+            temp.Settings.Enabled = true;
+            temp.Settings.NoticeShownVersion = "0.4.0";
+            using var client = temp.CreateClient(server.Endpoint);
+
+            client.Track(AnalyticsEvents.AppStarted);
+            client.Track("piper_traffic_captured");
+            client.Track(AnalyticsEvents.CaptureStarted, (AnalyticsProperties.Result, "port_in_use"));
+            await client.FlushAsync();
+
+            runner.AreEqual(2, server.RequestCount, "the refused name is not sent");
+            runner.IsTrue(server.Requests[0].Contains("\"seq\":\"1\"", StringComparison.Ordinal), "the first event is 1");
+            runner.IsTrue(
+                server.Requests[1].Contains("\"seq\":\"2\"", StringComparison.Ordinal),
+                "and a refused name takes no number, so a gap means a lost event");
+
+            // The spool is user-editable: a negative number is clamped, and a line written before
+            // the field existed still delivers.
+            Directory.CreateDirectory(Path.GetDirectoryName(temp.SpoolPath)!);
+            File.WriteAllLines(temp.SpoolPath,
+            [
+                $"{{\"name\":\"{AnalyticsEvents.AppStarted}\",\"time\":\"2026-01-01T00:00:00+00:00\",\"run\":\"r1\",\"seq\":-7}}",
+                $"{{\"name\":\"{AnalyticsEvents.AppStarted}\",\"time\":\"2026-01-01T00:00:00+00:00\",\"run\":\"r2\"}}",
+            ]);
+            using var nextRun = temp.CreateClient(server.Endpoint);
+            await nextRun.FlushAsync();
+
+            runner.AreEqual(4, server.RequestCount, "both hand-written lines deliver");
+            runner.IsTrue(
+                server.Requests[2].Contains("\"seq\":\"0\"", StringComparison.Ordinal)
+                    && server.Requests[3].Contains("\"seq\":\"0\"", StringComparison.Ordinal),
+                "a negative or missing sequence reads as 0");
         });
 
         await runner.RunAsync("analytics: a failed upload keeps the spool", async () =>

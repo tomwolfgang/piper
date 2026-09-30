@@ -102,6 +102,9 @@ public sealed class AnalyticsClient : IDisposable
     /// <summary>Set once the run's start has been reported, so it cannot be reported twice.</summary>
     private int _appStartedReported;
 
+    /// <summary>The last sequence number handed out in this run.</summary>
+    private int _sequence;
+
     private int _queued;
     private int _consecutiveFailures;
     private int _consecutiveRejections;
@@ -252,7 +255,12 @@ public sealed class AnalyticsClient : IDisposable
             return;
         }
 
-        var recorded = AnalyticsSchema.Create(name, properties, DateTimeOffset.UtcNow, _runId);
+        // Checked before a number is taken, so a gap in the sequence only ever means an event that
+        // was recorded and then lost, never one that was refused at the door.
+        if (name is null || !AnalyticsSchema.EventNames.Contains(name)) return;
+
+        var recorded = AnalyticsSchema.Create(
+            name, properties, DateTimeOffset.UtcNow, _runId, Interlocked.Increment(ref _sequence));
         if (recorded is null) return;
 
         _queue.Enqueue(recorded);
@@ -569,7 +577,8 @@ public sealed class AnalyticsClient : IDisposable
                     parsed.Name,
                     properties,
                     parsed.Timestamp,
-                    parsed.RunId);
+                    parsed.RunId,
+                    parsed.Sequence);
                 if (revalidated is not null)
                 {
                     batch.Add(revalidated);
@@ -721,8 +730,8 @@ public sealed class AnalyticsClient : IDisposable
         var extra = new Dictionary<string, string>(StringComparer.Ordinal);
         foreach (var (key, value) in recorded.Properties) extra[key] = value;
 
-        // Applied last so a caller key can never shadow them. Mirrors the keys the CurseForge
-        // service merges in for its own callers; Piper reports directly, so it supplies them itself.
+        // Applied last so a caller key can never shadow them. The same facts the CurseForge apps
+        // report, under Piper's own names rather than theirs - see AnalyticsProperties.
         extra[AnalyticsProperties.AppVersion] = AnalyticsSchema.SanitiseValue(_appVersion);
         extra[AnalyticsProperties.OsVersion] = AnalyticsSchema.SanitiseValue(OperatingSystemName());
         extra[AnalyticsProperties.AppType] = AppType;
@@ -733,6 +742,8 @@ public sealed class AnalyticsClient : IDisposable
         extra[AnalyticsProperties.Run] = recorded.RunId;
         extra[AnalyticsProperties.Timestamp] =
             recorded.Timestamp.ToUnixTimeSeconds().ToString(System.Globalization.CultureInfo.InvariantCulture);
+        extra[AnalyticsProperties.Sequence] =
+            recorded.Sequence.ToString(System.Globalization.CultureInfo.InvariantCulture);
 
         var identity = ResolveIdentity();
         if (identity is null) return null;
