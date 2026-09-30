@@ -228,6 +228,25 @@ public static class AnalyticsSchema
     }
 
     /// <summary>
+    /// Mints a machine or installation identifier: random, and dashed, because the collector's
+    /// pipeline indexes an event only when its MUID is a dashed GUID.
+    /// </summary>
+    public static string NewIdentifier() => Guid.NewGuid().ToString("D");
+
+    /// <summary>
+    /// Accepts a stored identifier only if it is a GUID, and hands back its dashed rendering rather
+    /// than the stored text. The single rule every store reads back through, so what Piper writes
+    /// is always what it will accept - and an identifier from a build that stored the undashed form
+    /// is the same GUID, so it keeps its identity.
+    /// </summary>
+    public static bool TryNormaliseIdentifier(string? stored, out string identifier)
+    {
+        var parsed = Guid.TryParse(stored, out var guid);
+        identifier = parsed ? guid.ToString("D") : string.Empty;
+        return parsed;
+    }
+
+    /// <summary>
     /// Returns the value unchanged when it is a short run of letters, digits, dot, underscore or
     /// hyphen; otherwise <see cref="InvalidValue"/>. Deliberately a character scan rather than a
     /// regular expression: no backtracking, and nothing to get subtly wrong in a future edit.

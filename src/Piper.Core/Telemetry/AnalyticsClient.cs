@@ -205,7 +205,17 @@ public sealed class AnalyticsClient : IDisposable
     {
         var answered = _settings.NoticeShownVersion;
         if (string.IsNullOrEmpty(answered)) return true;
-        return !_settings.Enabled && !string.Equals(answered, currentVersion, StringComparison.Ordinal);
+        if (_settings.Enabled) return false;
+
+        // Compared as versions, so only a genuine upgrade asks: a downgrade, or the same version
+        // rendered differently, does not. A value that is not a version (hand-edited) is treated as
+        // a different one, which errs toward asking - the choice that collects nothing meanwhile.
+        return Version.TryParse(answered, out var then) && Version.TryParse(currentVersion, out var now)
+            ? Padded(now) > Padded(then)
+            : !string.Equals(answered, currentVersion, StringComparison.Ordinal);
+
+        // Version counts a missing component as -1, which would make 0.9.0.0 newer than 0.9.0.
+        static Version Padded(Version v) => new(v.Major, v.Minor, Math.Max(v.Build, 0), Math.Max(v.Revision, 0));
     }
 
     /// <summary>Records that the user has been told what is collected. Until this runs, nothing uploads.</summary>
@@ -801,10 +811,10 @@ public sealed class AnalyticsClient : IDisposable
             // SetEnabled(false) just deleted, moments after deleting it.
             if (!_settings.Enabled) return null;
 
-            if (Guid.TryParse(_machineId?.Invoke(), out var machine)) return machine.ToString("D");
-            if (Guid.TryParse(_settings.InstallId, out var existing)) return existing.ToString("D");
+            if (AnalyticsSchema.TryNormaliseIdentifier(_machineId?.Invoke(), out var machine)) return machine;
+            if (AnalyticsSchema.TryNormaliseIdentifier(_settings.InstallId, out var existing)) return existing;
 
-            var minted = Guid.NewGuid().ToString("D");
+            var minted = AnalyticsSchema.NewIdentifier();
             _settings.InstallId = minted;
             AnalyticsSettingsStore.Save(_settings, _settingsPath);
             return minted;

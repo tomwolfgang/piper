@@ -742,7 +742,7 @@
     "neverBullets": "\u2022  Captured traffic of any kind - URLs, hostnames, headers, bodies, cookies\n\u2022  Credentials, certificates, or private keys\n\u2022  File paths, error messages, or anything you typed\n\u2022  Your settings, rules, or saved sessions",
 
     "notes": "Piper's reporting can only send short words from a fixed list, so captured traffic cannot be included even by mistake. Reports wait in a plain text file you can read before they are sent.\n\n\"Anonymous\" means the reports carry nothing that identifies you. Sending them is still a web request, so it reveals your IP address and when you were using Piper, the same as visiting a website would. The collector stores that address alongside each report, with the country and region it maps to.",
-    "changeLater": "You can change this at any time under Tools > Configurations > Privacy.",
+    "changeLater": "You can change this at any time under Tools > Configurations > Privacy. While it is off, Piper asks once more after each update.",
 
     "accept": "Send anonymous feedback",
     "decline": "No thanks"

@@ -688,6 +688,50 @@ internal static class AnalyticsTests
             // Answering records the version, which is what stops the question repeating.
             client.RecordNoticeShown("0.9.0");
             runner.IsTrue(!client.ShouldAskConsent("0.9.0"), "and declining again settles it until the next update");
+
+            // Versions, not strings: ordinal comparison would call 0.10.0 older than 0.9.0.
+            runner.IsTrue(!client.ShouldAskConsent("0.8.5"), "a downgrade does not ask");
+            runner.IsTrue(!client.ShouldAskConsent("0.9.0.0"), "nor does the same version rendered differently");
+            runner.IsTrue(client.ShouldAskConsent("0.10.0"), "but a later minor version does");
+
+            temp.Settings.NoticeShownVersion = "not-a-version";
+            runner.IsTrue(client.ShouldAskConsent("0.10.0"), "and a hand-edited value errs toward asking");
+            return Task.CompletedTask;
+        });
+
+        await runner.RunAsync("analytics: a minted identifier is always accepted back unchanged", () =>
+        {
+            // The registry store and the settings store both mint with NewIdentifier and read back
+            // through TryNormaliseIdentifier, so this is the round trip that keeps an identity stable
+            // from one launch to the next. The registry I/O itself is Windows-only and lives in
+            // Piper.App, which the smoke tests do not build.
+            for (var i = 0; i < 100; i++)
+            {
+                var minted = AnalyticsSchema.NewIdentifier();
+                if (!AnalyticsSchema.TryNormaliseIdentifier(minted, out var readBack) || readBack != minted)
+                {
+                    runner.IsTrue(false, $"minted {minted} was not accepted back unchanged");
+                    return Task.CompletedTask;
+                }
+
+                if (minted.Length != 36 || AnalyticsSchema.SanitiseValue(minted) != minted)
+                {
+                    runner.IsTrue(false, $"minted {minted} is not a 36-character token");
+                    return Task.CompletedTask;
+                }
+            }
+
+            runner.IsTrue(true, "100 minted identifiers each read back as themselves");
+
+            runner.IsTrue(
+                AnalyticsSchema.TryNormaliseIdentifier("9ccc41f52c704a819d2c4f934b84f87f", out var legacy)
+                    && legacy == "9ccc41f5-2c70-4a81-9d2c-4f934b84f87f",
+                "an identifier stored undashed by an earlier build keeps its identity, dashed");
+            runner.IsTrue(
+                !AnalyticsSchema.TryNormaliseIdentifier("https://bank.example/x", out _)
+                    && !AnalyticsSchema.TryNormaliseIdentifier(null, out _)
+                    && !AnalyticsSchema.TryNormaliseIdentifier(new string('a', 10_000), out _),
+                "and anything that is not a GUID is refused");
             return Task.CompletedTask;
         });
 

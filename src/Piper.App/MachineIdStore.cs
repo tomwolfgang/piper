@@ -61,15 +61,16 @@ internal static class MachineIdStore
             // it gets the same validation as anything else that leaves the machine.
             using (var existing = Registry.CurrentUser.OpenSubKey(KeyPath, writable: false))
             {
+                // The same rule minting is tested against, so a value written below is always
+                // accepted here on the next launch rather than replaced with a new identity.
                 if (existing?.GetValue(ValueName) is string stored
-                    && AnalyticsSchema.SanitiseValue(stored) == stored)
+                    && AnalyticsSchema.TryNormaliseIdentifier(stored, out var identifier))
                 {
-                    return stored;
+                    return identifier;
                 }
             }
 
-            // Dashed, the form the collector indexes; AnalyticsClient re-renders older undashed ones.
-            var created = Guid.NewGuid().ToString("D");
+            var created = AnalyticsSchema.NewIdentifier();
             using var key = Registry.CurrentUser.CreateSubKey(KeyPath);
             key?.SetValue(ValueName, created, RegistryValueKind.String);
             return created;
