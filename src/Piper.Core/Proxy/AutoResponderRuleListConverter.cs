@@ -14,6 +14,14 @@ internal sealed class RuleCountExceededException : Exception
 }
 
 /// <summary>
+/// "Rules" was something other than an array. A type of its own, without a message, so no
+/// author-written English can reach the user through <c>Detail</c>.
+/// </summary>
+internal sealed class RulesNotAnArrayException : Exception
+{
+}
+
+/// <summary>
 /// Reads the rule array element by element and gives up at the first one past
 /// <see cref="AutoResponderSettingsStore.MaxRules"/>, so the cap bounds what is allocated rather than
 /// only what is kept: an 8 MB array of <c>{}</c> is millions of elements.
@@ -23,8 +31,7 @@ internal sealed class AutoResponderRuleListConverter : JsonConverter<List<AutoRe
     public override List<AutoResponderRule>? Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
     {
         if (reader.TokenType == JsonTokenType.Null) return null;
-        if (reader.TokenType != JsonTokenType.StartArray)
-            throw new JsonException("Rules must be an array.");
+        if (reader.TokenType != JsonTokenType.StartArray) throw new RulesNotAnArrayException();
 
         var rules = new List<AutoResponderRule>();
         var seen = 0;

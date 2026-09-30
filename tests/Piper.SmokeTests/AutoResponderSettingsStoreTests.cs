@@ -12,6 +12,7 @@ internal static class AutoResponderSettingsStoreTests
         await RunSaveFailureAsync(runner);
         await RunRuleCountDuringReadAsync(runner);
         await RunStaleTemporariesAsync(runner);
+        await RunUserFacingTextAsync(runner);
         await RunSetAsideAsync(runner);
         await RunAppendAsync(runner);
         await RunHostileExpressionsAsync(runner);
@@ -397,7 +398,11 @@ internal static class AutoResponderSettingsStoreTests
             File.SetLastWriteTimeUtc(unrelated, DateTime.UtcNow.AddDays(-1));
             File.SetLastWriteTimeUtc(otherFile, DateTime.UtcNow.AddDays(-1));
 
+            // An explicit path is an export into a folder the user chose: nothing there is swept.
             runner.IsTrue(AutoResponderSettingsStore.Save(new AutoResponderSettings(), path).Succeeded, "saved");
+            runner.IsTrue(File.Exists(stale), "a stale temporary beside an export is left alone");
+
+            AutoResponderSettingsStore.SweepStaleTemporaries(path);
             runner.IsTrue(!File.Exists(stale), "an old temporary from a killed save is removed");
             runner.IsTrue(File.Exists(fresh), "a recent one may belong to a save in progress and stays");
             runner.IsTrue(File.Exists(otherRules), "a file that only looks like one stays");
@@ -409,6 +414,37 @@ internal static class AutoResponderSettingsStoreTests
             DeleteAll(path);
             foreach (var file in new[] { stale, fresh, otherRules, unrelated, otherFile })
                 if (File.Exists(file)) File.Delete(file);
+        }
+
+        return Task.CompletedTask;
+    });
+
+    // What the user reads about a bad file must come from the catalogue, never from the raw key or
+    // from wording the code wrote itself.
+    private static Task RunUserFacingTextAsync(TestRunner runner) => runner.RunAsync("AutoResponder rules file: user-facing text", () =>
+    {
+        var path = TempPath();
+        try
+        {
+            var tooMany = Piper.App.Strings.AutoResponder.ImportTooManyRules(5001);
+            runner.IsTrue(!tooMany.StartsWith("autoResponder.", StringComparison.Ordinal), "the too-many message is not a raw key");
+            runner.IsTrue(tooMany.Contains(AutoResponderSettingsStore.MaxRules.ToString("N0")), "and names the limit");
+
+            foreach (var (text, what) in new[] { ("null", "a null document"), ("""{"Rules":5}""", "Rules that is not an array") })
+            {
+                var result = Load(path, text);
+                runner.AreEqual(AutoResponderLoadStatus.Malformed, result.Status, $"{what} is malformed");
+                runner.IsTrue(result.Detail is null, $"{what} carries no author-written detail");
+                runner.AreEqual(Piper.App.Strings.AutoResponder.UnreadableRuleSet, Piper.App.Strings.AutoResponder.LoadProblem(result),
+                    $"{what} is explained by the catalogue's generic sentence");
+            }
+
+            var truncated = Load(path, """{"Rules":[""");
+            runner.IsTrue(truncated.Detail is not null, "a parser error keeps the parser's own detail");
+        }
+        finally
+        {
+            DeleteAll(path);
         }
 
         return Task.CompletedTask;

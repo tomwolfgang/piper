@@ -88,6 +88,10 @@ public static class AutoResponderSettingsStore
     public static AutoResponderSaveResult Save(AutoResponderSettings settings, string? path = null)
     {
         ArgumentNullException.ThrowIfNull(settings);
+
+        // Only Piper's own directory is swept afterwards; an export goes into a folder the user
+        // chose, and an orphaned temporary next to an interrupted one is left for them to see.
+        var usingDefaultPath = path is null;
         path ??= DefaultPath;
 
         if (settings.Rules.Count > MaxRules) return new AutoResponderSaveResult(AutoResponderSaveStatus.TooManyRules);
@@ -108,7 +112,7 @@ public static class AutoResponderSettingsStore
             temporary = $"{path}.{Guid.NewGuid():N}.tmp";
             File.WriteAllBytes(temporary, bytes);
             File.Move(temporary, path, overwrite: true);
-            SweepStaleTemporaries(path);
+            if (usingDefaultPath) SweepStaleTemporaries(path);
             return new AutoResponderSaveResult(AutoResponderSaveStatus.Saved);
         }
         catch (Exception ex) when (IsFileFailure(ex))
@@ -142,8 +146,7 @@ public static class AutoResponderSettingsStore
                 return new AutoResponderLoadResult(AutoResponderLoadStatus.Malformed, Detail: ex.Message);
             }
 
-            if (settings is null)
-                return new AutoResponderLoadResult(AutoResponderLoadStatus.Malformed, Detail: "the document is null");
+            if (settings is null) return new AutoResponderLoadResult(AutoResponderLoadStatus.Malformed);
 
             EnsureUniqueIds(settings);
             if (usingDefaultPath) SweepStaleTemporaries(path);
@@ -156,6 +159,10 @@ public static class AutoResponderSettingsStore
         catch (RuleCountExceededException)
         {
             return new AutoResponderLoadResult(AutoResponderLoadStatus.TooManyRules);
+        }
+        catch (RulesNotAnArrayException)
+        {
+            return new AutoResponderLoadResult(AutoResponderLoadStatus.Malformed);
         }
         catch (JsonException ex)
         {
@@ -231,7 +238,7 @@ public static class AutoResponderSettingsStore
     /// what a save leaves behind when the process is killed between writing and moving. Only that
     /// exact shape is touched, and a recent one may be another instance's save in flight. Best effort.
     /// </summary>
-    private static void SweepStaleTemporaries(string path)
+    public static void SweepStaleTemporaries(string path)
     {
         try
         {

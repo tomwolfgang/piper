@@ -298,7 +298,9 @@ public sealed class MainForm : Form, IMessageFilter
     /// <summary>
     /// A problem with the AutoResponder rules file found while the constructor ran. A dialog there
     /// would run before the window is shown, so the log gets it at once and the user gets it in
-    /// <see cref="OnShown"/>.
+    /// <see cref="OnShown"/>. A one-shot queue for the time before the window is shown: it is drained
+    /// there once, and a problem that arises later is reported directly (or, for a failed save after
+    /// the first one, only logged).
     /// </summary>
     private string? _pendingRulesNotice;
 
