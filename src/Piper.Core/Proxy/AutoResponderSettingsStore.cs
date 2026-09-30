@@ -143,7 +143,7 @@ public static class AutoResponderSettingsStore
             catch (ArgumentException ex)
             {
                 // From a property setter given hostile content, not from the file system.
-                return new AutoResponderLoadResult(AutoResponderLoadStatus.Malformed, Detail: ex.Message);
+                return new AutoResponderLoadResult(AutoResponderLoadStatus.Malformed, Detail: Bounded(ex.Message));
             }
 
             if (settings is null) return new AutoResponderLoadResult(AutoResponderLoadStatus.Malformed);
@@ -166,11 +166,11 @@ public static class AutoResponderSettingsStore
         }
         catch (JsonException ex)
         {
-            return new AutoResponderLoadResult(AutoResponderLoadStatus.Malformed, Detail: ex.Message);
+            return new AutoResponderLoadResult(AutoResponderLoadStatus.Malformed, Detail: Bounded(ex.Message));
         }
         catch (Exception ex) when (IsFileFailure(ex))
         {
-            return new AutoResponderLoadResult(AutoResponderLoadStatus.Unreadable, Detail: ex.Message);
+            return new AutoResponderLoadResult(AutoResponderLoadStatus.Unreadable, Detail: Bounded(ex.Message));
         }
     }
 
@@ -248,9 +248,13 @@ public static class AutoResponderSettingsStore
             var prefix = Path.GetFileName(path) + ".";
             foreach (var candidate in Directory.EnumerateFiles(directory, prefix + "*.tmp"))
             {
-                var middle = Path.GetFileName(candidate).AsSpan(prefix.Length);
-                middle = middle[..^".tmp".Length];
-                if (middle.Length != 32 || !IsHex(middle)) continue;
+                // The pattern also matches 8.3 short names, which can be shorter than the prefix.
+                var name = Path.GetFileName(candidate);
+                if (name.Length != prefix.Length + 32 + ".tmp".Length
+                    || !name.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) continue;
+
+                var middle = name.AsSpan(prefix.Length, 32);
+                if (!IsHex(middle)) continue;
                 if (DateTime.UtcNow - File.GetLastWriteTimeUtc(candidate) < StaleTemporaryAge) continue;
                 DeleteQuietly(candidate);
             }
@@ -269,6 +273,15 @@ public static class AutoResponderSettingsStore
     }
 
     private static readonly TimeSpan StaleTemporaryAge = TimeSpan.FromMinutes(10);
+
+    private const int MaxDetailLength = 200;
+
+    /// <summary>
+    /// A parser message embeds the JSON path, whose property names come from the file and can be as
+    /// long as the file, and it goes to the log and a dialog on the UI thread.
+    /// </summary>
+    private static string Bounded(string message) =>
+        message.Length <= MaxDetailLength ? message : message[..MaxDetailLength] + "...";
 
     private static bool IsFileFailure(Exception ex) =>
         ex is IOException or UnauthorizedAccessException or NotSupportedException or ArgumentException

@@ -402,7 +402,22 @@ internal static class AutoResponderSettingsStoreTests
             runner.IsTrue(AutoResponderSettingsStore.Save(new AutoResponderSettings(), path).Succeeded, "saved");
             runner.IsTrue(File.Exists(stale), "a stale temporary beside an export is left alone");
 
+            // Odd names the wildcard also matches (empty, short, and one character over the shape)
+            // must be skipped, not abort the sweep.
+            var odd = new[] { $"{path}..tmp", $"{path}.x.tmp", $"{path}.{new string('a', 33)}.tmp" };
+            foreach (var file in odd)
+            {
+                File.WriteAllText(file, "x");
+                File.SetLastWriteTimeUtc(file, DateTime.UtcNow.AddDays(-1));
+            }
+
             AutoResponderSettingsStore.SweepStaleTemporaries(path);
+            foreach (var file in odd)
+            {
+                runner.IsTrue(File.Exists(file), "an odd-shaped name is left alone");
+                File.Delete(file);
+            }
+
             runner.IsTrue(!File.Exists(stale), "an old temporary from a killed save is removed");
             runner.IsTrue(File.Exists(fresh), "a recent one may belong to a save in progress and stays");
             runner.IsTrue(File.Exists(otherRules), "a file that only looks like one stays");
@@ -441,6 +456,17 @@ internal static class AutoResponderSettingsStoreTests
 
             var truncated = Load(path, """{"Rules":[""");
             runner.IsTrue(truncated.Detail is not null, "a parser error keeps the parser's own detail");
+
+            // System messages can embed whatever the caller or the file supplied, and the detail goes
+            // to the log and a dialog: it is cut short whatever its source.
+            var farTooLong = Path.Combine(Path.GetTempPath(), new string('p', 40_000), "rules.json");
+            var unusable = AutoResponderSettingsStore.Load(farTooLong);
+            runner.AreEqual(AutoResponderLoadStatus.Unreadable, unusable.Status, "an impossible path is unreadable");
+            runner.IsTrue(unusable.Detail is { Length: > 0 and <= 210 }, $"and its detail stays short ({unusable.Detail?.Length} characters)");
+
+            var syntax = Load(path, "{\"Rules\":[{\"" + new string('n', 1_000_000) + "\":tru}]}");
+            runner.AreEqual(AutoResponderLoadStatus.Malformed, syntax.Status, "a syntax error under a huge property name is malformed");
+            runner.IsTrue(syntax.Detail is { Length: > 0 and <= 210 }, $"and its detail stays short ({syntax.Detail?.Length} characters)");
         }
         finally
         {

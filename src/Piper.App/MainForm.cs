@@ -300,7 +300,8 @@ public sealed class MainForm : Form, IMessageFilter
     /// would run before the window is shown, so the log gets it at once and the user gets it in
     /// <see cref="OnShown"/>. A one-shot queue for the time before the window is shown: it is drained
     /// there once, and a problem that arises later is reported directly (or, for a failed save after
-    /// the first one, only logged).
+    /// the first one, only logged). Checked: nothing hides the main window today (no tray or
+    /// hide-on-minimise path), so <see cref="OnShown"/> is always reached; revisit if one is added.
     /// </summary>
     private string? _pendingRulesNotice;
 

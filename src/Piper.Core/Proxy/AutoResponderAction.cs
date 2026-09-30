@@ -38,7 +38,11 @@ public sealed class AutoResponderAction
 {
     private enum Kind { Passthrough, Status, File, Raw, Inline, Redirect, ClientRedirect, Drop, Reset, Cors }
 
-    /// <summary>The longest pause a rule can ask for: an hour, well past any client's own timeout. Longer requests wait this long.</summary>
+    /// <summary>
+    /// The longest pause a rule can ask for. Clamping the running total after every prefix is what
+    /// keeps the sum from overflowing; the particular value, one hour, is a deliberate and documented
+    /// behaviour change (a single longer <c>*delay:</c> now waits an hour), not a limit anything else needs.
+    /// </summary>
     public const long MaxDelayMilliseconds = 60L * 60 * 1000;
 
     private readonly Kind _kind;
@@ -77,8 +81,9 @@ public sealed class AutoResponderAction
         // *delay: accumulates and then hands the rest of the string to the real action. Walks an
         // offset instead of re-slicing, and clamps the total: a rules file is hostile input and
         // this runs when it loads, so a long run of prefixes must neither take quadratic time nor
-        // overflow the TimeSpan (about 429,000 stacked *delay:2147483647 prefixes do). The clamp is
-        // a behaviour change: a single *delay: above an hour now waits an hour (see the README).
+        // overflow the TimeSpan (about 429,000 stacked *delay:2147483647 prefixes do). Bounding the
+        // accumulated total is what prevents that; the one-hour value itself is a deliberate,
+        // documented behaviour change (a single *delay: above an hour now waits an hour; see the README).
         var offset = 0;
         var delayMilliseconds = 0L;
         while (TryTakeDelay(text, ref offset, out var milliseconds))
