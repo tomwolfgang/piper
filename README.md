@@ -212,7 +212,11 @@ targets, so `Invoke-WebRequest -Proxy` would never reach Piper.
 - Importing and exporting Fiddler SAZ session archives, by drag-and-drop or **File > Open SAZ
   capture...**; a request-only `.raz` capture is appended to the Composer's history (no responses
   to inspect, but readily reloaded and resent) rather than the main request list. That history
-  keeps the 2,000 most recent requests and drops the oldest beyond that
+  keeps the 2,000 most recent requests and drops the oldest beyond that. An archive is treated as
+  hostile input: an entry may expand to at most 128 MiB and the whole archive to 512 MiB, it may
+  hold at most 200,000 entries, each body is kept only up to the same capture limit as live traffic,
+  and a file that breaks a limit is refused with a message rather than opened. Imported sessions are
+  always listed, whatever capture scope or filterset is active
 - AutoResponder: ordered rules that answer a request locally instead of sending it upstream -
   see below
 - TextWizard: encode, decode and hash a value without leaving Piper — see below

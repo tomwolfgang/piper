@@ -74,19 +74,70 @@ public sealed class SessionStore
 
     public void Add(Session session)
     {
-        // Composer sends are deliberate user actions, not intercepted traffic. Keep them in the
-        // session list even when traffic-capture or response-admission filters are active, so a
-        // request is visible as soon as the user presses Send.
-        if (!session.IsComposed && CaptureFilter is { } captureFilter && !captureFilter(session)) return;
+        if (Admit(session)) AddAccepted(session);
+    }
 
-        if (!session.IsComposed && CompletedSessionFilter is not null && session.Completed is null)
+    /// <summary>
+    /// Adds sessions that pass admission as one batch and returns how many of them are now in the
+    /// store, so a caller reporting "imported N" reports what the user can actually see.
+    /// </summary>
+    /// <remarks>
+    /// One pass over the lock, one capacity trim and one body-budget release for the whole batch:
+    /// adding a large archive session by session would rescan every already-released body from the
+    /// front of the list for each one. A session deferred until its response completes is not in the
+    /// store yet and is not counted. A batch larger than <see cref="Capacity"/> keeps its newest
+    /// sessions, and only those are counted.
+    /// </remarks>
+    public int AddRange(IReadOnlyCollection<Session> sessions)
+    {
+        ArgumentNullException.ThrowIfNull(sessions);
+
+        var accepted = new List<Session>(sessions.Count);
+        foreach (var session in sessions)
+            if (Admit(session)) accepted.Add(session);
+        if (accepted.Count == 0) return 0;
+
+        lock (_gate)
         {
-            lock (_gate) _pendingAdmission.Add(session);
-            return;
+            foreach (var session in accepted)
+            {
+                _sessions.Add(session);
+                Recount(session);
+            }
+            TrimToCapacity();
+            ReleaseOldestBodiesIfOverBudget();
         }
 
-        if (!session.IsComposed && CompletedSessionFilter is { } completedFilter && !completedFilter(session)) return;
-        AddAccepted(session);
+        // Trimming drops the oldest first, so what survived is the end of the batch.
+        var retained = Capacity > 0 ? Math.Min(accepted.Count, Capacity) : accepted.Count;
+        for (var i = accepted.Count - retained; i < accepted.Count; i++)
+            SessionAdded?.Invoke(this, new SessionEventArgs(accepted[i]));
+        return retained;
+    }
+
+    /// <summary>
+    /// Deliberate user actions are not intercepted traffic, so neither the capture scope nor the
+    /// response filter applies to them: a Composer send is visible as soon as Send is pressed, and
+    /// a session the user opened from a capture file is never quietly dropped.
+    /// </summary>
+    private static bool BypassesAdmission(Session session) => session.IsComposed || session.IsImported;
+
+    /// <summary>
+    /// Applies the admission filters. True when the session belongs in the store now; a session whose
+    /// response is still to come is parked until <see cref="NotifyUpdated"/> and answers false.
+    /// </summary>
+    private bool Admit(Session session)
+    {
+        if (BypassesAdmission(session)) return true;
+        if (CaptureFilter is { } captureFilter && !captureFilter(session)) return false;
+
+        if (CompletedSessionFilter is not null && session.Completed is null)
+        {
+            lock (_gate) _pendingAdmission.Add(session);
+            return false;
+        }
+
+        return CompletedSessionFilter is not { } completedFilter || completedFilter(session);
     }
 
     private void AddAccepted(Session session)
@@ -94,29 +145,30 @@ public sealed class SessionStore
         lock (_gate)
         {
             _sessions.Add(session);
-            if (Capacity > 0)
-            {
-                var discardCount = _sessions.Count - _firstSession - Capacity;
-                if (discardCount > 0)
-                {
-                    // Do not shift the whole retained list for every new session once the cap is
-                    // reached. Clear discarded references immediately, then compact the prefix in
-                    // one amortized operation after enough additions have accumulated.
-                    var discardEnd = _firstSession + discardCount;
-                    for (var i = _firstSession; i < discardEnd; i++)
-                    {
-                        Uncount(_sessions[i]);
-                        _sessions[i] = null!;
-                    }
-                    _firstSession = discardEnd;
-                    CompactDiscardedPrefixIfNeeded();
-                }
-            }
-
             Recount(session);
+            TrimToCapacity();
             ReleaseOldestBodiesIfOverBudget();
         }
         SessionAdded?.Invoke(this, new SessionEventArgs(session));
+    }
+
+    private void TrimToCapacity()
+    {
+        if (Capacity <= 0) return;
+        var discardCount = _sessions.Count - _firstSession - Capacity;
+        if (discardCount <= 0) return;
+
+        // Do not shift the whole retained list for every new session once the cap is
+        // reached. Clear discarded references immediately, then compact the prefix in
+        // one amortized operation after enough additions have accumulated.
+        var discardEnd = _firstSession + discardCount;
+        for (var i = _firstSession; i < discardEnd; i++)
+        {
+            Uncount(_sessions[i]);
+            _sessions[i] = null!;
+        }
+        _firstSession = discardEnd;
+        CompactDiscardedPrefixIfNeeded();
     }
 
     /// <summary>Signals that a session has changed, admitting deferred sessions on completion.</summary>
@@ -139,8 +191,8 @@ public sealed class SessionStore
 
         if (wasDeferred)
         {
-            if (!session.IsComposed && CaptureFilter is { } captureFilter && !captureFilter(session)) return;
-            if (!session.IsComposed && CompletedSessionFilter is { } completedFilter && !completedFilter(session)) return;
+            if (!BypassesAdmission(session) && CaptureFilter is { } captureFilter && !captureFilter(session)) return;
+            if (!BypassesAdmission(session) && CompletedSessionFilter is { } completedFilter && !completedFilter(session)) return;
             AddAccepted(session);
             return;
         }

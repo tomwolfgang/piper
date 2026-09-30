@@ -148,7 +148,11 @@
     "openFilter": "Fiddler capture archives (*.saz;*.raz)|*.saz;*.raz|$t(common.allFilesFilter)",
     "saveCaption": "Save selected sessions as Fiddler SAZ",
     "saveFilter": "Fiddler SAZ captures (*.saz)|*.saz|$t(common.allFilesFilter)",
-    "suggestedFileName": "piper-capture-{{now, yyyyMMdd-HHmmss}}.saz"
+    "suggestedFileName": "piper-capture-{{now, yyyyMMdd-HHmmss}}.saz",
+    "unreadable": "{{fileName}} was not imported: it is not a readable Fiddler capture archive.\n\n{{detail}}",
+    "tooManyEntries": "{{fileName}} was not imported: it holds more than {{limit, N0}} entries, or its index is larger than any real capture's.",
+    "tooLarge": "{{fileName}} was not imported: it expands to more than {{limit}} of data. Split the capture into smaller files.",
+    "failed": "{{fileName}} could not be imported: {{message}}"
   },
 
   "certificates": {
@@ -236,6 +240,8 @@
     "importedSessions_other": "Imported {{count, N0}} sessions from {{fileName}}.",
     "importedSessionsToComposer_one": "Imported {{count, N0}} session from {{fileName}} into Composer History.",
     "importedSessionsToComposer_other": "Imported {{count, N0}} sessions from {{fileName}} into Composer History.",
+    "importedSessionsDropped_one": "{{count, N0}} imported session did not fit within the limit of {{capacity, N0}} sessions and was dropped, oldest first.",
+    "importedSessionsDropped_other": "{{count, N0}} imported sessions did not fit within the limit of {{capacity, N0}} sessions and were dropped, oldest first.",
     "sazImportWarning": "SAZ import warning ({{fileName}}): {{warning}}",
     "autoResponderWarning": "AutoResponder: {{warning}}",
 

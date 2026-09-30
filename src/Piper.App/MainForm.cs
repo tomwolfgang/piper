@@ -956,28 +956,64 @@ public sealed class MainForm : Form, IMessageFilter
         var importedToComposer = false;
         foreach (var path in paths)
         {
-            var result = await Task.Run(() => SazImporter.Import(path));
+            var fileName = Path.GetFileName(path);
             var isComposerImport = path.EndsWith(".raz", StringComparison.OrdinalIgnoreCase);
-            if (isComposerImport)
+            try
             {
-                _composer.AppendToHistory(result.Sessions);
-                importedToComposer = true;
-            }
-            else
-            {
-                foreach (var session in result.Sessions) _store.Add(session);
-            }
+                var limits = new SazImportLimits { MaxBodyBytes = _options.MaxCapturedBodyBytes };
+                var result = await Task.Run(() => SazImporter.Import(path, limits));
+                foreach (var warning in result.Warnings)
+                    AppendLog(Strings.Log.SazImportWarning(fileName, warning));
+                if (result.Failure != SazImportFailure.None)
+                {
+                    ReportSazImportProblem(result.Failure switch
+                    {
+                        SazImportFailure.TooManyEntries => Strings.SazImport.TooManyEntries(fileName, limits.MaxEntries),
+                        SazImportFailure.TooLarge => Strings.SazImport.TooLarge(fileName, Format.Size(limits.MaxTotalBytes)),
+                        _ => Strings.SazImport.Unreadable(fileName, result.Warnings.FirstOrDefault() ?? string.Empty),
+                    });
+                    continue;
+                }
 
-            Analytics.Track(
-                AnalyticsEvents.FeatureUsed,
-                (AnalyticsProperties.Feature, "session_import"),
-                (AnalyticsProperties.Format, isComposerImport ? "raz" : "saz"),
-                (AnalyticsProperties.Count, Analytics.CountBucket(result.Sessions.Count)));
-            AppendLog(Strings.Log.ImportedSessions(result.Sessions.Count, Path.GetFileName(path), isComposerImport));
-            foreach (var warning in result.Warnings)
-                AppendLog(Strings.Log.SazImportWarning(Path.GetFileName(path), warning));
+                int kept;
+                int capacity;
+                if (isComposerImport)
+                {
+                    kept = _composer.AppendToHistory(result.Sessions);
+                    capacity = ComposerHistoryStore.MaxEntries;
+                    importedToComposer = true;
+                }
+                else
+                {
+                    kept = _store.AddRange(result.Sessions);
+                    capacity = _store.Capacity;
+                }
+
+                Analytics.Track(
+                    AnalyticsEvents.FeatureUsed,
+                    (AnalyticsProperties.Feature, "session_import"),
+                    (AnalyticsProperties.Format, isComposerImport ? "raz" : "saz"),
+                    (AnalyticsProperties.Count, Analytics.CountBucket(kept)));
+                AppendLog(Strings.Log.ImportedSessions(kept, fileName, isComposerImport));
+                if (kept < result.Sessions.Count)
+                    AppendLog(Strings.Log.ImportedSessionsDropped(result.Sessions.Count - kept, capacity));
+            }
+            catch (Exception ex)
+            {
+                // This is an async void handler, so an exception here is an unhandled crash of the
+                // whole app rather than a failed import. The recovery is to say which file failed
+                // and carry on with the next one.
+                ReportSazImportProblem(Strings.SazImport.Failed(fileName, ex.Message));
+            }
         }
         _rightTabs.SelectedIndex = importedToComposer ? 1 : 0;
+    }
+
+    /// <summary>Logs a refused import and tells the user, since a drop or a file association gives no other feedback.</summary>
+    private void ReportSazImportProblem(string message)
+    {
+        AppendLog(message);
+        MessageBox.Show(this, message, Strings.App.Name, MessageBoxButtons.OK, MessageBoxIcon.Warning);
     }
 
     private ToolStrip BuildToolbar()
