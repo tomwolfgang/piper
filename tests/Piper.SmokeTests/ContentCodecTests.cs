@@ -50,6 +50,21 @@ internal static class ContentCodecTests
             return Task.CompletedTask;
         });
 
+        await runner.RunAsync("a stacked decode whose inner layer fails on a cut stream still reports the cut", () =>
+        {
+            // Mislabelled on purpose: the outer layer inflates to plain text and is cut at the cap, then
+            // the inner "gzip" layer cannot read that text at all. The original bytes come back, and
+            // the result must not read as "complete" or as "nothing was attempted".
+            var wire = Compress(Encoding.ASCII.GetBytes(new string('x', 100_000)), "gzip");
+            var stacked = ContentCodec.DecodeBounded(wire, "gzip, gzip", 1024);
+            runner.IsTrue(ReferenceEquals(wire, stacked.Bytes), "the original bytes come back when an inner layer fails");
+            runner.IsTrue(stacked.Truncated, "and the earlier layer's cut is reported");
+
+            var nothingAttempted = ContentCodec.DecodeBounded(wire, "zstd", 1024);
+            runner.IsTrue(!nothingAttempted.Truncated, "an unknown encoding, where nothing was cut, is not flagged");
+            return Task.CompletedTask;
+        });
+
         await runner.RunAsync("a Content-Encoding stacking too many layers is left undecoded", () =>
         {
             var text = Encoding.ASCII.GetBytes("nested");

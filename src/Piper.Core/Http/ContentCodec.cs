@@ -7,11 +7,15 @@ namespace Piper.Core.Http;
 /// <summary>A body with its Content-Encoding removed, and whether all of it is there.</summary>
 /// <param name="Bytes">The decoded bytes, or the original bytes when nothing could be decoded.</param>
 /// <param name="Truncated">
-/// True when decoding stopped early: the output hit the size cap, or the compressed stream was
-/// corrupt part-way. <paramref name="Bytes"/> then holds what was decoded up to that point. A stream
-/// that simply ends early (a captured prefix of a large download) cannot be told apart from a
-/// complete one by the decompressors, so callers that care also check
-/// <see cref="HttpMessage.IsBodyComplete"/>.
+/// True when the decoded view is known to be incomplete or unreliable because some layer was cut:
+/// its output hit the size cap, or its compressed stream was corrupt part-way. When the last layer
+/// was cut, <paramref name="Bytes"/> holds what was decoded up to that point. When an earlier layer
+/// was cut and a later one then could not read the cut stream, <paramref name="Bytes"/> is the
+/// original (still encoded) body and this is still true. False means no layer was cut; it does not
+/// mean the body was decoded (an unknown encoding, or a body that is not really compressed, comes
+/// back as the original bytes with False). A stream that simply ends early (a captured prefix of a
+/// large download) cannot be told apart from a complete one by the decompressors, so callers that
+/// care also check <see cref="HttpMessage.IsBodyComplete"/>.
 /// </param>
 public readonly record struct DecodedContent(byte[] Bytes, bool Truncated);
 
@@ -59,8 +63,10 @@ public static class ContentCodec
         var truncated = false;
         for (var i = encodings.Length - 1; i >= 0; i--)
         {
+            // A layer that fails leaves the original bytes, but if an earlier layer was already cut
+            // (so this one was handed a cut stream) the result must still say the view is incomplete.
             if (!TryDecodeOne(current, encodings[i], maxBytes, out var decoded, out var cut))
-                return new DecodedContent(body, false);
+                return new DecodedContent(body, truncated);
             current = decoded;
             truncated |= cut;
         }
