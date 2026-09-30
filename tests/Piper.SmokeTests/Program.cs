@@ -541,6 +541,7 @@ await UiStringTests.RunAsync(runner);
 await ColumnLayoutTests.RunAsync(runner);
 await WebFormParserTests.RunAsync(runner);
 await TextTransformsTests.RunAsync(runner);
+await ContentCodecTests.RunAsync(runner);
 await TextTransformDetectorTests.RunAsync(runner);
 await SearchQueryTests.RunAsync(runner);
 await SessionSortTests.RunAsync(runner);

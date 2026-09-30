@@ -199,7 +199,9 @@ targets, so `Invoke-WebRequest -Proxy` would never reach Piper.
   default - see below
 - Response bodies relayed as they arrive rather than buffered whole, so a download starts at
   once, a stream that never ends can be captured, and size is not a limit - see below
-- Chunked de-framing; gzip, deflate and brotli decoding for display
+- Chunked de-framing; gzip, deflate and brotli decoding for display, bounded at 64 MiB of decoded
+  output per body (across stacked encodings) so a decompression bomb cannot exhaust memory; the
+  original bytes are always kept
 - WebSocket / `101 Switching Protocols` upgrade pass-through, relayed in both directions until
   both sides close rather than until the first one does
 - Virtual-mode session grid that stays responsive under load
