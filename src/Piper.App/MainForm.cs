@@ -877,11 +877,11 @@ public sealed class MainForm : Form, IMessageFilter
         if (dialog.ShowDialog(this) == DialogResult.OK) ImportSazFiles(dialog.FileNames);
     }
 
+    private const int MaxImportProblemsShown = 8;
+
     /// <summary>Imports SAZ/RAZ files on a worker thread. A ".saz" (full session capture) adds its
     /// sessions to the main request list; a ".raz" (request-only capture, no responses) instead
     /// appends its requests to the Composer's persisted history, alongside what's already there.</summary>
-    private const int MaxImportProblemsShown = 8;
-
     public async void ImportSazFiles(IEnumerable<string> filePaths)
     {
         var requested = filePaths.ToArray();
