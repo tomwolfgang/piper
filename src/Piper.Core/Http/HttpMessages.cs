@@ -59,8 +59,16 @@ public abstract class HttpMessage
 
     public string? ContentEncoding => Headers["Content-Encoding"];
 
+    /// <summary>
+    /// <see cref="Body"/> with Content-Encoding removed, capped at <see cref="ContentCodec.MaxDecodedBytes"/>,
+    /// and whether the cap (or a corrupt stream) cut it short. Decoded once per body array and remembered,
+    /// so reading it again costs nothing.
+    /// </summary>
+    public DecodedContent Decoded => ContentCodec.DecodeCached(Body, ContentEncoding);
+
     /// <summary>Body with Content-Encoding removed. Falls back to the raw body if decoding fails.</summary>
-    public byte[] DecodedBody => ContentCodec.Decode(Body, ContentEncoding);
+    /// <remarks>Shared, like <see cref="Body"/>: read it, never write into it.</remarks>
+    public byte[] DecodedBody => Decoded.Bytes;
 
     /// <summary>Best-effort text rendering of <see cref="DecodedBody"/> using the charset from Content-Type.</summary>
     public string BodyAsText() => TextOf(Body, ContentType, ContentEncoding);

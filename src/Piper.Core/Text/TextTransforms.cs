@@ -5,6 +5,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Encodings.Web;
 using System.Text.Json;
+using Piper.Core.Http;
 
 namespace Piper.Core.Text;
 
@@ -171,19 +172,13 @@ public static class TextTransforms
     {
         using var source = new MemoryStream(bytes, writable: false);
         using var decompressor = new DeflateStream(source, CompressionMode.Decompress);
-        using var target = new MemoryStream();
 
-        // Copied a block at a time so the cap is enforced as the data arrives; CopyTo would happily
-        // materialise a decompression bomb first and let us notice afterwards.
-        var chunk = new byte[16 * 1024];
-        int read;
-        while ((read = decompressor.Read(chunk, 0, chunk.Length)) > 0)
-        {
-            if (target.Length + read > MaxInflatedBytes)
-                throw new InvalidDataException($"The compressed input expands past {MaxInflatedBytes / 1024} KiB.");
-            target.Write(chunk, 0, read);
-        }
+        // The same bounded read HTTP bodies use, so the cap is enforced as the data arrives.
+        var (inflated, truncated) = ContentCodec.BoundedDecompress(decompressor, MaxInflatedBytes);
+        if (truncated)
+            throw new InvalidDataException(
+                $"The compressed input is corrupt or expands past {MaxInflatedBytes / 1024} KiB.");
 
-        return target.ToArray();
+        return inflated;
     }
 }
