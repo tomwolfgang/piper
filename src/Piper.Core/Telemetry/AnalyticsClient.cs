@@ -730,8 +730,8 @@ public sealed class AnalyticsClient : IDisposable
         var extra = new Dictionary<string, string>(StringComparer.Ordinal);
         foreach (var (key, value) in recorded.Properties) extra[key] = value;
 
-        // Applied last so a caller key can never shadow them. The same facts the CurseForge apps
-        // report, under Piper's own names rather than theirs - see AnalyticsProperties.
+        // Applied last so a caller key can never shadow them. Mirrors the keys the CurseForge
+        // service merges in for its own callers; Piper reports directly, so it supplies them itself.
         extra[AnalyticsProperties.AppVersion] = AnalyticsSchema.SanitiseValue(_appVersion);
         extra[AnalyticsProperties.OsVersion] = AnalyticsSchema.SanitiseValue(OperatingSystemName());
         extra[AnalyticsProperties.AppType] = AppType;

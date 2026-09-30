@@ -224,7 +224,7 @@ internal static class AnalyticsTests
             runner.IsTrue(
                 server.LastRequest.Contains("\"app_ver\"", StringComparison.Ordinal)
                     && server.LastRequest.Contains("\"app_type\":\"piper\"", StringComparison.Ordinal),
-                "and carries the base keys on every event");
+                "and carries the base keys the shared dashboards expect");
         });
 
         await runner.RunAsync("analytics: every event carries its position in the run", async () =>

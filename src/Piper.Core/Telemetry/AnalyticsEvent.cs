@@ -77,9 +77,10 @@ public static class AnalyticsEvents
 /// <summary>
 /// The complete set of property keys carried in Extra. Nothing outside this list is sent.
 ///
-/// The first three are attached to every event. They carry the same information the CurseForge apps
-/// report, but not under the same names - those are indexed as appVer, osVer and appType - so a
-/// dashboard built for the CurseForge apps does not read Piper's events without being adapted.
+/// The first three are attached to every event, matching the keys the CurseForge analytics service
+/// merges in automatically, so the same dashboards read both. Piper reports directly rather than
+/// through that service, so it has to add them itself. Both send them in snake_case; the collector's
+/// pipeline indexes every Extra key in camelCase (app_ver as appVer), so they must stay snake_case.
 /// </summary>
 public static class AnalyticsProperties
 {
