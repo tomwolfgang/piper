@@ -195,6 +195,11 @@ targets, so `Invoke-WebRequest -Proxy` would never reach Piper.
 - HTTP/2 on both legs (from-scratch HPACK, framing and flow control) - ALPN-negotiated with the
   browser inside a decrypted tunnel and, independently, with the origin server, so Piper freely
   translates between h1.1 and h2 on either side and records which protocol each leg actually used
+- The browser-facing HTTP/2 connection treats its peer as hostile: a peer that floods PING, SETTINGS
+  or resets without reading the replies gets GOAWAY(`ENHANCE_YOUR_CALM`), a malformed header block
+  is `COMPRESSION_ERROR`, a flow-control window past 2^31-1 is `FLOW_CONTROL_ERROR`, a connection
+  with nothing in flight and no traffic for five minutes is closed with GOAWAY(`NO_ERROR`), and a
+  GOAWAY from the peer lets its open requests finish before the connection ends
 - HTTP/3 to origin servers (from-scratch QPACK and framing over `System.Net.Quic`), off by
   default - see below
 - Response bodies relayed as they arrive rather than buffered whole, so a download starts at

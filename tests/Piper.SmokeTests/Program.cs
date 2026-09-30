@@ -584,6 +584,7 @@ await HpackTests.RunAsync(runner);
 await Http2FrameTests.RunAsync(runner);
 await Http2MessageAdapterTests.RunAsync(runner);
 await Http2ConnectionTests.RunAsync(runner);
+await Http2ServerHardeningTests.RunAsync(runner);
 await Http2StreamingTests.RunAsync(runner);
 await Http2Tests.RunAsync(runner);
 await Http3CodecTests.RunAsync(runner);

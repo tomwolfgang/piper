@@ -55,6 +55,10 @@ public sealed class Http2Settings
         return buffer;
     }
 
+    /// <summary>The wire carries unsigned 32-bit values, the properties are <see cref="int"/>. A cast
+    /// would turn 2^31 and up into negative numbers; an "unlimited" limit must stay large.</summary>
+    private static int ClampToInt(uint value) => value > int.MaxValue ? int.MaxValue : (int)value;
+
     /// <summary>Applies one SETTINGS frame's payload on top of the current values (§6.5: settings
     /// persist for the connection's lifetime and are updated incrementally, not replaced wholesale).</summary>
     public void ApplyPeerPayload(ReadOnlySpan<byte> payload)
@@ -70,14 +74,14 @@ public sealed class Http2Settings
             switch (id)
             {
                 case 1:
-                    HeaderTableSize = unchecked((int)value);
+                    HeaderTableSize = ClampToInt(value);
                     break;
                 case 2:
                     if (value > 1) throw new Http2ProtocolException(Http2ErrorCode.ProtocolError, "SETTINGS_ENABLE_PUSH must be 0 or 1.");
                     EnablePush = value != 0;
                     break;
                 case 3:
-                    MaxConcurrentStreams = unchecked((int)value);
+                    MaxConcurrentStreams = ClampToInt(value);
                     break;
                 case 4:
                     if (value > int.MaxValue)
@@ -90,7 +94,7 @@ public sealed class Http2Settings
                     MaxFrameSize = (int)value;
                     break;
                 case 6:
-                    MaxHeaderListSize = unchecked((int)value);
+                    MaxHeaderListSize = ClampToInt(value);
                     break;
                 default:
                     break; // unknown settings identifiers are ignored, per §6.5.2
