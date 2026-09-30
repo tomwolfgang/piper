@@ -880,6 +880,8 @@ public sealed class MainForm : Form, IMessageFilter
     /// <summary>Imports SAZ/RAZ files on a worker thread. A ".saz" (full session capture) adds its
     /// sessions to the main request list; a ".raz" (request-only capture, no responses) instead
     /// appends its requests to the Composer's persisted history, alongside what's already there.</summary>
+    private const int MaxImportProblemsShown = 8;
+
     public async void ImportSazFiles(IEnumerable<string> filePaths)
     {
         var requested = filePaths.ToArray();
@@ -900,6 +902,10 @@ public sealed class MainForm : Form, IMessageFilter
         Activate();
 
         var importedToComposer = false;
+        // Full texts for the one dialog shown after the last file. The log gets a path-free line for
+        // each: a file-system message names the whole local path, and the log can travel in the
+        // diagnostics bundle.
+        var problems = new List<string>();
         foreach (var path in paths)
         {
             var fileName = Path.GetFileName(path);
@@ -908,16 +914,30 @@ public sealed class MainForm : Form, IMessageFilter
             {
                 var limits = new SazImportLimits { MaxBodyBytes = _options.MaxCapturedBodyBytes };
                 var result = await Task.Run(() => SazImporter.Import(path, limits));
+                // The window can close while the import runs on the worker; nothing below can be shown then.
+                if (IsDisposed) return;
+
                 foreach (var warning in result.Warnings)
                     AppendLog(Strings.Log.SazImportWarning(fileName, warning));
                 if (result.Failure != SazImportFailure.None)
                 {
-                    ReportSazImportProblem(result.Failure switch
+                    switch (result.Failure)
                     {
-                        SazImportFailure.TooManyEntries => Strings.SazImport.TooManyEntries(fileName, limits.MaxEntries),
-                        SazImportFailure.TooLarge => Strings.SazImport.TooLarge(fileName, Format.Size(limits.MaxTotalBytes)),
-                        _ => Strings.SazImport.Unreadable(fileName, result.Warnings.FirstOrDefault() ?? string.Empty),
-                    });
+                        case SazImportFailure.TooManyEntries:
+                            var tooMany = Strings.SazImport.TooManyEntries(fileName, limits.MaxEntries);
+                            AppendLog(tooMany);
+                            problems.Add(tooMany);
+                            break;
+                        case SazImportFailure.TooLarge:
+                            var tooLarge = Strings.SazImport.TooLarge(fileName, Format.Size(limits.MaxTotalBytes));
+                            AppendLog(tooLarge);
+                            problems.Add(tooLarge);
+                            break;
+                        default:
+                            AppendLog(Strings.SazImport.UnreadableLogged(fileName));
+                            problems.Add(Strings.SazImport.Unreadable(fileName, result.FailureDetail ?? string.Empty));
+                            break;
+                    }
                     continue;
                 }
 
@@ -948,18 +968,23 @@ public sealed class MainForm : Form, IMessageFilter
             {
                 // This is an async void handler, so an exception here is an unhandled crash of the
                 // whole app rather than a failed import. The recovery is to say which file failed
-                // and carry on with the next one.
-                ReportSazImportProblem(Strings.SazImport.Failed(fileName, ex.Message));
+                // and carry on with the next one. Only the type goes in the log; the message is for the dialog.
+                if (IsDisposed) return;
+                AppendLog(Strings.SazImport.FailedLogged(fileName, ex.GetType().Name));
+                problems.Add(Strings.SazImport.Failed(fileName, ex.Message));
             }
         }
-        _rightTabs.SelectedIndex = importedToComposer ? 1 : 0;
-    }
 
-    /// <summary>Logs a refused import and tells the user, since a drop or a file association gives no other feedback.</summary>
-    private void ReportSazImportProblem(string message)
-    {
-        AppendLog(message);
-        MessageBox.Show(this, message, Strings.App.Name, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        if (IsDisposed) return;
+        // One dialog for every file that failed, since a drop or a file association gives no other feedback.
+        if (problems.Count > 0 && IsHandleCreated)
+        {
+            var shown = problems.Take(MaxImportProblemsShown).ToList();
+            if (problems.Count > shown.Count) shown.Add(Strings.SazImport.MoreProblems(problems.Count - shown.Count));
+            MessageBox.Show(this, string.Join("\n\n", shown), Strings.App.Name, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+        if (IsDisposed) return;
+        _rightTabs.SelectedIndex = importedToComposer ? 1 : 0;
     }
 
     private ToolStrip BuildToolbar()

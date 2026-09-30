@@ -97,6 +97,7 @@ public sealed class SessionStore
             if (Admit(session)) accepted.Add(session);
         if (accepted.Count == 0) return 0;
 
+        int capacity;
         lock (_gate)
         {
             foreach (var session in accepted)
@@ -104,12 +105,13 @@ public sealed class SessionStore
                 _sessions.Add(session);
                 Recount(session);
             }
+            capacity = Capacity;
             TrimToCapacity();
             ReleaseOldestBodiesIfOverBudget();
         }
 
         // Trimming drops the oldest first, so what survived is the end of the batch.
-        var retained = Capacity > 0 ? Math.Min(accepted.Count, Capacity) : accepted.Count;
+        var retained = capacity > 0 ? Math.Min(accepted.Count, capacity) : accepted.Count;
         for (var i = accepted.Count - retained; i < accepted.Count; i++)
             SessionAdded?.Invoke(this, new SessionEventArgs(accepted[i]));
         return retained;

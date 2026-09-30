@@ -66,7 +66,7 @@ public static partial class SazImporter
                 }
                 catch (Exception ex) when (IsBadEntry(ex))
                 {
-                    warnings.Add($"Session {id}: {ex.Message}");
+                    warnings.Add($"Session {id}: {Describe(ex)}");
                     continue;
                 }
 
@@ -86,7 +86,7 @@ public static partial class SazImporter
                     }
                     catch (Exception ex) when (IsBadEntry(ex))
                     {
-                        warnings.Add($"Session {id}: response not captured ({ex.Message})");
+                        warnings.Add($"Session {id}: response not captured ({Describe(ex)})");
                     }
                 }
 
@@ -113,8 +113,12 @@ public static partial class SazImporter
                                        or NotSupportedException or ArgumentException)
         {
             // Not a zip, a truncated one, or a file that cannot be opened: nothing can be imported.
-            warnings.Add(ex.Message);
-            return new SazImportResult([], warnings.ToList(), SazImportFailure.Unreadable);
+            // ArgumentException is here for the path (a name the file system rejects); nothing that
+            // parses an entry can raise it, which is why it is not in IsBadEntry. File-system messages
+            // embed the full local path, so the warning, which reaches the log, names only the type;
+            // the message travels separately in FailureDetail for the dialog.
+            warnings.Add($"The archive could not be read ({ex.GetType().Name}).");
+            return new SazImportResult([], warnings.ToList(), SazImportFailure.Unreadable, ex.Message);
         }
 
         return new SazImportResult(sessions, warnings.ToList());
@@ -164,9 +168,16 @@ public static partial class SazImporter
         return text.ToString();
     }
 
-    /// <summary>What a single unusable entry looks like. Anything else is not the entry's fault and propagates.</summary>
+    /// <summary>
+    /// What a single unusable entry looks like. Anything else is not the entry's fault and propagates.
+    /// ArgumentException is deliberately absent: reading an entry and parsing its head use only
+    /// <c>TryParse</c>, <c>Uri.TryCreate</c> and range-checked slicing, none of which throw it.
+    /// </summary>
     private static bool IsBadEntry(Exception ex) =>
         ex is InvalidDataException or FormatException or HttpParseException or IOException or NotSupportedException;
+
+    /// <summary>An exception as a warning. A file-system message names the full local path, so only its type is kept.</summary>
+    private static string Describe(Exception ex) => ex is IOException ? ex.GetType().Name : ex.Message;
 
     /// <summary>
     /// Reads one entry, trusting neither its declared length nor how far it inflates: the output is
@@ -415,5 +426,10 @@ public enum SazImportFailure
 /// SAZ import output. Invalid individual sessions are reported as warnings and skipped; an archive
 /// that breaks a limit as a whole is refused (<see cref="Failure"/>) and yields no sessions.
 /// </summary>
+/// <remarks>
+/// <see cref="FailureDetail"/> is the underlying error text for a person to read in a dialog. It can
+/// name a local path, so it is kept out of <see cref="Warnings"/>, which are logged.
+/// </remarks>
 public sealed record SazImportResult(
-    IReadOnlyList<Session> Sessions, IReadOnlyList<string> Warnings, SazImportFailure Failure = SazImportFailure.None);
+    IReadOnlyList<Session> Sessions, IReadOnlyList<string> Warnings, SazImportFailure Failure = SazImportFailure.None,
+    string? FailureDetail = null);
