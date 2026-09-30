@@ -177,6 +177,14 @@ both legs) and HTTP/3 (QUIC varints and QPACK against the RFC 9000/9204 worked v
 real QUIC listener on loopback). Exit code is 0 on success. No test framework, so it runs without
 a NuGet restore.
 
+Every public static `Task Run*Async(TestRunner)` method in the test project is a test group and
+runs automatically, in name order, so a new test file needs no registration. Extra options go
+after `--`: `--filter <text>` runs only the tests whose name contains the text (or every test of a
+group whose `Class.Method` does), `--timeout <seconds>` changes the 60 s limit after which a hung
+test is reported as failed, and `--list` prints the groups. The summary lists the slowest tests.
+Each run keeps its files in its own temp folder and listens on OS-assigned ports, so several runs
+can overlap.
+
 To exercise the UI by hand, start the app and run:
 
 ```bash
