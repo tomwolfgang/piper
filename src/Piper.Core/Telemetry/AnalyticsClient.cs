@@ -770,8 +770,13 @@ public sealed class AnalyticsClient : IDisposable
     ///
     /// Both are validated on the way out, not just on the way in. They are read back from a registry
     /// value and a settings file the user can edit, which would otherwise make them the only
-    /// unbounded, unsanitised strings in the payload. Anything that is not a plain token is
-    /// discarded rather than echoed.
+    /// unbounded, unsanitised strings in the payload. Anything that is not a GUID is discarded
+    /// rather than echoed, and what is sent is re-rendered rather than passed through.
+    ///
+    /// Always sent in the dashed form. The collector answers 200 to any MUID, but its pipeline only
+    /// indexes events whose MUID is a dashed GUID: every report from the versions that sent the
+    /// undashed form was accepted and then silently dropped. Identifiers stored in that form are
+    /// the same GUID, so re-rendering them keeps each machine's identity rather than starting anew.
     /// </summary>
     private string? ResolveIdentity()
     {
@@ -782,19 +787,10 @@ public sealed class AnalyticsClient : IDisposable
             // SetEnabled(false) just deleted, moments after deleting it.
             if (!_settings.Enabled) return null;
 
-            var machine = _machineId?.Invoke();
-            if (!string.IsNullOrEmpty(machine) && AnalyticsSchema.SanitiseValue(machine) == machine)
-            {
-                return machine;
-            }
+            if (Guid.TryParse(_machineId?.Invoke(), out var machine)) return machine.ToString("D");
+            if (Guid.TryParse(_settings.InstallId, out var existing)) return existing.ToString("D");
 
-            var existing = _settings.InstallId;
-            if (!string.IsNullOrEmpty(existing) && AnalyticsSchema.SanitiseValue(existing) == existing)
-            {
-                return existing;
-            }
-
-            var minted = Guid.NewGuid().ToString("n");
+            var minted = Guid.NewGuid().ToString("D");
             _settings.InstallId = minted;
             AnalyticsSettingsStore.Save(_settings, _settingsPath);
             return minted;

@@ -641,19 +641,40 @@ internal static class AnalyticsTests
             temp.Settings.NoticeShownVersion = "0.4.0";
 
             // Stands in for the registry-backed machine identifier, which is what reaches the wire.
-            string? machineId = "aaaabbbbccccdddd";
+            // Stored undashed, as every version before the fix wrote it.
+            string? machineId = "aaaabbbbccccddddeeeeffff00001111";
             using var client = temp.CreateClient(
                 server.Endpoint, machineId: () => machineId, forgetMachineId: () => { machineId = null; return true; });
 
             client.Track(AnalyticsEvents.AppStarted);
             await client.FlushAsync();
             runner.IsTrue(
-                server.LastRequest.Contains("MUID=aaaabbbbccccdddd", StringComparison.Ordinal),
-                "the machine identifier is what gets reported");
+                server.LastRequest.Contains("MUID=aaaabbbb-cccc-dddd-eeee-ffff00001111&", StringComparison.Ordinal),
+                "the machine identifier is what gets reported, re-rendered dashed so the collector indexes it");
 
             client.SetEnabled(false);
             runner.IsTrue(machineId is null, "opting out erases it, not just the installation id");
             runner.IsTrue(temp.Settings.InstallId is null, "and the installation id with it");
+        });
+
+        await runner.RunAsync("analytics: an identifier that is not a GUID is never sent", async () =>
+        {
+            using var server = new LoopbackCollector();
+            using var temp = new TempAnalytics();
+            temp.Settings.Enabled = true;
+            temp.Settings.NoticeShownVersion = "0.4.0";
+
+            // Both are user-editable: a registry value and a settings file.
+            temp.Settings.InstallId = "not-a-guid";
+            using var client = temp.CreateClient(server.Endpoint, machineId: () => "https://bank.example/x");
+
+            client.Track(AnalyticsEvents.AppStarted);
+            await client.FlushAsync();
+
+            runner.IsTrue(
+                Guid.TryParseExact(temp.Settings.InstallId, "D", out var minted)
+                    && server.LastRequest.Contains($"MUID={minted:D}&", StringComparison.Ordinal),
+                "a fresh dashed identifier is minted and sent in place of both");
         });
 
         await runner.RunAsync("analytics: a run reports its start exactly once", async () =>

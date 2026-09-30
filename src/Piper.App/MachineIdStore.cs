@@ -68,7 +68,8 @@ internal static class MachineIdStore
                 }
             }
 
-            var created = Guid.NewGuid().ToString("n");
+            // Dashed, the form the collector indexes; AnalyticsClient re-renders older undashed ones.
+            var created = Guid.NewGuid().ToString("D");
             using var key = Registry.CurrentUser.CreateSubKey(KeyPath);
             key?.SetValue(ValueName, created, RegistryValueKind.String);
             return created;
