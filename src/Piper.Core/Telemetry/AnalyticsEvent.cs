@@ -191,7 +191,7 @@ public static class AnalyticsSchema
         IReadOnlyList<(string Key, string Value)>? properties,
         DateTimeOffset timestamp,
         string runId,
-        int sequence = 0)
+        int sequence)
     {
         if (name is null || !EventNames.Contains(name)) return null;
 

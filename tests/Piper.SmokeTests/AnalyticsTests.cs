@@ -13,14 +13,15 @@ internal static class AnalyticsTests
     {
         await runner.RunAsync("analytics: the schema drops unknown events and keys", () =>
         {
-            var unknown = AnalyticsSchema.Create("piper_traffic_captured", null, DateTimeOffset.UtcNow, "run");
+            var unknown = AnalyticsSchema.Create("piper_traffic_captured", null, DateTimeOffset.UtcNow, "run", 1);
             runner.IsTrue(unknown is null, "an event name outside the allowlist is dropped");
 
             var known = AnalyticsSchema.Create(
                 AnalyticsEvents.FeatureUsed,
                 [(AnalyticsProperties.Feature, "composer"), ("url", "https://bank.example/login")],
                 DateTimeOffset.UtcNow,
-                "run");
+                "run",
+                1);
             runner.IsTrue(known is not null, "an allowlisted event survives");
             runner.AreEqual(1, known!.Properties.Count, "the unknown property key is dropped");
             runner.AreEqual("composer", known.Properties[AnalyticsProperties.Feature], "the known property is kept");
@@ -29,7 +30,7 @@ internal static class AnalyticsTests
             // The run identifier travels outside the property bag, so it has to be sanitised by the
             // boundary itself rather than by whoever happens to call it.
             var hostileRun = AnalyticsSchema.Create(
-                AnalyticsEvents.AppStarted, null, DateTimeOffset.UtcNow, "https://bank.example/x?a=b");
+                AnalyticsEvents.AppStarted, null, DateTimeOffset.UtcNow, "https://bank.example/x?a=b", 1);
             runner.AreEqual(AnalyticsSchema.InvalidValue, hostileRun!.RunId, "a hostile run id is replaced");
             return Task.CompletedTask;
         });
@@ -74,7 +75,7 @@ internal static class AnalyticsTests
             var many = Enumerable.Range(0, 50)
                 .Select(_ => (AnalyticsProperties.Feature, "x"))
                 .ToArray();
-            var recorded = AnalyticsSchema.Create(AnalyticsEvents.FeatureUsed, many, DateTimeOffset.UtcNow, "run");
+            var recorded = AnalyticsSchema.Create(AnalyticsEvents.FeatureUsed, many, DateTimeOffset.UtcNow, "run", 1);
             runner.IsTrue(
                 recorded is not null && recorded.Properties.Count <= AnalyticsSchema.MaxProperties,
                 "property count stays within the cap");
@@ -238,9 +239,19 @@ internal static class AnalyticsTests
             client.Track(AnalyticsEvents.AppStarted);
             client.Track("piper_traffic_captured");
             client.Track(AnalyticsEvents.CaptureStarted, (AnalyticsProperties.Result, "port_in_use"));
+            client.Track(AnalyticsEvents.CertTrusted,
+                (AnalyticsProperties.Source, "startup"), (AnalyticsProperties.Result, "declined"));
             await client.FlushAsync();
 
-            runner.AreEqual(2, server.RequestCount, "the refused name is not sent");
+            runner.AreEqual(3, server.RequestCount, "the refused name is not sent");
+            runner.IsTrue(
+                server.Requests[1].Contains("\"result\":\"port_in_use\"", StringComparison.Ordinal),
+                "a capture outcome reaches the wire");
+            runner.IsTrue(
+                server.Requests[2].Contains("\"result\":\"declined\"", StringComparison.Ordinal)
+                    && server.Requests[2].Contains("\"source\":\"startup\"", StringComparison.Ordinal)
+                    && server.Requests[2].Contains("\"seq\":\"3\"", StringComparison.Ordinal),
+                "and so does a certificate outcome, which the allowlist must not drop");
             runner.IsTrue(server.Requests[0].Contains("\"seq\":\"1\"", StringComparison.Ordinal), "the first event is 1");
             runner.IsTrue(
                 server.Requests[1].Contains("\"seq\":\"2\"", StringComparison.Ordinal),
@@ -257,10 +268,10 @@ internal static class AnalyticsTests
             using var nextRun = temp.CreateClient(server.Endpoint);
             await nextRun.FlushAsync();
 
-            runner.AreEqual(4, server.RequestCount, "both hand-written lines deliver");
+            runner.AreEqual(5, server.RequestCount, "both hand-written lines deliver");
             runner.IsTrue(
-                server.Requests[2].Contains("\"seq\":\"0\"", StringComparison.Ordinal)
-                    && server.Requests[3].Contains("\"seq\":\"0\"", StringComparison.Ordinal),
+                server.Requests[3].Contains("\"seq\":\"0\"", StringComparison.Ordinal)
+                    && server.Requests[4].Contains("\"seq\":\"0\"", StringComparison.Ordinal),
                 "a negative or missing sequence reads as 0");
         });
 
