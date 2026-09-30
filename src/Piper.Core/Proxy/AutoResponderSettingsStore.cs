@@ -27,7 +27,18 @@ public enum AutoResponderLoadStatus
 /// <param name="Settings">The rules when <paramref name="Status"/> is <see cref="AutoResponderLoadStatus.Loaded"/>.</param>
 /// <param name="Detail">The system's or parser's wording, for <c>Unreadable</c> and <c>Malformed</c>.</param>
 public sealed record AutoResponderLoadResult(
-    AutoResponderLoadStatus Status, AutoResponderSettings? Settings = null, string? Detail = null);
+    AutoResponderLoadStatus Status, AutoResponderSettings? Settings = null, string? Detail = null)
+{
+    /// <summary>
+    /// The file is valid but bigger than Piper reads. It is somebody's real rule set (an upgrade can
+    /// bring one), and there is no in-app way back from a set over the limits, so it must be left
+    /// exactly where it is and never overwritten.
+    /// </summary>
+    public bool OverLimits => Status is AutoResponderLoadStatus.TooLarge or AutoResponderLoadStatus.TooManyRules;
+
+    /// <summary>The file is not a rule set at all, so it is moved aside to make room for the next save.</summary>
+    public bool SetAsideAdvised => Status == AutoResponderLoadStatus.Malformed;
+}
 
 /// <summary>Why a rule set could not be written.</summary>
 public enum AutoResponderSaveStatus
@@ -126,13 +137,13 @@ public static class AutoResponderSettingsStore
             temporary = $"{path}.{Guid.NewGuid():N}.tmp";
             File.WriteAllBytes(temporary, bytes);
             File.Move(temporary, path, overwrite: true);
-            if (usingDefaultPath) SweepOnce(path, ref s_swept);
+            if (usingDefaultPath) SweepOnce(path, ref s_swept, inBackground: true);
             return new AutoResponderSaveResult(AutoResponderSaveStatus.Saved);
         }
         catch (Exception ex) when (IsFileFailure(ex))
         {
             DeleteQuietly(temporary);
-            return new AutoResponderSaveResult(AutoResponderSaveStatus.Failed, ex.Message);
+            return new AutoResponderSaveResult(AutoResponderSaveStatus.Failed, Bounded(ex.Message));
         }
     }
 
@@ -163,7 +174,7 @@ public static class AutoResponderSettingsStore
             if (settings is null) return new AutoResponderLoadResult(AutoResponderLoadStatus.Malformed);
 
             EnsureUniqueIds(settings);
-            if (usingDefaultPath) SweepOnce(path, ref s_swept);
+            if (usingDefaultPath) SweepOnce(path, ref s_swept, inBackground: true);
             return new AutoResponderLoadResult(AutoResponderLoadStatus.Loaded, settings);
         }
         catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException)
@@ -258,10 +269,14 @@ public static class AutoResponderSettingsStore
     /// Runs <see cref="SweepStaleTemporaries"/> the first time it is called with a given
     /// <paramref name="gate"/>, so a process enumerates the folder once, not on every edit.
     /// </summary>
-    internal static bool SweepOnce(string path, ref int gate)
+    internal static bool SweepOnce(string path, ref int gate, bool inBackground = false)
     {
         if (Interlocked.Exchange(ref gate, 1) != 0) return false;
-        SweepStaleTemporaries(path);
+
+        // Housekeeping never holds up the caller, which is the UI thread at launch and on every edit.
+        // The sweep swallows its own file failures, so nothing is observed on the discarded task.
+        if (inBackground) _ = Task.Run(() => SweepStaleTemporaries(path));
+        else SweepStaleTemporaries(path);
         return true;
     }
 

@@ -233,7 +233,10 @@ public sealed class MainForm : Form, IMessageFilter
         {
             var settings = _autoResponder.Settings;
             _options.AutoResponder.Apply(settings);
-            ReportAutoResponderSave(AutoResponderSettingsStore.Save(settings));
+            if (_rulesFileProtected)
+                NotifyRulesProblemOnce(Strings.AutoResponder.RulesNotSavedProtected(AutoResponderSettingsStore.DefaultPath));
+            else
+                ReportAutoResponderSave(AutoResponderSettingsStore.Save(settings));
             _rightTabs.SetTabChecked(_autoResponderPage, settings.Enabled && settings.Rules.Count > 0);
             foreach (var warning in _options.AutoResponder.Warnings) AppendLog(Strings.Log.AutoResponderWarning(warning));
         };
@@ -313,14 +316,24 @@ public sealed class MainForm : Form, IMessageFilter
         var path = AutoResponderSettingsStore.DefaultPath;
         var problem = Strings.AutoResponder.LoadProblem(result);
 
-        // Only a file that is present but wrong is moved aside. One that is merely locked or
-        // unreadable right now is left alone: it may be fine a minute later.
-        var keptAs = result.Status == AutoResponderLoadStatus.Unreadable ? null : AutoResponderSettingsStore.SetAside(path);
-        _pendingRulesNotice = keptAs is null
-            ? Strings.AutoResponder.StartedWithoutRulesInPlace(problem, path)
+        // A file that is not a rule set is moved aside so the next save has room. One that is merely
+        // locked or unreadable right now is left alone (it may be fine a minute later), and so is one
+        // that is a valid rule set over Piper's limits: that is somebody's real work with no in-app
+        // way back, so it is neither moved nor, see below, overwritten.
+        _rulesFileProtected = result.OverLimits;
+        var keptAs = result.SetAsideAdvised ? AutoResponderSettingsStore.SetAside(path) : null;
+        _pendingRulesNotice = _rulesFileProtected ? Strings.AutoResponder.StartedWithoutRulesProtected(problem, path)
+            : keptAs is null ? Strings.AutoResponder.StartedWithoutRulesInPlace(problem, path)
             : Strings.AutoResponder.StartedWithoutRulesKept(problem, keptAs);
         AppendLog(_pendingRulesNotice);
     }
+
+    /// <summary>
+    /// True when the saved rules file was left untouched because it is over Piper's limits. While it
+    /// is, edits are not written to it: the first save would replace the only copy of a rule set
+    /// Piper cannot read. The user is told once; Export still works.
+    /// </summary>
+    private bool _rulesFileProtected;
 
     private void ReportAutoResponderSave(AutoResponderSaveResult result)
     {
@@ -330,10 +343,14 @@ public sealed class MainForm : Form, IMessageFilter
             return;
         }
 
+        NotifyRulesProblemOnce(Strings.AutoResponder.SaveFailed(AutoResponderSettingsStore.DefaultPath, result));
+    }
+
+    private void NotifyRulesProblemOnce(string message)
+    {
         if (_autoResponderSaveFailing) return;
         _autoResponderSaveFailing = true;
 
-        var message = Strings.AutoResponder.SaveFailed(AutoResponderSettingsStore.DefaultPath, result);
         AppendLog(message);
 
         // Rules are first saved while the constructor applies the saved set, before the window exists.

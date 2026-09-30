@@ -674,6 +674,8 @@
     "loadTooManyRules": "The rules file holds more than the {{limit, N0}} rules Piper allows.",
     "startedWithoutRulesKept": "{{problem}}\n\nPiper started with no AutoResponder rules. The file was kept as {{path}}, so nothing is lost.",
     "startedWithoutRulesInPlace": "{{problem}}\n\nPiper started with no AutoResponder rules. The file was left where it is ({{path}}), and the next change to a rule will replace it.",
+    "startedWithoutRulesProtected": "{{problem}}\n\nPiper started with no AutoResponder rules and left the file untouched ({{path}}). Rules you add now are not saved, so that file cannot be overwritten. Use Actions > Export rules... to keep what you make, or shrink or remove that file and restart Piper.",
+    "rulesNotSavedProtected": "Your AutoResponder rules are not being saved: the saved file ({{path}}) is over Piper's limits and was left untouched. Use Actions > Export rules... to keep them, or shrink or remove that file and restart Piper.",
     "saveFailed": "Piper could not save your AutoResponder rules to {{path}}: {{problem}}\n\nThe rules keep working until Piper closes, but changes made now will be lost.",
     "exportFailed": "The rules could not be exported to {{path}}: {{problem}}",
     "saveTooManyRules": "the rule set holds more than the {{limit, N0}} rules Piper allows",

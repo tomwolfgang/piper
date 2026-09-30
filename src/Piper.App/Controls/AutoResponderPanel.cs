@@ -714,7 +714,24 @@ public sealed class AutoResponderPanel : UserControl
 
     // ------------------------------------------------------------ import / export
 
+    /// <summary>True while an import or export is between its first and last await; a second one is ignored.</summary>
+    private bool _fileOperationRunning;
+
     private async void ImportRules()
+    {
+        if (_fileOperationRunning) return;
+        _fileOperationRunning = true;
+        try
+        {
+            await ImportRulesCoreAsync();
+        }
+        finally
+        {
+            _fileOperationRunning = false;
+        }
+    }
+
+    private async Task ImportRulesCoreAsync()
     {
         using var dialog = new OpenFileDialog
         {
@@ -723,8 +740,12 @@ public sealed class AutoResponderPanel : UserControl
         };
         if (dialog.ShowDialog(this) != DialogResult.OK) return;
 
+        // Everything after an await runs on a panel that may have been closed meanwhile, so each
+        // continuation checks before it touches a control or opens a dialog owned by it.
         var fileName = dialog.FileName;
         var loaded = await OffThreadAsync(() => AutoResponderSettingsStore.Load(fileName));
+        if (IsDisposed) return;
+
         if (loaded.Settings is not { } imported)
         {
             MessageBox.Show(this, Strings.AutoResponder.LoadProblem(loaded),
@@ -747,11 +768,18 @@ public sealed class AutoResponderPanel : UserControl
                 break;
 
             case ImportChoice.Append:
-                var merged = Settings.Appended(imported);
+                // Merged and measured off the UI thread: the merge clones every rule and the
+                // limit check serialises the whole set. Refused before it is applied, because a set
+                // over either limit is one Save refuses, so every later edit would fail to persist.
+                var current = Settings;
+                var (merged, limit) = await OffThreadAsync(() =>
+                {
+                    var combined = current.Appended(imported);
+                    return (combined, AutoResponderSettingsStore.CheckLimits(combined));
+                });
+                if (IsDisposed) return;
 
-                // Refused here, before it is applied: a set over either limit is one Save refuses,
-                // so every later edit would fail to persist.
-                var tooBig = await OffThreadAsync(() => AutoResponderSettingsStore.CheckLimits(merged)) switch
+                var tooBig = limit switch
                 {
                     AutoResponderSaveStatus.TooManyRules => Strings.AutoResponder.ImportTooManyRules(imported.Rules.Count),
                     AutoResponderSaveStatus.TooLarge => Strings.AutoResponder.ImportTooLarge,
@@ -770,7 +798,9 @@ public sealed class AutoResponderPanel : UserControl
 
     /// <summary>
     /// Runs file reading and serialising, which take real time on a large rule set, off the UI thread.
-    /// The panel is disabled meanwhile so the list cannot change under the result.
+    /// The panel is disabled meanwhile so the list cannot change under the result; callers hold
+    /// <see cref="_fileOperationRunning"/>, so this never nests, and the re-enable is skipped once the
+    /// panel is gone.
     /// </summary>
     private async Task<T> OffThreadAsync<T>(Func<T> work)
     {
@@ -781,7 +811,7 @@ public sealed class AutoResponderPanel : UserControl
         }
         finally
         {
-            Enabled = true;
+            if (!IsDisposed) Enabled = true;
         }
     }
 
@@ -807,7 +837,21 @@ public sealed class AutoResponderPanel : UserControl
         return pressed == replace ? ImportChoice.Replace : pressed == append ? ImportChoice.Append : ImportChoice.Cancel;
     }
 
-    private void ExportRules()
+    private async void ExportRules()
+    {
+        if (_fileOperationRunning) return;
+        _fileOperationRunning = true;
+        try
+        {
+            await ExportRulesCoreAsync();
+        }
+        finally
+        {
+            _fileOperationRunning = false;
+        }
+    }
+
+    private async Task ExportRulesCoreAsync()
     {
         using var dialog = new SaveFileDialog
         {
@@ -819,9 +863,15 @@ public sealed class AutoResponderPanel : UserControl
         };
         if (dialog.ShowDialog(this) != DialogResult.OK) return;
 
-        var result = AutoResponderSettingsStore.Save(Settings, dialog.FileName);
+        // Serialised and written off the UI thread, like Import; the snapshot is taken here so the
+        // worker never reads the live list.
+        var snapshot = Settings;
+        var fileName = dialog.FileName;
+        var result = await OffThreadAsync(() => AutoResponderSettingsStore.Save(snapshot, fileName));
+        if (IsDisposed) return;
+
         if (!result.Succeeded)
-            MessageBox.Show(this, Strings.AutoResponder.ExportFailed(dialog.FileName, result),
+            MessageBox.Show(this, Strings.AutoResponder.ExportFailed(fileName, result),
                 Strings.App.Name, MessageBoxButtons.OK, MessageBoxIcon.Error);
     }
 

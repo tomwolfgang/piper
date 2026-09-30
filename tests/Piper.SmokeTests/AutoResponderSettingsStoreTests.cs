@@ -15,6 +15,7 @@ internal static class AutoResponderSettingsStoreTests
         await RunUserFacingTextAsync(runner);
         await RunAppendLimitsAsync(runner);
         await RunSweepOnceAsync(runner);
+        await RunFileProblemPolicyAsync(runner);
         await RunSetAsideAsync(runner);
         await RunAppendAsync(runner);
         await RunHostileExpressionsAsync(runner);
@@ -541,6 +542,55 @@ internal static class AutoResponderSettingsStoreTests
         finally
         {
             foreach (var file in new[] { first, second }) if (File.Exists(file)) File.Delete(file);
+            DeleteAll(path);
+        }
+
+        return Task.CompletedTask;
+    });
+
+    // What the launch path does with each kind of unusable file is decided by these flags, so they are
+    // pinned here: an over-limit rule set is real work and is never moved or overwritten.
+    private static Task RunFileProblemPolicyAsync(TestRunner runner) => runner.RunAsync("AutoResponder rules file: what is set aside and what is protected", () =>
+    {
+        var path = TempPath();
+        try
+        {
+            var malformed = Load(path, "{ broken");
+            runner.IsTrue(malformed.SetAsideAdvised && !malformed.OverLimits, "a file that is not a rule set is set aside");
+
+            File.WriteAllText(path, "{\"Rules\":[" + string.Join(",", Enumerable.Repeat("{}", AutoResponderSettingsStore.MaxRules + 1)) + "]}");
+            var tooMany = AutoResponderSettingsStore.Load(path);
+            runner.IsTrue(tooMany.OverLimits && !tooMany.SetAsideAdvised, "a valid set with too many rules is protected, not moved");
+
+            File.WriteAllBytes(path, new byte[AutoResponderSettingsStore.MaxFileBytes + 1]);
+            var tooLarge = AutoResponderSettingsStore.Load(path);
+            runner.IsTrue(tooLarge.OverLimits && !tooLarge.SetAsideAdvised, "an oversized file is protected, not moved");
+
+            var unreadable = AutoResponderSettingsStore.Load(Path.GetTempPath());
+            runner.IsTrue(!unreadable.OverLimits && !unreadable.SetAsideAdvised, "a file that cannot be opened is neither");
+
+            var loaded = Load(path, "{}");
+            runner.IsTrue(!loaded.OverLimits && !loaded.SetAsideAdvised, "a good file is neither");
+
+            // A save failure's detail is bounded like a load failure's: it embeds the path.
+            var overlong = AutoResponderSettingsStore.Save(new AutoResponderSettings(),
+                Path.Combine(Path.GetTempPath(), new string('p', 40_000), "rules.json"));
+            runner.AreEqual(AutoResponderSaveStatus.Failed, overlong.Status, "an impossible save path fails");
+            runner.IsTrue(overlong.Detail is { Length: > 0 and <= 210 }, $"with a short detail ({overlong.Detail?.Length} characters)");
+
+            // In the background, as the store runs it from the UI thread.
+            var stale = $"{path}.{Guid.NewGuid():N}.tmp";
+            File.WriteAllText(stale, "x");
+            File.SetLastWriteTimeUtc(stale, DateTime.UtcNow.AddDays(-1));
+            var gate = 0;
+            runner.IsTrue(AutoResponderSettingsStore.SweepOnce(path, ref gate, inBackground: true), "the first call starts a sweep");
+            var deadline = Environment.TickCount64 + 10_000;
+            while (File.Exists(stale) && Environment.TickCount64 < deadline) Thread.Sleep(20);
+            runner.IsTrue(!File.Exists(stale), "which removes the stale temporary without the caller waiting");
+            runner.IsTrue(!AutoResponderSettingsStore.SweepOnce(path, ref gate, inBackground: true), "and only once");
+        }
+        finally
+        {
             DeleteAll(path);
         }
 

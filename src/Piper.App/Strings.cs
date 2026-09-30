@@ -894,6 +894,14 @@ internal static class Strings
         public static string StartedWithoutRulesInPlace(string problem, string path) =>
             I18n.T("autoResponder.startedWithoutRulesInPlace", ("problem", problem), ("path", path));
 
+        /// <summary>The saved rules are a valid set over Piper's limits and the file was left untouched.</summary>
+        public static string StartedWithoutRulesProtected(string problem, string path) =>
+            I18n.T("autoResponder.startedWithoutRulesProtected", ("problem", problem), ("path", path));
+
+        /// <summary>An edit was made while the oversized saved file is being protected, so nothing was written.</summary>
+        public static string RulesNotSavedProtected(string path) =>
+            I18n.T("autoResponder.rulesNotSavedProtected", ("path", path));
+
         private static string SaveProblem(AutoResponderSaveResult result) => result.Status switch
         {
             AutoResponderSaveStatus.TooManyRules =>
