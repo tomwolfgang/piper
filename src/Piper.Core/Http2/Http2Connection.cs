@@ -797,14 +797,14 @@ public sealed class Http2Connection(Stream stream, Func<HttpRequestData, Cancell
         // sent against, so an overflow is the peer's arithmetic gone wrong (or hostile), not ours.
         if (frame.StreamId == 0)
         {
-            bool overflow;
+            // Checked before it is applied, inside the lock senders take their share under, so the
+            // window is never above the legal maximum for a sender to spend.
             lock (_connectionWindowGate)
             {
+                if (_peerConnectionWindow + increment > MaxFlowControlWindow)
+                    throw new Http2ProtocolException(Http2ErrorCode.FlowControlError, "WINDOW_UPDATE pushes the connection's flow-control window past 2^31-1.");
                 _peerConnectionWindow += increment;
-                overflow = _peerConnectionWindow > MaxFlowControlWindow;
             }
-            if (overflow)
-                throw new Http2ProtocolException(Http2ErrorCode.FlowControlError, "WINDOW_UPDATE pushes the connection's flow-control window past 2^31-1.");
         }
         else if (IsIdle(frame.StreamId))
         {
