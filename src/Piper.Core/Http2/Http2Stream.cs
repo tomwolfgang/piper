@@ -8,8 +8,10 @@ namespace Piper.Core.Http2;
 /// enough to know when a message is fully assembled without modelling every RFC 9113 §5.1
 /// transition.
 /// </summary>
-internal sealed class Http2Stream(int id, HttpRequestData request)
+internal sealed class Http2Stream(int id, HttpRequestData request) : IDisposable
 {
+    private readonly Http2CancellationSource _cancellation = new();
+
     public int Id { get; } = id;
 
     public MemoryStream Body { get; } = new();
@@ -31,5 +33,22 @@ internal sealed class Http2Stream(int id, HttpRequestData request)
     /// with a WINDOW_UPDATE (this side acting as receiver).</summary>
     public long BytesToAck;
 
-    public readonly CancellationTokenSource Cancellation = new();
+    /// <summary>Cancelled when the peer resets the stream, when this side does, and when the
+    /// connection ends. Read before <see cref="Dispose"/>; it is not available after.</summary>
+    public CancellationToken Token => _cancellation.Token;
+
+    /// <summary>True once <see cref="Cancel"/> has run, including after disposal.</summary>
+    public bool IsCancelled => _cancellation.IsCancellationRequested;
+
+    /// <summary>Safe to call at any time, from any thread, even once the stream is disposed.</summary>
+    public void Cancel() => _cancellation.Cancel();
+
+    /// <summary>Releases the cancellation source and the body buffer. Idempotent. Call it once
+    /// nothing will read <see cref="Token"/> again: after the handler has stopped, or for a stream
+    /// that never reached one.</summary>
+    public void Dispose()
+    {
+        _cancellation.Dispose();
+        Body.Dispose();
+    }
 }

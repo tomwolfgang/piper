@@ -35,6 +35,11 @@ internal static class BoundedCaptureTests
             runner.AreEqual(expected, Convert.ToHexString(SHA256.HashData(got)), "unaltered");
 
             var session = harness.Store.Snapshot().Last(s => s.Url.Contains("big.zip", StringComparison.Ordinal));
+
+            // The proxy writes the last bytes to the client first and only then records the captured
+            // body on the session and marks it complete, so a client that has everything may be here
+            // before the proxy has finished. Complete is set after the body is, hence the wait.
+            runner.IsTrue(await Poll.UntilAsync(() => session.State == SessionState.Complete), "the session completes");
             runner.AreEqual(Keep, session.Response!.Body.Length, "only the limit is retained");
             runner.AreEqual((long)payload.Length, session.Response.BodyTotalLength,
                 "while the size reported is what crossed the wire");
@@ -62,6 +67,7 @@ internal static class BoundedCaptureTests
                 "the body arrives");
 
             var session = harness.Store.Snapshot().Last(s => s.Url.Contains("small.txt", StringComparison.Ordinal));
+            runner.IsTrue(await Poll.UntilAsync(() => session.State == SessionState.Complete), "the session completes");
             runner.IsTrue(session.Response!.IsBodyComplete, "a small body is complete");
             runner.AreEqual(5L, session.ResponseSize, "and reports its own size");
         });

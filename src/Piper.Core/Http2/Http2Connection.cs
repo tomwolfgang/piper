@@ -40,8 +40,40 @@ public sealed class Http2Connection(Stream stream, Func<HttpRequestData, Cancell
         Channel.CreateUnbounded<Func<CancellationToken, Task>>(new UnboundedChannelOptions { SingleReader = true });
 
     private readonly ConcurrentDictionary<int, Http2Stream> _streams = new();
-    private readonly List<Task> _inFlight = [];
+
+    /// <summary>One entry per stream handler that is still running; each removes itself when it
+    /// stops, so this stays as small as the number of concurrent streams however long the
+    /// connection lives. Awaited, bounded, when the connection ends.</summary>
+    private readonly HashSet<Task> _inFlight = [];
     private readonly Lock _inFlightGate = new();
+
+    private int _pendingControlFrames;
+
+    /// <summary>Completed when the watchdog gives up on a write that will not come back.</summary>
+    private readonly TaskCompletionSource _writerAbandoned = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    /// <summary>Cancelled to end the reader loop from elsewhere: the idle watchdog, the control-frame
+    /// cap, the last stream finishing after the peer's GOAWAY. Set for the length of
+    /// <see cref="RunAsync"/>.</summary>
+    private Http2CancellationSource? _readerStop;
+
+    /// <summary>Cancelled to abandon the writer, which is blocked on a peer that will not read.</summary>
+    private Http2CancellationSource? _writerStop;
+
+    private const int NoCloseReason = -1;
+
+    /// <summary>Why the connection is being closed from elsewhere than the reader (an
+    /// <see cref="Http2ErrorCode"/> value), or <see cref="NoCloseReason"/>. First reason wins; the
+    /// reader turns it into the GOAWAY.</summary>
+    private int _closeReason = NoCloseReason;
+
+    /// <summary>The peer has sent GOAWAY: it is shutting down and will not start new work, so the
+    /// connection ends once the streams it already has are answered (RFC 9113 §6.8).</summary>
+    private bool _peerGoingAway;
+
+    private const long NoWrite = -1;
+    private long _writeStartedTicks = NoWrite;
+    private long _lastActivityTicks;
 
     private readonly Http2Settings _localSettings = Http2Settings.Advertised();
     private readonly Http2Settings _peerSettings = new();
@@ -116,6 +148,57 @@ public sealed class Http2Connection(Stream stream, Func<HttpRequestData, Cancell
     /// </summary>
     internal Action<string>? Log { get; init; }
 
+    internal static readonly TimeSpan DefaultIdleTimeout = TimeSpan.FromMinutes(5);
+
+    /// <summary>
+    /// How long the connection may sit with nothing to do before it is closed with GOAWAY(NO_ERROR):
+    /// no frame from the peer and no handler running. A handler waiting on an origin is not idleness,
+    /// so a slow response is never cut short by this. The same span bounds a single write that makes
+    /// no progress, which is what a peer that stopped reading its socket causes. The write is then
+    /// cancelled and, if it does not return within <see cref="WriterAbandonGrace"/>, abandoned: the
+    /// connection ends without waiting for it, since the peer is not going to read a GOAWAY. Total
+    /// bound: the idle span plus the grace, plus one watchdog tick.
+    /// </summary>
+    internal TimeSpan IdleTimeout { get; init; } = DefaultIdleTimeout;
+
+    /// <summary>
+    /// How long <see cref="RunAsync"/> waits, once the watchdog has given up on a stuck write, for the
+    /// writer to notice. A pending socket send does not reliably honour cancellation (a TLS stream over
+    /// a socket in particular), so the writer is abandoned after this, and it is the owner disposing
+    /// the transport after <see cref="RunAsync"/> returns that actually releases the send.
+    /// </summary>
+    internal TimeSpan WriterAbandonGrace { get; init; } = TimeSpan.FromSeconds(5);
+
+    internal const int DefaultMaxPendingControlFrames = 1000;
+
+    /// <summary>
+    /// Most control frames (PING and SETTINGS acknowledgements, RST_STREAM) that may be queued and
+    /// not yet written. Each of these answers something the peer sent at no cost to itself, so a
+    /// peer that sends them and never reads makes the queue grow for as long as it likes
+    /// (CVE-2019-9512 ping flood, CVE-2019-9514 reset flood, CVE-2019-9515 settings flood). Past the
+    /// cap the connection is closed with GOAWAY(ENHANCE_YOUR_CALM). Counts frames still unwritten,
+    /// not frames ever sent, so a peer that keeps reading is never near it.
+    /// </summary>
+    internal int MaxPendingControlFrames { get; init; } = DefaultMaxPendingControlFrames;
+
+    /// <summary>Control frames queued and not yet written. Lets a test know the connection has
+    /// taken in everything a peer sent while its writer was held.</summary>
+    internal int PendingControlFrames => Volatile.Read(ref _pendingControlFrames);
+
+    /// <summary>Whether something other than the reader has already decided to end the connection.</summary>
+    internal bool IsClosing => Volatile.Read(ref _closeReason) != NoCloseReason;
+
+    /// <summary>The send window of an open stream, or null. Lets a test see that an overflowing
+    /// WINDOW_UPDATE was refused rather than applied.</summary>
+    internal long? SendWindowOf(int streamId) =>
+        _streams.TryGetValue(streamId, out var open) ? Interlocked.Read(ref open.RemoteWindow) : null;
+
+    /// <summary>Stream handlers still running. Lets a test see that finished ones are forgotten.</summary>
+    internal int InFlightHandlers
+    {
+        get { lock (_inFlightGate) return _inFlight.Count; }
+    }
+
     /// <summary>
     /// Whether a reset for <see cref="MaxBufferedRequestBytes"/> has been logged on this connection.
     /// Once the peer holds the budget full, every fresh stream it opens is reset for a few bytes, so
@@ -168,76 +251,192 @@ public sealed class Http2Connection(Stream stream, Func<HttpRequestData, Cancell
     }
 
     /// <summary>Runs the connection to completion: validates the preface, exchanges SETTINGS,
-    /// then reads and dispatches frames until the peer closes, sends GOAWAY, or a fatal
-    /// protocol error occurs. Awaits every in-flight stream handler before returning.</summary>
+    /// then reads and dispatches frames until the peer closes, the peer's GOAWAY has been
+    /// drained, the connection goes idle, or a fatal protocol error occurs. Awaits every
+    /// in-flight stream handler before returning.</summary>
     public async Task RunAsync(CancellationToken ct)
     {
-        await ValidatePrefaceAsync(ct).ConfigureAwait(false);
+        using var readerStop = new Http2CancellationSource(ct);
+        using var writerStop = new Http2CancellationSource(ct);
+        using var watchdogStop = new CancellationTokenSource();
+        _readerStop = readerStop;
+        _writerStop = writerStop;
+        Volatile.Write(ref _lastActivityTicks, Environment.TickCount64);
 
-        var writerTask = WriterLoopAsync(ct);
-        EnqueueWrite(ct2 => Http2FrameWriter.WriteAsync(stream, Http2FrameType.Settings, Http2FrameFlags.None, 0, _localSettings.ToPayload(), ct2));
-
+        // Running before the preface is read, so a peer that connects and says nothing is bounded too.
+        var watchdog = WatchdogAsync(watchdogStop.Token);
         try
         {
-            await ReaderLoopAsync(ct).ConfigureAwait(false);
+            await ValidatePrefaceAsync(readerStop.Token, ct).ConfigureAwait(false);
+
+            var writerTask = WriterLoopAsync(writerStop.Token);
+            EnqueueWrite(ct2 => Http2FrameWriter.WriteAsync(stream, Http2FrameType.Settings, Http2FrameFlags.None, 0, _localSettings.ToPayload(), ct2));
+
+            try
+            {
+                await ReaderLoopAsync(readerStop.Token, ct).ConfigureAwait(false);
+            }
+            finally
+            {
+                // The connection is gone, however it ended -- GOAWAY, a protocol error, the peer
+                // closing. Every stream is cancelled so none is left waiting for send window that can
+                // no longer arrive, holding its upstream connection open.
+                foreach (var open in _streams.Values) open.Cancel();
+
+                // Whatever is queued, GOAWAY included, is still written, for as long as writes make
+                // progress. A write that does not (a peer that stopped reading) is what the watchdog
+                // gives up on; cancelling it is not guaranteed to free a socket send already in flight,
+                // so after a short grace the writer is abandoned. The owner disposing the transport
+                // once this returns is what releases it.
+                _outbox.Writer.TryComplete();
+                if (await Task.WhenAny(writerTask, _writerAbandoned.Task).ConfigureAwait(false) != writerTask)
+                {
+                    try
+                    {
+                        await writerTask.WaitAsync(WriterAbandonGrace).ConfigureAwait(false);
+                    }
+                    catch (TimeoutException)
+                    {
+                        // Whatever it fails with when the transport goes is expected and is not reported.
+                        _ = writerTask.ContinueWith(static t => t.Exception, CancellationToken.None,
+                            TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+                    }
+                }
+                else
+                {
+                    await writerTask.ConfigureAwait(false);
+                }
+
+                Task[] pending;
+                lock (_inFlightGate) pending = _inFlight.ToArray();
+
+                // Bounded: a stream handler that wedges (a stalled upstream, a flow-control window
+                // that never reopens) must not keep the whole connection -- and the socket behind it
+                // -- alive indefinitely. Whatever has not finished by now is abandoned to the GC.
+                try
+                {
+                    await Task.WhenAll(pending).WaitAsync(TimeSpan.FromSeconds(10)).ConfigureAwait(false);
+                }
+                catch (TimeoutException) { /* abandoned, as above */ }
+
+                // A stream that never reached a handler has nothing else to release it.
+                foreach (var open in _streams.Values)
+                    if (!open.Dispatched) open.Dispose();
+            }
         }
         finally
         {
-            // The connection is gone, however it ended -- GOAWAY, a protocol error, the peer
-            // closing. Every stream is cancelled so none is left waiting for send window that can
-            // no longer arrive, holding its upstream connection open.
-            foreach (var open in _streams.Values) open.Cancellation.Cancel();
-
-            _outbox.Writer.TryComplete();
-            await writerTask.ConfigureAwait(false);
-
-            Task[] pending;
-            lock (_inFlightGate) pending = _inFlight.ToArray();
-
-            // Bounded: a stream handler that wedges (a stalled upstream, a flow-control window
-            // that never reopens) must not keep the whole connection -- and the socket behind it
-            // -- alive indefinitely. Whatever has not finished by now is abandoned to the GC.
-            try
-            {
-                var all = Task.WhenAll(pending);
-                await Task.WhenAny(all, Task.Delay(TimeSpan.FromSeconds(10), CancellationToken.None)).ConfigureAwait(false);
-            }
-            catch { /* individual failures are already converted to 502s inside ProcessStreamAsync */ }
+            await watchdogStop.CancelAsync().ConfigureAwait(false);
+            await watchdog.ConfigureAwait(false);
         }
     }
 
     // ------------------------------------------------------------------- handshake
 
-    private async Task ValidatePrefaceAsync(CancellationToken ct)
+    private async Task ValidatePrefaceAsync(CancellationToken readCt, CancellationToken ct)
     {
         var buffer = new byte[PrefaceBytes.Length];
         var offset = 0;
-        while (offset < buffer.Length)
+        try
         {
-            var n = await stream.ReadAsync(buffer.AsMemory(offset), ct).ConfigureAwait(false);
-            if (n == 0) throw new IOException("Connection closed before the HTTP/2 preface was received.");
-            offset += n;
+            while (offset < buffer.Length)
+            {
+                var n = await stream.ReadAsync(buffer.AsMemory(offset), readCt).ConfigureAwait(false);
+                if (n == 0) throw new IOException("Connection closed before the HTTP/2 preface was received.");
+                offset += n;
+            }
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            // Not the caller cancelling: the watchdog gave up waiting for the peer.
+            throw new IOException("Timed out waiting for the HTTP/2 connection preface.");
         }
         if (!buffer.AsSpan().SequenceEqual(PrefaceBytes))
             throw new Http2ProtocolException(Http2ErrorCode.ProtocolError, "Invalid HTTP/2 connection preface.");
     }
 
+    // ------------------------------------------------------------------- watchdog
+
+    /// <summary>
+    /// Ends a connection that is doing nothing (see <see cref="IdleTimeout"/>) and abandons one whose
+    /// writer has been stuck in a single write for as long, which only a peer that has stopped reading
+    /// causes: flow control keeps a peer that reads slowly from filling its socket. Runs until the
+    /// connection is finished, flush of the write queue included.
+    /// </summary>
+    private async Task WatchdogAsync(CancellationToken stop)
+    {
+        var timeoutMs = (long)IdleTimeout.TotalMilliseconds;
+        var period = TimeSpan.FromMilliseconds(Math.Clamp(timeoutMs / 4, 10, 5_000));
+        try
+        {
+            using var timer = new PeriodicTimer(period);
+            while (await timer.WaitForNextTickAsync(stop).ConfigureAwait(false))
+            {
+                var now = Environment.TickCount64;
+
+                var writeStarted = Volatile.Read(ref _writeStartedTicks);
+                if (writeStarted != NoWrite && now - writeStarted >= timeoutMs)
+                {
+                    _writerStop?.Cancel();
+                    _writerAbandoned.TrySetResult();
+                    RequestClose(Http2ErrorCode.NoError);
+                    return;
+                }
+
+                // A write in progress is not idleness either: a response is still going out even when
+                // its handler has finished and the peer has nothing to say.
+                if (writeStarted == NoWrite && InFlightHandlers == 0
+                    && now - Volatile.Read(ref _lastActivityTicks) >= timeoutMs)
+                    RequestClose(Http2ErrorCode.NoError);
+            }
+        }
+        catch (OperationCanceledException) { /* the connection has finished */ }
+    }
+
+    /// <summary>Asks the reader loop to stop and answer with GOAWAY(<paramref name="reason"/>). The
+    /// first reason given is the one used. Safe from any thread, at any time.</summary>
+    private void RequestClose(Http2ErrorCode reason)
+    {
+        if (Interlocked.CompareExchange(ref _closeReason, (int)reason, NoCloseReason) == NoCloseReason)
+            _readerStop?.Cancel();
+    }
+
+    /// <summary>The reason the connection is to be closed, if there is one. Also where a peer's GOAWAY
+    /// becomes one: once the streams it left open are all answered there is nothing to wait for.</summary>
+    private Http2ErrorCode? CloseReason()
+    {
+        if (Volatile.Read(ref _peerGoingAway) && _streams.IsEmpty) RequestClose(Http2ErrorCode.NoError);
+        var reason = Volatile.Read(ref _closeReason);
+        return reason == NoCloseReason ? null : (Http2ErrorCode)reason;
+    }
+
     // --------------------------------------------------------------------- reader
 
-    private async Task ReaderLoopAsync(CancellationToken ct)
+    private async Task ReaderLoopAsync(CancellationToken readCt, CancellationToken ct)
     {
         while (true)
         {
-            Http2Frame? frame;
             try
             {
-                frame = await Http2FrameReader.ReadAsync(stream, _localSettings.MaxFrameSize, ct).ConfigureAwait(false);
+                if (CloseReason() is { } closing)
+                {
+                    EnqueueGoAway(closing);
+                    return;
+                }
+
+                var frame = await Http2FrameReader.ReadAsync(stream, _localSettings.MaxFrameSize, readCt).ConfigureAwait(false);
                 if (frame is null) return; // peer closed cleanly
-                DispatchFrame(frame.Value, ct);
+                Volatile.Write(ref _lastActivityTicks, Environment.TickCount64);
+                DispatchFrame(frame.Value);
             }
             catch (Http2ProtocolException ex)
             {
                 EnqueueGoAway(ex.ErrorCode);
+                return;
+            }
+            catch (OperationCanceledException) when (!ct.IsCancellationRequested && CloseReason() is { } closing)
+            {
+                EnqueueGoAway(closing);
                 return;
             }
             catch (OperationCanceledException) { return; }
@@ -245,7 +444,7 @@ public sealed class Http2Connection(Stream stream, Func<HttpRequestData, Cancell
         }
     }
 
-    private void DispatchFrame(Http2Frame frame, CancellationToken ct)
+    private void DispatchFrame(Http2Frame frame)
     {
         if (_headerBlockStreamId != 0 && (frame.Type != Http2FrameType.Continuation || frame.StreamId != _headerBlockStreamId))
             throw new Http2ProtocolException(Http2ErrorCode.ProtocolError, "Header block interrupted before END_HEADERS.");
@@ -259,10 +458,30 @@ public sealed class Http2Connection(Stream stream, Func<HttpRequestData, Cancell
             case Http2FrameType.WindowUpdate: HandleWindowUpdate(frame); break;
             case Http2FrameType.RstStream: HandleRstStream(frame); break;
             case Http2FrameType.Ping: HandlePing(frame); break;
-            case Http2FrameType.GoAway: throw new OperationCanceledException("Peer sent GOAWAY.");
+            case Http2FrameType.GoAway: HandleGoAway(frame); break;
+            case Http2FrameType.PushPromise:
+                // RFC 9113 §8.4: only a server pushes, and a client that sent one is broken.
+                throw new Http2ProtocolException(Http2ErrorCode.ProtocolError, "PUSH_PROMISE from a client.");
             case Http2FrameType.Priority: break; // parsed, discarded: no scheduling
             default: break; // unknown frame type: ignore, per RFC 9113 §4.1
         }
+    }
+
+    /// <summary>
+    /// The peer is going away (RFC 9113 §6.8). It has said it starts nothing new, not that it has
+    /// abandoned what it started, so the streams already open are answered before the connection
+    /// ends; cancelling them, as the reader used to, threw away responses the peer was still waiting
+    /// for. The wait is bounded like any other: by the peer closing, by the idle timeout, and by the
+    /// handlers' own limits.
+    /// </summary>
+    private void HandleGoAway(Http2Frame frame)
+    {
+        if (frame.StreamId != 0)
+            throw new Http2ProtocolException(Http2ErrorCode.ProtocolError, "GOAWAY on a non-zero stream.");
+        if (frame.Payload.Length < 8)
+            throw new Http2ProtocolException(Http2ErrorCode.FrameSizeError, "GOAWAY payload must be at least 8 bytes.");
+
+        Volatile.Write(ref _peerGoingAway, true);
     }
 
     private void HandleSettings(Http2Frame frame)
@@ -271,7 +490,12 @@ public sealed class Http2Connection(Stream stream, Func<HttpRequestData, Cancell
             throw new Http2ProtocolException(Http2ErrorCode.ProtocolError, "SETTINGS on a non-zero stream.");
 
         if (frame.HasFlag(Http2FrameFlags.Ack))
+        {
+            // RFC 9113 §6.5: an acknowledgement carries no settings.
+            if (frame.Payload.Length != 0)
+                throw new Http2ProtocolException(Http2ErrorCode.FrameSizeError, "SETTINGS acknowledgement with a payload.");
             return; // peer acknowledged our SETTINGS; phase 1 gates nothing on this
+        }
 
         if (frame.Payload.Length > 0)
         {
@@ -284,13 +508,27 @@ public sealed class Http2Connection(Stream stream, Func<HttpRequestData, Cancell
             var delta = (long)_peerSettings.InitialWindowSize - initialWindowBefore;
             if (delta != 0)
             {
-                foreach (var open in _streams.Values) Interlocked.Add(ref open.RemoteWindow, delta);
+                // Checked for every stream before any is changed, so a refused change leaves all the
+                // windows as they were and none is ever above the maximum. A stream's sender only
+                // spends from its window, which can only lower it, and grants arrive on this thread,
+                // so what the first pass finds still holds for the second.
+                var open = _streams.Values.ToArray();
+                foreach (var candidate in open)
+                {
+                    if (Interlocked.Read(ref candidate.RemoteWindow) + delta > MaxFlowControlWindow)
+                        throw new Http2ProtocolException(Http2ErrorCode.FlowControlError,
+                            "SETTINGS_INITIAL_WINDOW_SIZE change pushes a stream's flow-control window past 2^31-1.");
+                }
+                foreach (var candidate in open) Interlocked.Add(ref candidate.RemoteWindow, delta);
                 SignalWindowGranted();
             }
         }
 
-        EnqueueWrite(ct2 => Http2FrameWriter.WriteAsync(stream, Http2FrameType.Settings, Http2FrameFlags.Ack, 0, ReadOnlyMemory<byte>.Empty, ct2));
+        EnqueueControlWrite(ct2 => Http2FrameWriter.WriteAsync(stream, Http2FrameType.Settings, Http2FrameFlags.Ack, 0, ReadOnlyMemory<byte>.Empty, ct2));
     }
+
+    /// <summary>RFC 9113 §6.9.1: no flow-control window may exceed 2^31-1.</summary>
+    private const long MaxFlowControlWindow = int.MaxValue;
 
     private void HandleHeaders(Http2Frame frame)
     {
@@ -367,8 +605,12 @@ public sealed class Http2Connection(Stream stream, Func<HttpRequestData, Cancell
             throw new Http2ProtocolException(Http2ErrorCode.ProtocolError, $"HEADERS on stream {streamId}, which cannot open a new stream.");
         _highestStreamId = streamId;
 
+        // The peer has said it is going away (see HandleGoAway). What it already opened is finished;
+        // anything new is refused, which is also what keeps the drain from never ending under a
+        // peer that follows its GOAWAY with an endless run of new streams. REFUSED_STREAM tells it
+        // nothing was processed, so it may retry on another connection.
         var maxConcurrent = _localSettings.MaxConcurrentStreams ?? int.MaxValue;
-        if (_streams.Count >= maxConcurrent)
+        if (Volatile.Read(ref _peerGoingAway) || _streams.Count >= maxConcurrent)
         {
             ResetStream(streamId, Http2ErrorCode.RefusedStream, peerStillSending: !endStream);
             return;
@@ -409,14 +651,22 @@ public sealed class Http2Connection(Stream stream, Func<HttpRequestData, Cancell
         {
             ResetStream(http2Stream.Id, tooLarge ? Http2ErrorCode.EnhanceYourCalm : Http2ErrorCode.ProtocolError,
                 peerStillSending: !endStream);
-            http2Stream.Cancellation.Cancel();
-            _streams.TryRemove(http2Stream.Id, out _);
+            http2Stream.Cancel();
+            ForgetUndispatched(http2Stream);
             return;
         }
 
         // The trailers themselves are discarded, as HTTP/1.1 chunked trailers are
         // (HttpParser.SkipTrailersAsync): HttpRequestData has nowhere to carry them.
         DispatchRequest(http2Stream);
+    }
+
+    /// <summary>Drops a stream that never reached a handler and releases what it holds. Reader thread
+    /// only: a dispatched stream is the handler's, which disposes it when it stops.</summary>
+    private void ForgetUndispatched(Http2Stream http2Stream)
+    {
+        _streams.TryRemove(http2Stream.Id, out _);
+        http2Stream.Dispose();
     }
 
     /// <summary>Resets a stream from the header path. When the peer had not yet ended it, the id is
@@ -450,18 +700,26 @@ public sealed class Http2Connection(Stream stream, Func<HttpRequestData, Cancell
     private bool ResetIfDispatched(Http2Stream http2Stream)
     {
         if (!http2Stream.Dispatched) return false;
-        if (!http2Stream.Cancellation.IsCancellationRequested)
+        if (!http2Stream.IsCancelled)
         {
             // Remembered too: once the handler stops and the stream is gone, a further late
             // HEADERS must still be discarded, not taken for a reused id.
             ResetStream(http2Stream.Id, Http2ErrorCode.StreamClosed, peerStillSending: true);
-            http2Stream.Cancellation.Cancel();
+            http2Stream.Cancel();
         }
         return true;
     }
 
     private void HandleData(Http2Frame frame)
     {
+        // RFC 9113 §6.1: DATA belongs to a stream; and §5.1: a stream that was never opened (idle)
+        // may receive HEADERS or PRIORITY and nothing else. Both are connection errors. Only a stream
+        // that existed and is now closed may still draw late DATA, which is dropped below.
+        if (frame.StreamId == 0)
+            throw new Http2ProtocolException(Http2ErrorCode.ProtocolError, "DATA on stream 0.");
+        if (IsIdle(frame.StreamId))
+            throw new Http2ProtocolException(Http2ErrorCode.ProtocolError, $"DATA on idle stream {frame.StreamId}.");
+
         var length = frame.Payload.Length;
 
         // Connection-level credit is owed for every DATA frame, even one on a stream we already
@@ -488,8 +746,7 @@ public sealed class Http2Connection(Stream stream, Func<HttpRequestData, Cancell
         {
             // No handler owns the stream yet. Forgetting it is what makes its later DATA frames fall
             // into the drop above.
-            _streams.TryRemove(frame.StreamId, out _);
-            http2Stream.Body.Dispose();
+            ForgetUndispatched(http2Stream);
             if (overStreamCap)
                 Log?.Invoke($"HTTP/2 stream {frame.StreamId} reset: request body exceeds the {MaxRequestBodyBytes} byte cap.");
             else if (!_bufferedCapLogged)
@@ -547,13 +804,36 @@ public sealed class Http2Connection(Stream stream, Func<HttpRequestData, Cancell
         if (increment == 0)
             throw new Http2ProtocolException(Http2ErrorCode.ProtocolError, "WINDOW_UPDATE increment of 0.");
 
+        // RFC 9113 §6.9.1: a window may not pass 2^31-1. The sum is what the peer would have to be
+        // sent against, so an overflow is the peer's arithmetic gone wrong (or hostile), not ours.
         if (frame.StreamId == 0)
         {
-            lock (_connectionWindowGate) { _peerConnectionWindow += increment; }
+            // Checked before it is applied, inside the lock senders take their share under, so the
+            // window is never above the legal maximum for a sender to spend.
+            lock (_connectionWindowGate)
+            {
+                if (_peerConnectionWindow + increment > MaxFlowControlWindow)
+                    throw new Http2ProtocolException(Http2ErrorCode.FlowControlError, "WINDOW_UPDATE pushes the connection's flow-control window past 2^31-1.");
+                _peerConnectionWindow += increment;
+            }
+        }
+        else if (IsIdle(frame.StreamId))
+        {
+            throw new Http2ProtocolException(Http2ErrorCode.ProtocolError, $"WINDOW_UPDATE on idle stream {frame.StreamId}.");
         }
         else if (_streams.TryGetValue(frame.StreamId, out var http2Stream))
         {
-            Interlocked.Add(ref http2Stream.RemoteWindow, increment);
+            // Validated before it is applied, as for the connection: a compare-and-swap, because this
+            // stream's sender is concurrently spending from the same field.
+            if (!TryGrantStreamWindow(http2Stream, increment))
+            {
+                // A stream error: only this stream is reset. As elsewhere, a dispatched stream stays
+                // registered until its handler has stopped (see HandleRstStream).
+                ResetStream(http2Stream.Id, Http2ErrorCode.FlowControlError, peerStillSending: !http2Stream.Dispatched);
+                http2Stream.Cancel();
+                if (!http2Stream.Dispatched) ForgetUndispatched(http2Stream);
+                return;
+            }
         }
         else
         {
@@ -563,17 +843,44 @@ public sealed class Http2Connection(Stream stream, Func<HttpRequestData, Cancell
         SignalWindowGranted();
     }
 
+    /// <summary>Adds <paramref name="increment"/> to a stream's send window unless that would pass
+    /// 2^31-1, in which case the window is left untouched and false is returned.</summary>
+    private static bool TryGrantStreamWindow(Http2Stream http2Stream, int increment)
+    {
+        while (true)
+        {
+            var current = Interlocked.Read(ref http2Stream.RemoteWindow);
+            var next = current + increment;
+            if (next > MaxFlowControlWindow) return false;
+            if (Interlocked.CompareExchange(ref http2Stream.RemoteWindow, next, current) == current) return true;
+        }
+    }
+
+    /// <summary>
+    /// RFC 9113 §5.1, idle: no HEADERS has opened the stream. A client opens odd ids, each above the
+    /// last, so an id above the highest seen is idle, and so is every even one (those are the
+    /// server's to open, and this side never pushes). Reader thread only.
+    /// </summary>
+    private bool IsIdle(int streamId) => (streamId & 1) == 0 || streamId > _highestStreamId;
+
     private void HandleRstStream(Http2Frame frame)
     {
+        if (frame.StreamId == 0)
+            throw new Http2ProtocolException(Http2ErrorCode.ProtocolError, "RST_STREAM on stream 0.");
+        if (frame.Payload.Length != 4)
+            throw new Http2ProtocolException(Http2ErrorCode.FrameSizeError, "RST_STREAM payload must be 4 bytes.");
+        if (IsIdle(frame.StreamId))
+            throw new Http2ProtocolException(Http2ErrorCode.ProtocolError, $"RST_STREAM on idle stream {frame.StreamId}.");
+
         if (!_streams.TryGetValue(frame.StreamId, out var http2Stream)) return;
-        http2Stream.Cancellation.Cancel();
+        http2Stream.Cancel();
 
         // A stream still receiving its request is closed now, so a later HEADERS naming it must be
         // refused rather than taken for trailers. A dispatched one stays counted against
         // MaxConcurrentStreams until its handler has actually stopped (ProcessStreamAsync removes
         // it); freeing the slot on the reset alone would let HEADERS+RST_STREAM loops start
         // handlers without limit (CVE-2023-44487, "Rapid Reset").
-        if (!http2Stream.Dispatched) _streams.TryRemove(frame.StreamId, out _);
+        if (!http2Stream.Dispatched) ForgetUndispatched(http2Stream);
     }
 
     private void HandlePing(Http2Frame frame)
@@ -586,7 +893,7 @@ public sealed class Http2Connection(Stream stream, Func<HttpRequestData, Cancell
             return; // reply to a PING we never sent in phase 1; ignore defensively
 
         var payload = frame.Payload.ToArray();
-        EnqueueWrite(ct2 => Http2FrameWriter.WriteAsync(stream, Http2FrameType.Ping, Http2FrameFlags.Ack, 0, payload, ct2));
+        EnqueueControlWrite(ct2 => Http2FrameWriter.WriteAsync(stream, Http2FrameType.Ping, Http2FrameFlags.Ack, 0, payload, ct2));
     }
 
     // -------------------------------------------------------------- stream dispatch
@@ -606,8 +913,47 @@ public sealed class Http2Connection(Stream stream, Func<HttpRequestData, Cancell
         http2Stream.Body.Capacity = 0;
         http2Stream.Body.Dispose();
 
-        var task = Task.Run(() => ProcessStreamAsync(http2Stream));
-        lock (_inFlightGate) _inFlight.Add(task);
+        // Registered before the handler can possibly finish, and by a task of its own rather than the
+        // handler's: the handler removes it when it stops, and could otherwise do that before it was
+        // added.
+        var tracker = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        lock (_inFlightGate) _inFlight.Add(tracker.Task);
+        _ = Task.Run(() => RunHandlerAsync(http2Stream, tracker));
+    }
+
+    private async Task RunHandlerAsync(Http2Stream http2Stream, TaskCompletionSource tracker)
+    {
+        try
+        {
+            await ProcessStreamAsync(http2Stream).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is IOException or ObjectDisposedException)
+        {
+            // Expected, and routine on a dropped upstream or a peer that went away mid-response: the
+            // stream's relay was cancelled and failed with the transport's own exception rather than
+            // OperationCanceledException (SendResponseAsync lets it through once the token is cancelled).
+            // There is nothing to recover but the stream itself, which is reset in case part of the
+            // response went out.
+            EnqueueRstStream(http2Stream.Id, Http2ErrorCode.InternalError);
+        }
+        catch (Exception ex)
+        {
+            // Not expected from ProcessStreamAsync, which turns handler failures into a 502 or a reset.
+            // Nothing awaits this task, so it is reported here rather than left to surface as an
+            // unobserved task exception at some later collection. Type only: the message may carry
+            // request data. The stream is reset because its state is unknown.
+            Log?.Invoke($"HTTP/2 stream {http2Stream.Id} handler failed unexpectedly: {ex.GetType().Name}.");
+            EnqueueRstStream(http2Stream.Id, Http2ErrorCode.InternalError);
+        }
+        finally
+        {
+            lock (_inFlightGate) _inFlight.Remove(tracker.Task);
+            tracker.SetResult();
+            // The idle clock runs from the last thing that happened, and a response finishing is one.
+            Volatile.Write(ref _lastActivityTicks, Environment.TickCount64);
+            // A peer that said GOAWAY is waiting only for what it already asked for.
+            if (Volatile.Read(ref _peerGoingAway) && _streams.IsEmpty) RequestClose(Http2ErrorCode.NoError);
+        }
     }
 
     private async Task ProcessStreamAsync(Http2Stream http2Stream)
@@ -617,7 +963,7 @@ public sealed class Http2Connection(Stream stream, Func<HttpRequestData, Cancell
             Http2StreamResponse response;
             try
             {
-                response = await handler(http2Stream.Request, http2Stream.Cancellation.Token).ConfigureAwait(false);
+                response = await handler(http2Stream.Request, http2Stream.Token).ConfigureAwait(false);
             }
             catch (Http2StreamAbortException abort)
             {
@@ -632,7 +978,7 @@ public sealed class Http2Connection(Stream stream, Func<HttpRequestData, Cancell
                     $"Piper could not complete this HTTP/2 request.\r\n\r\n{ex.Message}");
             }
 
-            await SendResponseAsync(http2Stream, response, http2Stream.Cancellation.Token).ConfigureAwait(false);
+            await SendResponseAsync(http2Stream, response, http2Stream.Token).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
         {
@@ -642,6 +988,9 @@ public sealed class Http2Connection(Stream stream, Func<HttpRequestData, Cancell
         finally
         {
             _streams.TryRemove(http2Stream.Id, out _);
+            // The handler was the last reader of the token, and the reader loop's cancels are safe
+            // from here on (Http2CancellationSource).
+            http2Stream.Dispose();
         }
     }
 
@@ -817,7 +1166,19 @@ public sealed class Http2Connection(Stream stream, Func<HttpRequestData, Cancell
         try
         {
             await foreach (var job in _outbox.Reader.ReadAllAsync(ct).ConfigureAwait(false))
-                await job(ct).ConfigureAwait(false);
+            {
+                // What the watchdog looks at to tell a peer that has stopped reading from one that is
+                // merely idle: a write that has not come back.
+                Volatile.Write(ref _writeStartedTicks, Environment.TickCount64);
+                try
+                {
+                    await job(ct).ConfigureAwait(false);
+                }
+                finally
+                {
+                    Volatile.Write(ref _writeStartedTicks, NoWrite);
+                }
+            }
         }
         catch (OperationCanceledException) { }
         catch (IOException) { }
@@ -828,6 +1189,36 @@ public sealed class Http2Connection(Stream stream, Func<HttpRequestData, Cancell
     }
 
     private void EnqueueWrite(Func<CancellationToken, Task> job) => _outbox.Writer.TryWrite(job);
+
+    /// <summary>
+    /// Queues a frame that answers something the peer sent (a PING or SETTINGS acknowledgement, a
+    /// RST_STREAM), counting it until it has been written. Past <see cref="MaxPendingControlFrames"/>
+    /// unwritten the frame is not queued and the connection is closed with ENHANCE_YOUR_CALM: the peer
+    /// is asking for replies faster than it reads them. Never throws, because RST_STREAM is also queued
+    /// from stream handlers, which must not be the ones to take the connection down.
+    /// </summary>
+    private void EnqueueControlWrite(Func<CancellationToken, Task> job)
+    {
+        if (Interlocked.Increment(ref _pendingControlFrames) > MaxPendingControlFrames)
+        {
+            Interlocked.Decrement(ref _pendingControlFrames);
+            RequestClose(Http2ErrorCode.EnhanceYourCalm);
+            return;
+        }
+
+        var queued = _outbox.Writer.TryWrite(async ct2 =>
+        {
+            try
+            {
+                await job(ct2).ConfigureAwait(false);
+            }
+            finally
+            {
+                Interlocked.Decrement(ref _pendingControlFrames);
+            }
+        });
+        if (!queued) Interlocked.Decrement(ref _pendingControlFrames); // the writer has stopped: nothing will send it
+    }
 
     private void EnqueueWindowUpdate(int streamId, long increment)
     {
@@ -848,7 +1239,7 @@ public sealed class Http2Connection(Stream stream, Func<HttpRequestData, Cancell
         payload[1] = (byte)(value >> 16);
         payload[2] = (byte)(value >> 8);
         payload[3] = (byte)value;
-        EnqueueWrite(ct2 => Http2FrameWriter.WriteAsync(stream, Http2FrameType.RstStream, Http2FrameFlags.None, streamId, payload, ct2));
+        EnqueueControlWrite(ct2 => Http2FrameWriter.WriteAsync(stream, Http2FrameType.RstStream, Http2FrameFlags.None, streamId, payload, ct2));
     }
 
     private void EnqueueGoAway(Http2ErrorCode code)
