@@ -1,0 +1,667 @@
+using System.Diagnostics;
+using System.Net;
+using System.Net.Security;
+using System.Net.Sockets;
+using System.Security.Authentication;
+using System.Security.Cryptography.X509Certificates;
+using System.Text;
+using System.Text.RegularExpressions;
+using Piper.Core.Http;
+using Piper.Core.Http2;
+using Piper.Core.Proxy;
+using Piper.Core.Security;
+using Piper.Core.Sessions;
+
+// Who the proxy lets in, and how long it gives them: the connection cap, the head and body
+// deadlines, an Upgrade through an origin that offers h2, and connecting to a name whose first
+// address does not answer.
+internal static class ProxyAdmissionTests
+{
+    private static readonly TimeSpan Patience = TimeSpan.FromSeconds(8);
+
+    public static async Task RunAsync(TestRunner runner)
+    {
+        using var ca = CertificateAuthority.LoadOrCreate(
+            Path.Combine(Path.GetTempPath(), "Piper-SmokeTest-ProxyAdmission-Certs"));
+
+        // ------------------------------------------------------------------ upgrade vs h2
+
+        await runner.RunAsync("a WebSocket upgrade reaches an origin that offers h2 in ALPN and gets its 101", async () =>
+        {
+            // The origin prefers h2 whenever it is offered. Piper used to offer it on an upgrade too,
+            // and an h2 request has no Connection/Upgrade, so the origin answered a plain 200 and
+            // the handshake could not complete.
+            await using var origin = new AlpnUpgradeOrigin(ca.GetCertificateFor("127.0.0.1"));
+            using var harness = new Harness(ca, o =>
+            {
+                o.DecryptHttps = true;
+                o.ValidateUpstreamCertificates = false;
+            });
+
+            using var tcp = new TcpClient();
+            await tcp.ConnectAsync(IPAddress.Loopback, harness.Port);
+            var raw = tcp.GetStream();
+            var authority = $"127.0.0.1:{origin.Port}";
+            await WriteAsync(raw, $"CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\n\r\n");
+            var connected = await ReadAsync(raw, "\r\n\r\n", Patience);
+            runner.IsTrue(connected.Text.Contains(" 200 ", StringComparison.Ordinal), "CONNECT is accepted");
+
+            await using var ssl = new SslStream(raw, leaveInnerStreamOpen: false);
+            await ssl.AuthenticateAsClientAsync(new SslClientAuthenticationOptions
+            {
+                TargetHost = "127.0.0.1",
+                ApplicationProtocols = [SslApplicationProtocol.Http11],
+                RemoteCertificateValidationCallback = (_, cert, _, _) => TrustsRoot(ca.RootCertificate, cert),
+            });
+
+            await WriteAsync(ssl,
+                $"GET /chat HTTP/1.1\r\nHost: {authority}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n"
+                + "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n");
+            var head = await ReadAsync(ssl, "\r\n\r\n", Patience);
+            runner.IsTrue(head.Text.StartsWith("HTTP/1.1 101", StringComparison.Ordinal),
+                $"the client gets the 101, not an h2 origin's plain answer (got: {FirstLine(head.Text)})");
+
+            await WriteAsync(ssl, "ping");
+            var echoed = await ReadAsync(ssl, "echo:ping", Patience);
+            runner.IsTrue(echoed.Text.Contains("echo:ping", StringComparison.Ordinal), "and bytes flow both ways afterwards");
+
+            runner.AreEqual(0, origin.H2Connections, "the origin was never offered h2 for the upgrade");
+            var session = harness.Store.Snapshot().LastOrDefault(s => s.Path == "/chat");
+            runner.AreEqual(101, session?.StatusCode ?? 0, "and the session records the 101");
+        });
+
+        await runner.RunAsync("an ordinary request to the same origin still negotiates h2 upstream", async () =>
+        {
+            await using var origin = new AlpnUpgradeOrigin(ca.GetCertificateFor("127.0.0.1"));
+            using var harness = new Harness(ca, o =>
+            {
+                o.DecryptHttps = true;
+                o.ValidateUpstreamCertificates = false;
+            });
+            using var client = harness.CreateTlsClient(ca.RootCertificate);
+
+            var response = await client.GetAsync($"https://127.0.0.1:{origin.Port}/plain");
+            var body = await response.Content.ReadAsStringAsync();
+            runner.IsTrue(body.Contains("h2 origin answered", StringComparison.Ordinal), $"served over h2 (got: {body})");
+            runner.AreEqual(1, origin.H2Connections, "one h2 connection upstream");
+        });
+
+        // ------------------------------------------------------------- connection admission
+
+        await runner.RunAsync("connections over the cap wait for a free slot instead of being served at once", async () =>
+        {
+            await using var origin = new TestRawOrigin(OkAsync);
+            using var harness = new Harness(ca, o => o.MaxConcurrentConnections = 2);
+
+            using var first = await ConnectAsync(harness.Port);
+            using var second = await ConnectAsync(harness.Port);
+            runner.IsTrue(await Poll.UntilAsync(() => harness.Proxy.ActiveConnections == 2), "two connections are being served");
+
+            using var third = await ConnectAsync(harness.Port);
+            await WriteAsync(third.GetStream(), Get(origin.Port, "/queued"));
+            var early = await ReadAsync(third.GetStream(), null, TimeSpan.FromMilliseconds(700));
+            runner.AreEqual("", early.Text, "a third connection is not served while two are open");
+            runner.IsTrue(harness.Proxy.ActiveConnections <= 2, $"the cap holds ({harness.Proxy.ActiveConnections} served)");
+
+            first.Dispose(); // one slot frees up
+            var late = await ReadAsync(third.GetStream(), "ok", Patience);
+            runner.IsTrue(late.Text.Contains("200 OK", StringComparison.Ordinal),
+                $"and is served as soon as one ends (got: {FirstLine(late.Text)})");
+            runner.IsTrue(harness.Proxy.ActiveConnections <= 2, "still within the cap");
+
+            second.Dispose();
+            third.Dispose();
+            runner.IsTrue(await Poll.UntilAsync(() => harness.Proxy.ActiveConnections == 0),
+                $"every slot is given back ({harness.Proxy.ActiveConnections} still counted)");
+
+            using var fresh = await ConnectAsync(harness.Port);
+            await WriteAsync(fresh.GetStream(), Get(origin.Port, "/after"));
+            var after = await ReadAsync(fresh.GetStream(), "ok", Patience);
+            runner.IsTrue(after.Text.Contains("200 OK", StringComparison.Ordinal), "and a later connection is served");
+        });
+
+        await runner.RunAsync("a proxy stopped straight after it started stops cleanly and can start again", async () =>
+        {
+            // The accept loop used to fail with "Not listening" when Stop beat it to its first accept.
+            var leftCounted = 0;
+            for (var i = 0; i < 40; i++)
+            {
+                var proxy = new ProxyServer(new ProxyOptions { Port = 0, MaxConcurrentConnections = 1 }, ca, new SessionStore());
+                proxy.Start();
+                await proxy.StopAsync();
+                leftCounted += proxy.ActiveConnections;
+            }
+            runner.AreEqual(0, leftCounted, "forty start/stop pairs end without error and with nothing left counted");
+
+            await using var again = new ProxyServer(new ProxyOptions { Port = 0 }, ca, new SessionStore());
+            again.Start();
+            runner.IsTrue(again.IsRunning, "and a new one starts");
+        });
+
+        await runner.RunAsync("the cap is clamped to a usable range", () =>
+        {
+            var options = new ProxyOptions { MaxConcurrentConnections = 0 };
+            runner.AreEqual(1, options.MaxConcurrentConnections, "zero becomes one, not a gate nobody can pass");
+            options.MaxConcurrentConnections = int.MinValue;
+            runner.AreEqual(1, options.MaxConcurrentConnections, "negative becomes one");
+            options.MaxConcurrentConnections = int.MaxValue;
+            runner.AreEqual(100_000, options.MaxConcurrentConnections, "and it is bounded above");
+            runner.IsTrue(new ProxyOptions().MaxConcurrentConnections >= 256, "the default leaves room for a busy application");
+            return Task.CompletedTask;
+        });
+
+        // ---------------------------------------------------------- deadlines for the client
+
+        await runner.RunAsync("a slow upload that keeps sending is not cut for taking long", async () =>
+        {
+            // The old read wrapped line, headers and body in one budget of IdleTimeout, so this
+            // 2.4 second upload died at 0.6 seconds, silently. Every byte now re-arms the timer.
+            await using var origin = new TestRawOrigin(OkAsync);
+            using var harness = new Harness(ca, o =>
+            {
+                o.IdleTimeout = TimeSpan.FromMilliseconds(600);
+                o.RequestHeadTimeout = TimeSpan.FromMilliseconds(700);
+            });
+
+            using var client = await ConnectAsync(harness.Port);
+            var stream = client.GetStream();
+            await WriteAsync(stream, Post(origin.Port, "/slow-upload", 12));
+
+            var clock = Stopwatch.StartNew();
+            for (var i = 0; i < 12; i++)
+            {
+                await Task.Delay(200);
+                await stream.WriteAsync("x"u8.ToArray());
+            }
+
+            var reply = await ReadAsync(stream, "ok", Patience);
+            runner.IsTrue(clock.ElapsedMilliseconds > 1500, $"the upload outlasted the idle timeout ({clock.ElapsedMilliseconds}ms)");
+            runner.IsTrue(reply.Text.Contains("200 OK", StringComparison.Ordinal),
+                $"and still got its answer (got: {FirstLine(reply.Text)})");
+
+            var session = await WaitForSessionAsync(harness.Store, s => s.Path == "/slow-upload");
+            runner.AreEqual(SessionState.Complete, session.State, "recorded as a success");
+            runner.AreEqual(12, session.Request!.Body.Length, "with the whole body");
+        });
+
+        await runner.RunAsync("a client that goes silent in the middle of a body is cut, told 408 and recorded", async () =>
+        {
+            await using var origin = new TestRawOrigin(OkAsync);
+            using var harness = new Harness(ca, o => o.IdleTimeout = TimeSpan.FromMilliseconds(500));
+
+            using var client = await ConnectAsync(harness.Port);
+            var stream = client.GetStream();
+            await WriteAsync(stream, Post(origin.Port, "/stalled-upload", 100));
+            await WriteAsync(stream, "12345");
+
+            var clock = Stopwatch.StartNew();
+            var reply = await ReadAsync(stream, null, Patience);
+            runner.IsTrue(reply.Text.StartsWith("HTTP/1.1 408", StringComparison.Ordinal),
+                $"the client is told why (got: {FirstLine(reply.Text)})");
+            runner.IsTrue(reply.Eof, "and the connection is closed");
+            runner.IsTrue(clock.Elapsed < TimeSpan.FromSeconds(5), $"promptly ({clock.ElapsedMilliseconds}ms)");
+
+            var session = await WaitForSessionAsync(harness.Store, s => s.Path == "/stalled-upload");
+            runner.AreEqual(SessionState.Failed, session.State, "the request is recorded as failed");
+            runner.AreEqual("POST", session.Request!.Method, "with what was received of it");
+            runner.IsTrue(session.Error?.Contains("body", StringComparison.OrdinalIgnoreCase) == true,
+                $"and a reason that names the body (got: {session.Error})");
+            runner.AreEqual(408, session.StatusCode, "and the answer it was given");
+        });
+
+        await runner.RunAsync("a client that says nothing at all is closed quietly after the idle timeout", async () =>
+        {
+            using var harness = new Harness(ca, o => o.IdleTimeout = TimeSpan.FromMilliseconds(400));
+
+            using var client = await ConnectAsync(harness.Port);
+            var reply = await ReadAsync(client.GetStream(), null, Patience);
+            runner.AreEqual("", reply.Text, "nothing is written to a connection that never asked anything");
+            runner.IsTrue(reply.Eof, "it is simply closed");
+            runner.IsTrue(await Poll.UntilAsync(() => harness.Proxy.ActiveConnections == 0), "and its slot is given back");
+            runner.AreEqual(0, harness.Store.Count, "no session is made for it");
+        });
+
+        await runner.RunAsync("request headers dripped one byte at a time are cut by the head deadline", async () =>
+        {
+            // Every byte arrives well inside the idle timeout, so only a deadline on the head as a
+            // whole can stop this; without one the connection (and now its slot) is held for ever.
+            // Sent inside a decrypted tunnel: an unfinished plaintext head is held back by some
+            // antivirus loopback filters, which would test the filter rather than the proxy.
+            using var harness = new Harness(ca, o =>
+            {
+                o.DecryptHttps = true;
+                o.IdleTimeout = TimeSpan.FromSeconds(30);
+                o.RequestHeadTimeout = TimeSpan.FromMilliseconds(700);
+            });
+
+            using var client = await ConnectAsync(harness.Port);
+            await using var stream = await OpenTunnelAsync(client, "127.0.0.1:9", ca.RootCertificate);
+            using var stop = new CancellationTokenSource();
+            var dripping = Task.Run(async () =>
+            {
+                try
+                {
+                    await WriteAsync(stream, "GET /never HTTP/1.1\r\nHost: 127.0.0.1:9\r\nX-Slow: ");
+                    while (!stop.IsCancellationRequested)
+                    {
+                        await Task.Delay(150, stop.Token);
+                        await stream.WriteAsync("a"u8.ToArray(), stop.Token);
+                    }
+                }
+                catch (Exception ex) when (ex is IOException or OperationCanceledException or ObjectDisposedException
+                                               or InvalidOperationException)
+                {
+                    // The proxy closed on us, which is the point; or the test ended.
+                }
+            });
+
+            var clock = Stopwatch.StartNew();
+            var reply = await ReadAsync(stream, null, TimeSpan.FromSeconds(6));
+            await stop.CancelAsync();
+            await dripping;
+
+            runner.IsTrue(reply.Text.StartsWith("HTTP/1.1 408", StringComparison.Ordinal),
+                $"the slow client is told 408 (got: {FirstLine(reply.Text)})");
+            runner.IsTrue(clock.Elapsed < TimeSpan.FromSeconds(4), $"well before the idle timeout ({clock.ElapsedMilliseconds}ms)");
+            runner.IsTrue(await Poll.UntilAsync(() => harness.Proxy.ActiveConnections == 0), "and its slot is given back");
+        });
+
+        await runner.RunAsync("a decrypted tunnel whose client never starts the TLS handshake is cut and recorded", async () =>
+        {
+            using var harness = new Harness(ca, o =>
+            {
+                o.DecryptHttps = true;
+                o.RequestHeadTimeout = TimeSpan.FromMilliseconds(600);
+            });
+
+            using var client = await ConnectAsync(harness.Port);
+            var stream = client.GetStream();
+            await WriteAsync(stream, "CONNECT 127.0.0.1:9 HTTP/1.1\r\nHost: 127.0.0.1:9\r\n\r\n");
+            var established = await ReadAsync(stream, "\r\n\r\n", Patience);
+            runner.IsTrue(established.Text.Contains(" 200 ", StringComparison.Ordinal), "the tunnel is opened");
+
+            var rest = await ReadAsync(stream, null, Patience);
+            runner.IsTrue(rest.Eof, "then closed when no ClientHello comes");
+
+            var session = await WaitForSessionAsync(harness.Store, s => s.IsTunnel);
+            runner.AreEqual(SessionState.Failed, session.State, "and recorded as a failed handshake");
+            runner.IsTrue(session.Error?.Contains("TLS handshake", StringComparison.Ordinal) == true,
+                $"with the reason (got: {session.Error})");
+            runner.IsTrue(await Poll.UntilAsync(() => harness.Proxy.ActiveConnections == 0), "and its slot is given back");
+        });
+
+        // ------------------------------------------------------------------ connecting
+
+        await runner.RunAsync("a name is reached over IPv4 when the origin listens only there", async () =>
+        {
+            // "localhost" lists ::1 as well as 127.0.0.1 on most machines, and the origin is on the
+            // second only. Proves the racing connect is the one in use end to end.
+            await using var origin = new TestRawOrigin(OkAsync);
+            using var harness = new Harness(ca);
+
+            using var client = await ConnectAsync(harness.Port);
+            await WriteAsync(client.GetStream(), $"GET http://localhost:{origin.Port}/by-name HTTP/1.1\r\nHost: localhost:{origin.Port}\r\n\r\n");
+            var reply = await ReadAsync(client.GetStream(), "ok", Patience);
+            runner.IsTrue(reply.Text.Contains("200 OK", StringComparison.Ordinal), $"served (got: {FirstLine(reply.Text)})");
+        });
+
+        var v6A = IPAddress.Parse("2001:db8::1");
+        var v6B = IPAddress.Parse("2001:db8::2");
+        var v4A = IPAddress.Parse("192.0.2.1");
+        var v4B = IPAddress.Parse("192.0.2.2");
+
+        await runner.RunAsync("addresses alternate families, keep the resolver's first family first and drop duplicates", () =>
+        {
+            runner.AreEqual("2001:db8::1,192.0.2.1,2001:db8::2,192.0.2.2",
+                string.Join(',', HappyEyeballs.Order([v6A, v6B, v4A, v4B])), "IPv6 first stays first");
+            runner.AreEqual("192.0.2.1,2001:db8::1,192.0.2.2",
+                string.Join(',', HappyEyeballs.Order([v4A, v6A, v4B])), "IPv4 first stays first");
+            runner.AreEqual("192.0.2.1,192.0.2.2",
+                string.Join(',', HappyEyeballs.Order([v4A, v4A, v4B, v4B])), "duplicates are dropped");
+            runner.AreEqual(0, HappyEyeballs.Order([]).Count, "no addresses, no order");
+            return Task.CompletedTask;
+        });
+
+        await runner.RunAsync("a first address that never answers is passed over after the attempt delay", async () =>
+        {
+            var firstCancelled = false;
+            var clock = Stopwatch.StartNew();
+
+            using var winner = await HappyEyeballs.RaceAsync<Fake>([v6A, v4A], async (address, ct) =>
+            {
+                if (address.AddressFamily != AddressFamily.InterNetworkV6) return new Fake(address);
+                try { await Task.Delay(Timeout.Infinite, ct); }
+                catch (OperationCanceledException) { firstCancelled = true; throw; }
+                return new Fake(address);
+            }, TimeSpan.FromMilliseconds(100), HappyEyeballs.MaxAttempts, CancellationToken.None);
+
+            runner.AreEqual(v4A, winner.Address, "the second address wins");
+            runner.IsTrue(clock.Elapsed < TimeSpan.FromSeconds(3), $"without waiting out the first ({clock.ElapsedMilliseconds}ms)");
+            runner.IsTrue(await Poll.UntilAsync(() => firstCancelled), "and the abandoned attempt is cancelled");
+        });
+
+        await runner.RunAsync("a failed attempt starts the next one at once, not after the delay", async () =>
+        {
+            var clock = Stopwatch.StartNew();
+            using var winner = await HappyEyeballs.RaceAsync<Fake>([v6A, v4A], (address, _) =>
+                address.AddressFamily == AddressFamily.InterNetworkV6
+                    ? Task.FromException<Fake>(new SocketException((int)SocketError.NetworkUnreachable))
+                    : Task.FromResult(new Fake(address)),
+                TimeSpan.FromSeconds(30), HappyEyeballs.MaxAttempts, CancellationToken.None);
+
+            runner.AreEqual(v4A, winner.Address, "the second address wins");
+            runner.IsTrue(clock.Elapsed < TimeSpan.FromSeconds(3), $"straight away ({clock.ElapsedMilliseconds}ms)");
+        });
+
+        await runner.RunAsync("an attempt that succeeds after another has won is disposed, not leaked", async () =>
+        {
+            var slow = new Fake(v6A);
+            using var winner = await HappyEyeballs.RaceAsync<Fake>([v6A, v4A], async (address, _) =>
+            {
+                if (address.AddressFamily != AddressFamily.InterNetworkV6) return new Fake(address);
+                await Task.Delay(400); // ignores cancellation, as a connect that was already complete would
+                return slow;
+            }, TimeSpan.FromMilliseconds(50), HappyEyeballs.MaxAttempts, CancellationToken.None);
+
+            runner.AreEqual(v4A, winner.Address, "the fast address wins");
+            runner.IsTrue(await Poll.UntilAsync(() => slow.Disposed), "and the late connection is closed");
+            runner.IsTrue(!winner.Disposed, "while the winner is left alone");
+        });
+
+        await runner.RunAsync("when every attempt fails the last error is raised and no more than the bound are tried", async () =>
+        {
+            var many = Enumerable.Range(1, 20).Select(i => IPAddress.Parse($"192.0.2.{i}")).ToList();
+            var started = 0;
+            SocketException? thrown = null;
+            try
+            {
+                await HappyEyeballs.RaceAsync<Fake>(many, (address, _) =>
+                {
+                    Interlocked.Increment(ref started);
+                    return Task.FromException<Fake>(new SocketException((int)SocketError.ConnectionRefused));
+                }, TimeSpan.FromMilliseconds(10), 3, CancellationToken.None);
+            }
+            catch (SocketException ex) { thrown = ex; }
+
+            runner.IsTrue(thrown is not null, "it fails with the socket error, not a wrapper");
+            runner.AreEqual(SocketError.ConnectionRefused, thrown?.SocketErrorCode ?? SocketError.Success, "carrying the reason");
+            runner.AreEqual(3, started, "after trying only the bounded number of addresses");
+
+            SocketException? none = null;
+            try
+            {
+                await HappyEyeballs.RaceAsync<Fake>([], (a, _) => Task.FromResult(new Fake(a)),
+                    TimeSpan.FromMilliseconds(10), 3, CancellationToken.None);
+            }
+            catch (SocketException ex) { none = ex; }
+            runner.AreEqual(SocketError.HostNotFound, none?.SocketErrorCode ?? SocketError.Success, "a name with no address is HostNotFound");
+        });
+
+        await runner.RunAsync("cancelling the connect cancels every attempt and reports the cancellation", async () =>
+        {
+            using var cts = new CancellationTokenSource();
+            var cancelled = 0;
+            var task = HappyEyeballs.RaceAsync<Fake>([v6A, v4A], async (_, ct) =>
+            {
+                try { await Task.Delay(Timeout.Infinite, ct); }
+                catch (OperationCanceledException) { Interlocked.Increment(ref cancelled); throw; }
+                return new Fake(v4A);
+            }, TimeSpan.FromMilliseconds(30), HappyEyeballs.MaxAttempts, cts.Token);
+
+            await Task.Delay(200);
+            await cts.CancelAsync();
+
+            var threw = false;
+            try { await task; }
+            catch (OperationCanceledException) { threw = true; }
+            runner.IsTrue(threw, "the caller sees OperationCanceledException");
+            runner.IsTrue(await Poll.UntilAsync(() => Volatile.Read(ref cancelled) == 2), "and both attempts were cancelled");
+        });
+    }
+
+    // -------------------------------------------------------------------------- helpers
+
+    private sealed class Fake(IPAddress address) : IDisposable
+    {
+        private int _disposed;
+        public IPAddress Address { get; } = address;
+        public bool Disposed => Volatile.Read(ref _disposed) == 1;
+        public void Dispose() => Interlocked.Exchange(ref _disposed, 1);
+    }
+
+    private sealed class Harness : IDisposable
+    {
+        public Harness(CertificateAuthority ca, Action<ProxyOptions>? configure = null)
+        {
+            Store = new SessionStore();
+            var options = new ProxyOptions { Port = 0 };
+            configure?.Invoke(options);
+            Proxy = new ProxyServer(options, ca, Store);
+            Proxy.Start();
+            Port = Proxy.Endpoint!.Port;
+        }
+
+        public ProxyServer Proxy { get; }
+        public int Port { get; }
+        public SessionStore Store { get; }
+
+        public HttpClient CreateTlsClient(X509Certificate2 trustedRoot) => new(new SocketsHttpHandler
+        {
+            Proxy = new WebProxy($"http://127.0.0.1:{Port}", BypassOnLocal: false),
+            UseProxy = true,
+            SslOptions = new SslClientAuthenticationOptions
+            {
+                RemoteCertificateValidationCallback = (_, cert, _, _) => TrustsRoot(trustedRoot, cert),
+            },
+        })
+        { Timeout = TimeSpan.FromSeconds(20) };
+
+        public void Dispose() => Proxy.StopAsync().GetAwaiter().GetResult();
+    }
+
+    /// <summary>
+    /// An HTTPS origin that picks h2 whenever the client offers it and speaks HTTP/1.1 otherwise,
+    /// as a real server behind a CDN does. Over h2 it answers every request with a plain 200; over
+    /// HTTP/1.1 it completes a WebSocket-style upgrade and then echoes what it is sent.
+    /// </summary>
+    private sealed class AlpnUpgradeOrigin : IAsyncDisposable
+    {
+        private readonly TcpListener _listener = new(IPAddress.Loopback, 0);
+        private readonly X509Certificate2 _certificate;
+        private readonly CancellationTokenSource _cts = new();
+        private readonly List<Task> _connections = [];
+        private readonly Lock _gate = new();
+        private readonly Task _acceptLoop;
+        private int _h2Connections;
+
+        public AlpnUpgradeOrigin(X509Certificate2 certificate)
+        {
+            _certificate = certificate;
+            _listener.Start();
+            _acceptLoop = Task.Run(AcceptLoopAsync);
+        }
+
+        public int Port => ((IPEndPoint)_listener.LocalEndpoint).Port;
+
+        public int H2Connections => Volatile.Read(ref _h2Connections);
+
+        private async Task AcceptLoopAsync()
+        {
+            while (!_cts.IsCancellationRequested)
+            {
+                TcpClient client;
+                try { client = await _listener.AcceptTcpClientAsync(_cts.Token).ConfigureAwait(false); }
+                catch (OperationCanceledException) { return; }
+                catch (ObjectDisposedException) { return; }
+
+                var task = Task.Run(() => ServeAsync(client));
+                lock (_gate) _connections.Add(task);
+            }
+        }
+
+        private async Task ServeAsync(TcpClient client)
+        {
+            using var c = client;
+            c.NoDelay = true;
+            var ssl = new SslStream(c.GetStream(), leaveInnerStreamOpen: false);
+            try
+            {
+                await ssl.AuthenticateAsServerAsync(new SslServerAuthenticationOptions
+                {
+                    ServerCertificate = _certificate,
+                    EnabledSslProtocols = SslProtocols.Tls12 | SslProtocols.Tls13,
+                    ApplicationProtocols = [SslApplicationProtocol.Http2, SslApplicationProtocol.Http11],
+                }, _cts.Token).ConfigureAwait(false);
+
+                if (ssl.NegotiatedApplicationProtocol == SslApplicationProtocol.Http2)
+                {
+                    Interlocked.Increment(ref _h2Connections);
+                    var connection = new Http2Connection(ssl, (_, _) => Task.FromResult(
+                        (Http2StreamResponse)HttpResponseData.Simple(200, "OK", "h2 origin answered; no upgrade was possible")));
+                    await connection.RunAsync(_cts.Token).ConfigureAwait(false);
+                    return;
+                }
+
+                using var reader = new HttpStreamReader(ssl);
+                var request = await HttpParser.ReadRequestAsync(reader, _cts.Token).ConfigureAwait(false);
+                if (request is null) return;
+
+                if (request.Headers.HasToken("Connection", "Upgrade") && request.Headers.Contains("Upgrade"))
+                {
+                    await WriteAsync(ssl, "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n");
+                    var buffer = new byte[256];
+                    var n = await reader.ReadAsync(buffer, _cts.Token).ConfigureAwait(false);
+                    await ssl.WriteAsync(Encoding.ASCII.GetBytes("echo:" + Encoding.ASCII.GetString(buffer, 0, n)), _cts.Token)
+                        .ConfigureAwait(false);
+                    await ssl.FlushAsync(_cts.Token).ConfigureAwait(false);
+                    await Task.Delay(200, _cts.Token).ConfigureAwait(false);
+                    return;
+                }
+
+                await ssl.WriteAsync(HttpResponseData.Simple(200, "OK", "h1 origin answered").ToBytes(), _cts.Token)
+                    .ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is IOException or OperationCanceledException or AuthenticationException
+                                           or ObjectDisposedException or Http2ProtocolException or HttpParseException)
+            {
+                // The test asserts on the client side; a connection that ended early is not news.
+            }
+            finally
+            {
+                await ssl.DisposeAsync().ConfigureAwait(false);
+            }
+        }
+
+        public async ValueTask DisposeAsync()
+        {
+            await _cts.CancelAsync().ConfigureAwait(false);
+            try { _listener.Stop(); } catch (SocketException) { }
+            try { await _acceptLoop.ConfigureAwait(false); } catch (OperationCanceledException) { }
+
+            Task[] pending;
+            lock (_gate) pending = [.. _connections];
+            await Task.WhenAll(pending).ConfigureAwait(false);
+            _cts.Dispose();
+        }
+    }
+
+    private static async Task<bool> OkAsync(string head, NetworkStream stream, CancellationToken ct)
+    {
+        // Reads the body the head announces: closing with it unread would reset the connection
+        // and could take the reply with it.
+        var announced = Regex.Match(head, @"Content-Length:\s*(\d+)", RegexOptions.IgnoreCase);
+        if (announced.Success)
+        {
+            var left = int.Parse(announced.Groups[1].Value);
+            var scratch = new byte[256];
+            while (left > 0)
+            {
+                var n = await stream.ReadAsync(scratch.AsMemory(0, Math.Min(left, scratch.Length)), ct);
+                if (n == 0) return false;
+                left -= n;
+            }
+        }
+
+        await TestRawOrigin.WriteAsync(stream, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok", ct);
+        return false;
+    }
+
+    private static string Get(int port, string path) =>
+        $"GET http://127.0.0.1:{port}{path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n";
+
+    private static string Post(int port, string path, int length) =>
+        $"POST http://127.0.0.1:{port}{path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Length: {length}\r\n\r\n";
+
+    private static async Task<TcpClient> ConnectAsync(int port)
+    {
+        var client = new TcpClient { NoDelay = true };
+        await client.ConnectAsync(IPAddress.Loopback, port);
+        return client;
+    }
+
+    /// <summary>CONNECTs through the proxy and completes the TLS handshake with its minted leaf.</summary>
+    private static async Task<SslStream> OpenTunnelAsync(TcpClient client, string authority, X509Certificate2 root)
+    {
+        var raw = client.GetStream();
+        await WriteAsync(raw, $"CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\n\r\n");
+        var connected = await ReadAsync(raw, "\r\n\r\n", Patience);
+        if (!connected.Text.Contains(" 200 ", StringComparison.Ordinal))
+            throw new IOException($"CONNECT was not accepted: {FirstLine(connected.Text)}");
+
+        var ssl = new SslStream(raw, leaveInnerStreamOpen: false);
+        await ssl.AuthenticateAsClientAsync(new SslClientAuthenticationOptions
+        {
+            TargetHost = "127.0.0.1",
+            ApplicationProtocols = [SslApplicationProtocol.Http11],
+            RemoteCertificateValidationCallback = (_, cert, _, _) => TrustsRoot(root, cert),
+        });
+        return ssl;
+    }
+
+    private static Task WriteAsync(Stream stream, string text) =>
+        stream.WriteAsync(Encoding.Latin1.GetBytes(text)).AsTask();
+
+    /// <summary>Reads until <paramref name="until"/> has arrived (or, when null, until the peer
+    /// closes), the limit passes, or the connection ends. Never throws on a closed peer.</summary>
+    private static async Task<(string Text, bool Eof)> ReadAsync(Stream stream, string? until, TimeSpan limit)
+    {
+        using var cts = new CancellationTokenSource(limit);
+        var text = new StringBuilder();
+        var buffer = new byte[4096];
+        while (until is null || !text.ToString().Contains(until, StringComparison.Ordinal))
+        {
+            int n;
+            try { n = await stream.ReadAsync(buffer, cts.Token); }
+            catch (OperationCanceledException) { return (text.ToString(), false); }
+            catch (IOException) { return (text.ToString(), true); } // a reset is as closed as a FIN
+            if (n == 0) return (text.ToString(), true);
+            text.Append(Encoding.Latin1.GetString(buffer, 0, n));
+        }
+        return (text.ToString(), false);
+    }
+
+    private static string FirstLine(string text)
+    {
+        var end = text.IndexOf('\r');
+        return end < 0 ? text : text[..end];
+    }
+
+    private static async Task<Session> WaitForSessionAsync(SessionStore store, Func<Session, bool> match)
+    {
+        Session? found = null;
+        await Poll.UntilAsync(() => (found = store.Snapshot().LastOrDefault(s => match(s) && s.Completed is not null)) is not null);
+        return found ?? throw new TimeoutException("No matching session was completed.");
+    }
+
+    private static bool TrustsRoot(X509Certificate2 root, X509Certificate? presented)
+    {
+        if (presented is null) return false;
+        using var leaf = new X509Certificate2(presented);
+        using var chain = new X509Chain();
+        chain.ChainPolicy.ExtraStore.Add(root);
+        chain.ChainPolicy.RevocationMode = X509RevocationMode.NoCheck;
+        chain.ChainPolicy.VerificationFlags = X509VerificationFlags.AllowUnknownCertificateAuthority;
+        return chain.Build(leaf)
+               && chain.ChainElements.Cast<X509ChainElement>().Any(e => e.Certificate.Thumbprint == root.Thumbprint);
+    }
+}

@@ -96,7 +96,7 @@ public sealed class HttpStreamReader : IDisposable
             // Reported as a parse failure rather than a cancellation so it reaches the caller as a
             // named reason: a silently abandoned read is indistinguishable from the hang it exists
             // to prevent.
-            throw new HttpParseException(
+            throw new HttpStalledException(
                 $"No data received for {IdleTimeout.TotalSeconds:0.#}s; treating the connection as stalled.");
         }
     }
@@ -232,8 +232,15 @@ public sealed class HttpStreamReader : IDisposable
     }
 }
 
-public sealed class HttpParseException : Exception
+public class HttpParseException : Exception
 {
     public HttpParseException(string message) : base(message) { }
     public HttpParseException(string message, Exception inner) : base(message, inner) { }
 }
+
+/// <summary>
+/// The peer sent nothing for longer than <see cref="HttpStreamReader.IdleTimeout"/>. A
+/// <see cref="HttpParseException"/>, so every existing handler still treats it as a failed read; it
+/// is a type of its own so that a caller can tell a silent peer from a malformed message.
+/// </summary>
+public sealed class HttpStalledException(string message) : HttpParseException(message);

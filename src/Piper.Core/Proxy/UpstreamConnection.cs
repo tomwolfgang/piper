@@ -12,10 +12,11 @@ namespace Piper.Core.Proxy;
 /// </summary>
 internal sealed class UpstreamConnection : IDisposable
 {
-    private UpstreamConnection(TcpClient client, Stream stream, string host, int port, bool isTls, bool isHttp2,
+    private UpstreamConnection(Socket client, Stream stream, string host, int port, bool isTls, bool isHttp2,
         long remappingRevision, TimeSpan idleTimeout)
     {
         Client = client;
+        RemoteEndpoint = client.RemoteEndPoint?.ToString();
         Stream = stream;
         Reader = new HttpStreamReader(stream) { IdleTimeout = idleTimeout };
         Host = host;
@@ -25,7 +26,7 @@ internal sealed class UpstreamConnection : IDisposable
         RemappingRevision = remappingRevision;
     }
 
-    public TcpClient Client { get; }
+    public Socket Client { get; }
     public Stream Stream { get; }
     public HttpStreamReader Reader { get; }
     public string Host { get; }
@@ -37,7 +38,8 @@ internal sealed class UpstreamConnection : IDisposable
     public bool IsHttp2 { get; }
     public long RemappingRevision { get; }
 
-    public string? RemoteEndpoint => Client.Client?.RemoteEndPoint?.ToString();
+    /// <summary>Read once at connect: a disposed socket no longer reports its peer.</summary>
+    public string? RemoteEndpoint { get; }
 
     public bool Matches(string host, int port, bool isTls, long remappingRevision) =>
         IsTls == isTls && Port == port && RemappingRevision == remappingRevision
@@ -49,10 +51,9 @@ internal sealed class UpstreamConnection : IDisposable
         {
             try
             {
-                var socket = Client.Client;
-                if (socket is null || !Client.Connected) return false;
+                if (!Client.Connected) return false;
                 // Poll reports readable-with-zero-available only when the peer has closed.
-                return !(socket.Poll(0, SelectMode.SelectRead) && socket.Available == 0);
+                return !(Client.Poll(0, SelectMode.SelectRead) && Client.Available == 0);
             }
             catch (SocketException) { return false; }
             catch (ObjectDisposedException) { return false; }
@@ -65,22 +66,18 @@ internal sealed class UpstreamConnection : IDisposable
     public static async Task<UpstreamConnection> ConnectAsync(
         string host, int port, bool isTls, ProxyOptions options, CancellationToken ct, bool allowHttp2 = true)
     {
-        var client = new TcpClient { NoDelay = true };
         var remapping = options.HostRemapping.ResolveTarget(host);
         var tlsHost = remapping.RewritesAuthority ? remapping.Host : host;
-        try
+
+        Socket client;
+        using (var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct))
         {
-            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
             timeout.CancelAfter(options.ConnectTimeout);
-            await client.ConnectAsync(remapping.Host, port, timeout.Token).ConfigureAwait(false);
-        }
-        catch
-        {
-            client.Dispose();
-            throw;
+            client = await HappyEyeballs.ConnectAsync(remapping.Host, port, options.ConnectionAttemptDelay, timeout.Token)
+                .ConfigureAwait(false);
         }
 
-        Stream stream = client.GetStream();
+        Stream stream = new NetworkStream(client, ownsSocket: true);
         var isHttp2 = false;
 
         if (isTls)
@@ -92,6 +89,11 @@ internal sealed class UpstreamConnection : IDisposable
                 rejectionDetail = CertificateRejectionDetail.Describe(errors, chain);
                 return false;
             });
+
+            // Its own budget, so an origin that accepts the TCP connection and then says nothing
+            // cannot hold the request (and a client connection slot) open for ever.
+            using var handshakeTimeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            handshakeTimeout.CancelAfter(options.ConnectTimeout);
 
             try
             {
@@ -105,7 +107,7 @@ internal sealed class UpstreamConnection : IDisposable
                     ApplicationProtocols = options.EnableHttp2Upstream && allowHttp2
                         ? [SslApplicationProtocol.Http2, SslApplicationProtocol.Http11]
                         : null,
-                }, ct).ConfigureAwait(false);
+                }, handshakeTimeout.Token).ConfigureAwait(false);
             }
             catch (AuthenticationException ex) when (rejectionDetail is not null)
             {

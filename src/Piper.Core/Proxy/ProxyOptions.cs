@@ -20,9 +20,54 @@ public sealed class ProxyOptions
     /// <summary>Reject a request body larger than this instead of buffering it.</summary>
     public long MaxBodyBytes { get; set; } = 128L * 1024 * 1024;
 
+    /// <summary>
+    /// How long to wait for the TCP connection to an origin, and then separately for its TLS
+    /// handshake, before giving up. Name resolution and every address tried are inside the first
+    /// of the two.
+    /// </summary>
     public TimeSpan ConnectTimeout { get; set; } = TimeSpan.FromSeconds(15);
 
+    /// <summary>
+    /// How long a client may say nothing before its connection is closed: waiting for the next
+    /// request on a kept-alive connection, or part-way through sending a request body. It is
+    /// re-armed by every byte received, so a slow but steady upload is never cut for taking long;
+    /// only silence is. An idle keep-alive connection is closed quietly, a stalled request body is
+    /// answered with <c>408</c> and recorded as a failed session.
+    /// </summary>
     public TimeSpan IdleTimeout { get; set; } = TimeSpan.FromSeconds(120);
+
+    /// <summary>
+    /// How long a client has, from the first byte of a request, to finish sending its request line
+    /// and headers, and how long it has to complete the TLS handshake of a decrypted tunnel. A
+    /// budget rather than an idle timeout on purpose: a peer that drips one byte every few seconds
+    /// stays "active" for ever and would otherwise hold a connection slot indefinitely. It does not
+    /// cover the body, which is only bounded by <see cref="IdleTimeout"/>.
+    /// </summary>
+    public TimeSpan RequestHeadTimeout { get; set; } = TimeSpan.FromSeconds(30);
+
+    /// <summary>
+    /// How many client connections are served at once. A connection over the limit is not refused:
+    /// it waits, unserved, in the operating system's accept queue (at most 512 of them; beyond that
+    /// the system itself turns clients away) until a connection ends, so a burst is absorbed and a
+    /// flood cannot make the proxy allocate without bound. Read when the proxy starts; clamped to
+    /// 1..100,000.
+    /// </summary>
+    public int MaxConcurrentConnections
+    {
+        get => _maxConcurrentConnections;
+        set => _maxConcurrentConnections = Math.Clamp(value, 1, 100_000);
+    }
+
+    private int _maxConcurrentConnections = 1024;
+
+    /// <summary>
+    /// How long a connection attempt to an origin gets before the next address of the same name is
+    /// tried in parallel with it (RFC 8305 "Connection Attempt Delay"; 250 ms is the value it
+    /// recommends). A failed attempt starts the next one at once. A name with an unreachable IPv6
+    /// address ahead of a working IPv4 one is therefore reached after this delay rather than after
+    /// <see cref="ConnectTimeout"/>.
+    /// </summary>
+    public TimeSpan ConnectionAttemptDelay { get; set; } = TimeSpan.FromMilliseconds(250);
 
     /// <summary>
     /// How long to wait for an origin to send anything at all before giving up on a response.

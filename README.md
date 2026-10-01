@@ -216,7 +216,19 @@ targets, so `Invoke-WebRequest -Proxy` would never reach Piper.
   output per body (across stacked encodings) so a decompression bomb cannot exhaust memory; the
   original bytes are always kept
 - WebSocket / `101 Switching Protocols` upgrade pass-through, relayed in both directions until
-  both sides close rather than until the first one does
+  both sides close rather than until the first one does. An upgrade is always sent to the origin
+  over HTTP/1.1, even when the origin would negotiate HTTP/2 for an ordinary request, because
+  HTTP/2 has no `Connection` or `Upgrade` header to carry it
+- Clients are treated as hostile too. At most `MaxConcurrentConnections` (default 1,024) are served
+  at once; the rest wait in the operating system's accept queue until one ends. A client has
+  `RequestHeadTimeout` (default 30 s) from its first byte to send a request's line and headers and
+  to complete a decrypted tunnel's TLS handshake, so one that drips bytes cannot hold a connection
+  for ever. The body is bounded only by silence (`IdleTimeout`, default 120 s, re-armed by every
+  byte), so a large upload that keeps flowing is never cut for taking long; a client that goes
+  silent mid-body gets a `408` and a failed session. Connecting to a host name tries its addresses
+  as RFC 8305 describes (IPv6 and IPv4 alternating, one more every 250 ms or as soon as one fails,
+  at most six), so an unreachable IPv6 address ahead of a working IPv4 one costs a fraction of a
+  second rather than the whole connect timeout
 - Virtual-mode session grid that stays responsive under load
 - Request and response inspectors: headers, decoded body, pretty-printed JSON, hex dump
 - Composer with search, raw-request editing, repeat-N, and verbatim header sending

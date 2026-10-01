@@ -20,6 +20,20 @@ public static class HttpParser
     /// </summary>
     public static async Task<HttpRequestData?> ReadRequestAsync(HttpStreamReader reader, CancellationToken ct)
     {
+        var request = await ReadRequestHeadAsync(reader, ct).ConfigureAwait(false);
+        if (request is null) return null;
+
+        request.Body = await ReadBodyAsync(reader, DescribeRequestBody(request.Headers), ct).ConfigureAwait(false);
+        return request;
+    }
+
+    /// <summary>
+    /// Reads a request line and headers, leaving the body unread (<see cref="HttpRequestData.Body"/>
+    /// is empty). For a caller that applies a different deadline to the head than to the body.
+    /// Returns null when the connection closed cleanly before a request started.
+    /// </summary>
+    public static async Task<HttpRequestData?> ReadRequestHeadAsync(HttpStreamReader reader, CancellationToken ct)
+    {
         string? line;
         // Tolerate leading blank lines between pipelined requests (RFC 9112 2.2).
         do
@@ -41,7 +55,6 @@ public static class HttpParser
 
         request.Headers = await ReadHeadersAsync(reader, ct).ConfigureAwait(false);
         request.Url = ResolveUrl(request);
-        request.Body = await ReadBodyAsync(reader, DescribeRequestBody(request.Headers), ct).ConfigureAwait(false);
         return request;
     }
 
