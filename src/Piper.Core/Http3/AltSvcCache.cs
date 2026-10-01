@@ -76,9 +76,11 @@ public sealed class AltSvcCache(TimeProvider? timeProvider = null)
         if (string.IsNullOrWhiteSpace(host) || host.Length > MaxHostLength) return;
         if (string.IsNullOrWhiteSpace(altSvcHeader) || altSvcHeader.Length > MaxHeaderLength) return;
 
+        // "clear" and ma=0 both withdraw the alternative; neither may erase a failure cool-down, or an
+        // origin could end its own bar from a TCP response.
         if (altSvcHeader.Trim().Equals("clear", StringComparison.OrdinalIgnoreCase))
         {
-            lock (_gate) _hosts.Remove(host);
+            Withdraw(host);
             return;
         }
 
@@ -86,10 +88,10 @@ public sealed class AltSvcCache(TimeProvider? timeProvider = null)
 
         lock (_gate)
         {
-            // ma=0 withdraws the alternative (RFC 7838 §3.1) without forgetting a cool-down.
+            // ma=0 withdraws the alternative (RFC 7838 §3.1).
             if (alternative.MaxAge <= TimeSpan.Zero)
             {
-                if (_hosts.TryGetValue(host, out var withdrawn)) withdrawn.Advertised = false;
+                WithdrawLocked(host);
                 return;
             }
 
@@ -99,6 +101,17 @@ public sealed class AltSvcCache(TimeProvider? timeProvider = null)
             entry.OriginPort = originPort;
             entry.ExpiresAt = _time.GetUtcNow() + alternative.MaxAge;
         }
+    }
+
+    private void Withdraw(string host)
+    {
+        lock (_gate) WithdrawLocked(host);
+    }
+
+    // Callers hold _gate. Keeps the entry for its failure cool-down, if one is running.
+    private void WithdrawLocked(string host)
+    {
+        if (_hosts.TryGetValue(host, out var entry)) entry.Advertised = false;
     }
 
     /// <summary>True when <paramref name="altSvcHeader"/> offers final-standard HTTP/3 (an

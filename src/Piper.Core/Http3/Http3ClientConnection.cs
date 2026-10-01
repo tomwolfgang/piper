@@ -638,9 +638,11 @@ public sealed class Http3ClientConnection : IAsyncDisposable
         if (_inbound is not null)
         {
             try { await _inbound.WaitAsync(CloseGrace).ConfigureAwait(false); }
-            catch (TimeoutException) { return; } // abandoned; its token sources are left to the collector
+            catch (TimeoutException) { /* abandoned: it holds only cancelled tokens, disposed below */ }
         }
 
+        // Safe even for an abandoned task: both sources are already cancelled or only ever cancelled,
+        // and SignalAbort tolerates a disposed one.
         _lifetime.Dispose();
         _abort.Dispose();
     }

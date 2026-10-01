@@ -211,6 +211,19 @@ internal static class Http3HardeningTests
             cache.RecordFailure("f.example");
             cache.RecordSuccess("f.example");
             runner.AreEqual(Quic, Eligible(cache, "f.example", 443), "a success clears the failure");
+
+            // Withdrawing the alternative (clear, or ma=0) must not end a bar the origin has earned.
+            foreach (var withdrawal in new[] { "clear", "h3=\":443\"; ma=0" })
+            {
+                var barred = new AltSvcCache(time) { FailureCooldown = TimeSpan.FromMinutes(5) };
+                barred.RecordAltSvc("g.example", 443, "h3=\":443\"");
+                barred.RecordFailure("g.example");
+                barred.RecordAltSvc("g.example", 443, withdrawal);
+                barred.RecordAltSvc("g.example", 443, "h3=\":443\"");
+                runner.IsTrue(!Eligible(barred, "g.example", 443), $"'{withdrawal}' then a fresh advertisement: still barred");
+                time.Now += TimeSpan.FromMinutes(6);
+                runner.AreEqual(Quic, Eligible(barred, "g.example", 443), $"'{withdrawal}': eligible once the cool-down is over");
+            }
             return Task.CompletedTask;
         });
     }
