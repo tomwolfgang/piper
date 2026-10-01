@@ -49,6 +49,9 @@ public sealed class Http2Connection(Stream stream, Func<HttpRequestData, Cancell
 
     private int _pendingControlFrames;
 
+    /// <summary>Completed when the watchdog gives up on a write that will not come back.</summary>
+    private readonly TaskCompletionSource _writerAbandoned = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
     /// <summary>Cancelled to end the reader loop from elsewhere: the idle watchdog, the control-frame
     /// cap, the last stream finishing after the peer's GOAWAY. Set for the length of
     /// <see cref="RunAsync"/>.</summary>
@@ -151,10 +154,20 @@ public sealed class Http2Connection(Stream stream, Func<HttpRequestData, Cancell
     /// How long the connection may sit with nothing to do before it is closed with GOAWAY(NO_ERROR):
     /// no frame from the peer and no handler running. A handler waiting on an origin is not idleness,
     /// so a slow response is never cut short by this. The same span bounds a single write that makes
-    /// no progress, which is what a peer that stopped reading its socket causes; the connection is
-    /// then dropped without waiting for that write, since the peer is not going to read a GOAWAY.
+    /// no progress, which is what a peer that stopped reading its socket causes. The write is then
+    /// cancelled and, if it does not return within <see cref="WriterAbandonGrace"/>, abandoned: the
+    /// connection ends without waiting for it, since the peer is not going to read a GOAWAY. Total
+    /// bound: the idle span plus the grace, plus one watchdog tick.
     /// </summary>
     internal TimeSpan IdleTimeout { get; init; } = DefaultIdleTimeout;
+
+    /// <summary>
+    /// How long <see cref="RunAsync"/> waits, once the watchdog has given up on a stuck write, for the
+    /// writer to notice. A pending socket send does not reliably honour cancellation (a TLS stream over
+    /// a socket in particular), so the writer is abandoned after this, and it is the owner disposing
+    /// the transport after <see cref="RunAsync"/> returns that actually releases the send.
+    /// </summary>
+    internal TimeSpan WriterAbandonGrace { get; init; } = TimeSpan.FromSeconds(5);
 
     internal const int DefaultMaxPendingControlFrames = 1000;
 
@@ -265,10 +278,29 @@ public sealed class Http2Connection(Stream stream, Func<HttpRequestData, Cancell
                 // no longer arrive, holding its upstream connection open.
                 foreach (var open in _streams.Values) open.Cancel();
 
-                // Whatever is queued, GOAWAY included, is still written. The watchdog is what stops
-                // this waiting for ever on a peer that no longer reads.
+                // Whatever is queued, GOAWAY included, is still written, for as long as writes make
+                // progress. A write that does not (a peer that stopped reading) is what the watchdog
+                // gives up on; cancelling it is not guaranteed to free a socket send already in flight,
+                // so after a short grace the writer is abandoned. The owner disposing the transport
+                // once this returns is what releases it.
                 _outbox.Writer.TryComplete();
-                await writerTask.ConfigureAwait(false);
+                if (await Task.WhenAny(writerTask, _writerAbandoned.Task).ConfigureAwait(false) != writerTask)
+                {
+                    try
+                    {
+                        await writerTask.WaitAsync(WriterAbandonGrace).ConfigureAwait(false);
+                    }
+                    catch (TimeoutException)
+                    {
+                        // Whatever it fails with when the transport goes is expected and is not reported.
+                        _ = writerTask.ContinueWith(static t => t.Exception, CancellationToken.None,
+                            TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+                    }
+                }
+                else
+                {
+                    await writerTask.ConfigureAwait(false);
+                }
 
                 Task[] pending;
                 lock (_inFlightGate) pending = _inFlight.ToArray();
@@ -341,6 +373,7 @@ public sealed class Http2Connection(Stream stream, Func<HttpRequestData, Cancell
                 if (writeStarted != NoWrite && now - writeStarted >= timeoutMs)
                 {
                     _writerStop?.Cancel();
+                    _writerAbandoned.TrySetResult();
                     RequestClose(Http2ErrorCode.NoError);
                     return;
                 }
@@ -867,6 +900,24 @@ public sealed class Http2Connection(Stream stream, Func<HttpRequestData, Cancell
         try
         {
             await ProcessStreamAsync(http2Stream).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is IOException or ObjectDisposedException)
+        {
+            // Expected, and routine on a dropped upstream or a peer that went away mid-response: the
+            // stream's relay was cancelled and failed with the transport's own exception rather than
+            // OperationCanceledException (SendResponseAsync lets it through once the token is cancelled).
+            // There is nothing to recover but the stream itself, which is reset in case part of the
+            // response went out.
+            EnqueueRstStream(http2Stream.Id, Http2ErrorCode.InternalError);
+        }
+        catch (Exception ex)
+        {
+            // Not expected from ProcessStreamAsync, which turns handler failures into a 502 or a reset.
+            // Nothing awaits this task, so it is reported here rather than left to surface as an
+            // unobserved task exception at some later collection. Type only: the message may carry
+            // request data. The stream is reset because its state is unknown.
+            Log?.Invoke($"HTTP/2 stream {http2Stream.Id} handler failed unexpectedly: {ex.GetType().Name}.");
+            EnqueueRstStream(http2Stream.Id, Http2ErrorCode.InternalError);
         }
         finally
         {

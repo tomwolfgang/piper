@@ -420,6 +420,135 @@ internal static class Http2ServerHardeningTests
             await peer.SendAsync(Http2FrameType.Ping, Http2FrameFlags.None, 0, new byte[8]);
             runner.IsTrue(await peer.EndedWithinAsync(TimeSpan.FromSeconds(5)), "RunAsync returned although its writer was blocked");
         });
+
+        await runner.RunAsync("a stuck write that ignores cancellation is abandoned after a grace period, not waited on for ever", async () =>
+        {
+            // A pending socket send, a TLS one especially, is not reliably cancelled by a token: only
+            // the owner disposing the transport after RunAsync returns releases it.
+            await using var peer = await Peer.StartAsync(new PeerOptions
+            {
+                BlockWrites = true,
+                IgnoreWriteCancellation = true,
+                IdleTimeout = TimeSpan.FromMilliseconds(300),
+                WriterAbandonGrace = TimeSpan.FromMilliseconds(300),
+            });
+            await peer.SendAsync(Http2FrameType.Ping, Http2FrameFlags.None, 0, new byte[8]);
+            runner.IsTrue(await peer.EndedWithinAsync(TimeSpan.FromSeconds(5)), "RunAsync returned although the write never came back");
+            runner.IsTrue(peer.RunException is null, $"and without throwing ({peer.RunException?.GetType().Name})");
+
+            // Released as the owner would: the transport is disposed. The abandoned writer must end
+            // quietly, with nothing left for the task scheduler to report.
+            var unobserved = new List<Exception>();
+            void Collect(object? sender, UnobservedTaskExceptionEventArgs e) { lock (unobserved) unobserved.AddRange(e.Exception.InnerExceptions); }
+            TaskScheduler.UnobservedTaskException += Collect;
+            try
+            {
+                peer.DisposeServerSide();
+                peer.OpenWrites();
+                await Task.Delay(100);
+                GC.Collect();
+                GC.WaitForPendingFinalizers();
+                GC.Collect();
+                lock (unobserved) runner.AreEqual(0, unobserved.Count(e => e is ObjectDisposedException or IOException), "the abandoned writer's failure was observed");
+            }
+            finally { TaskScheduler.UnobservedTaskException -= Collect; }
+        });
+
+        await runner.RunAsync("a handler that fails with an I/O error mid-response leaves no unobserved exception and the connection healthy", async () =>
+        {
+            // A relay that is cancelled because the peer reset the stream often fails with IOException
+            // or ObjectDisposedException rather than OperationCanceledException; that is routine on a
+            // dropped upstream and must not surface later as an UnobservedTaskException.
+            var unobserved = new List<Exception>();
+            void Collect(object? sender, UnobservedTaskExceptionEventArgs e) { lock (unobserved) unobserved.AddRange(e.Exception.InnerExceptions); }
+            TaskScheduler.UnobservedTaskException += Collect;
+            try
+            {
+                var logged = new ConcurrentQueue<string>();
+                await using var peer = await Peer.StartAsync(new PeerOptions
+                {
+                    Log = logged.Enqueue,
+                    Handler = (request, ct) =>
+                    {
+                        if (!request.RequestTarget.StartsWith("/drop", StringComparison.Ordinal))
+                            return Task.FromResult((Http2StreamResponse)HttpResponseData.Simple(200, "OK", "ok"));
+
+                        var head = HttpResponseData.Simple(200, "OK", "");
+                        return Task.FromResult(new Http2StreamResponse(head, async (body, token) =>
+                        {
+                            await body.WriteAsync("part"u8.ToArray(), token).ConfigureAwait(false);
+                            try { await Task.Delay(Timeout.Infinite, token).ConfigureAwait(false); }
+                            catch (OperationCanceledException) { throw new IOException("s7-mid-response-drop"); }
+                        }));
+                    },
+                });
+
+                await peer.SendHeadersAsync(1, endStream: true, Get("/drop"));
+                runner.IsTrue(await peer.ReadUntilAsync(f => f.Type == Http2FrameType.Data && f.StreamId == 1) is not null, "the response had started");
+                await peer.SendAsync(Http2FrameType.RstStream, Http2FrameFlags.None, 1, RstStream(Http2ErrorCode.Cancel));
+                await Poll.UntilAsync(() => peer.Connection.InFlightHandlers == 0);
+
+                await peer.SendHeadersAsync(3, endStream: true, Get("/after"));
+                var outcome = await peer.ReadUntilAsync(f => f.Type == Http2FrameType.GoAway || (f.StreamId == 3 && f.HasFlag(Http2FrameFlags.EndStream)));
+                runner.IsTrue(outcome is { Type: not Http2FrameType.GoAway }, "the connection is healthy and stream 3 is answered");
+
+                await Task.Delay(100);
+                GC.Collect();
+                GC.WaitForPendingFinalizers();
+                GC.Collect();
+                lock (unobserved) runner.AreEqual(0, unobserved.Count(e => e.Message == "s7-mid-response-drop"), "the handler's I/O failure was observed");
+                runner.AreEqual(0, logged.Count, "an expected stream-gone failure is not logged as a fault");
+            }
+            finally { TaskScheduler.UnobservedTaskException -= Collect; }
+        });
+
+        await runner.RunAsync("an unexpected handler failure is logged, resets only its stream and is observed", async () =>
+        {
+            var unobserved = new List<Exception>();
+            void Collect(object? sender, UnobservedTaskExceptionEventArgs e) { lock (unobserved) unobserved.AddRange(e.Exception.InnerExceptions); }
+            TaskScheduler.UnobservedTaskException += Collect;
+            try
+            {
+                var logged = new ConcurrentQueue<string>();
+                await using var peer = await Peer.StartAsync(new PeerOptions
+                {
+                    Log = logged.Enqueue,
+                    Handler = (request, ct) =>
+                    {
+                        if (!request.RequestTarget.StartsWith("/boom", StringComparison.Ordinal))
+                            return Task.FromResult((Http2StreamResponse)HttpResponseData.Simple(200, "OK", "ok"));
+
+                        var head = HttpResponseData.Simple(200, "OK", "");
+                        return Task.FromResult(new Http2StreamResponse(head, async (body, token) =>
+                        {
+                            await body.WriteAsync("part"u8.ToArray(), token).ConfigureAwait(false);
+                            try { await Task.Delay(Timeout.Infinite, token).ConfigureAwait(false); }
+                            catch (OperationCanceledException) { throw new InvalidOperationException("s7-unexpected"); }
+                        }));
+                    },
+                });
+
+                // The relay is cancelled by the peer's reset but fails with something unexpected.
+                await peer.SendHeadersAsync(1, endStream: true, Get("/boom"));
+                runner.IsTrue(await peer.ReadUntilAsync(f => f.Type == Http2FrameType.Data && f.StreamId == 1) is not null, "the response had started");
+                await peer.SendAsync(Http2FrameType.RstStream, Http2FrameFlags.None, 1, RstStream(Http2ErrorCode.Cancel));
+                await Poll.UntilAsync(() => peer.Connection.InFlightHandlers == 0);
+
+                await peer.SendHeadersAsync(3, endStream: true, Get("/after"));
+                var outcome = await peer.ReadUntilAsync(f => f.Type == Http2FrameType.GoAway || (f.StreamId == 3 && f.HasFlag(Http2FrameFlags.EndStream)));
+                runner.IsTrue(outcome is { Type: not Http2FrameType.GoAway }, "the connection is healthy and stream 3 is answered");
+
+                runner.IsTrue(logged.Any(m => m.Contains("InvalidOperationException") && m.Contains("stream 1")), "the failure was logged with its type and stream");
+                runner.IsTrue(!logged.Any(m => m.Contains("s7-unexpected")), "without its message, which may carry request data");
+
+                await Task.Delay(100);
+                GC.Collect();
+                GC.WaitForPendingFinalizers();
+                GC.Collect();
+                lock (unobserved) runner.AreEqual(0, unobserved.Count(e => e.Message == "s7-unexpected"), "and it was observed, not left to the finaliser");
+            }
+            finally { TaskScheduler.UnobservedTaskException -= Collect; }
+        });
     }
 
     // --------------------------------------------------------------------- GOAWAY
@@ -604,6 +733,13 @@ internal static class Http2ServerHardeningTests
 
         /// <summary>Sends neither the connection preface nor SETTINGS.</summary>
         public bool SkipHandshake { get; init; }
+
+        /// <summary>The held writes ignore their cancellation token, as a socket send in flight does.</summary>
+        public bool IgnoreWriteCancellation { get; init; }
+
+        public TimeSpan WriterAbandonGrace { get; init; } = TimeSpan.FromSeconds(5);
+        public Action<string>? Log { get; init; }
+        public Func<HttpRequestData, CancellationToken, Task<Http2StreamResponse>>? Handler { get; init; }
     }
 
     /// <summary>A hand-driven HTTP/2 client over loopback TCP speaking to an
@@ -625,16 +761,19 @@ internal static class Http2ServerHardeningTests
         {
             _client = client;
             _server = server;
-            _gate = new GatedStream(server.GetStream(), open: !options.BlockWrites);
+            _gate = new GatedStream(server.GetStream(), open: !options.BlockWrites, options.IgnoreWriteCancellation);
             Connection = new Http2Connection(_gate, async (request, ct) =>
             {
                 Requests.Enqueue(request);
                 if (options.HandlerDelay > TimeSpan.Zero) await Task.Delay(options.HandlerDelay, ct).ConfigureAwait(false);
+                if (options.Handler is { } custom) return await custom(request, ct).ConfigureAwait(false);
                 return (Http2StreamResponse)HttpResponseData.Simple(200, "OK", "ok");
             })
             {
                 IdleTimeout = options.IdleTimeout,
                 MaxPendingControlFrames = options.MaxPendingControlFrames,
+                WriterAbandonGrace = options.WriterAbandonGrace,
+                Log = options.Log,
             };
             _run = Task.Run(async () =>
             {
@@ -664,6 +803,10 @@ internal static class Http2ServerHardeningTests
         }
 
         public void OpenWrites() => _gate.Open();
+
+        /// <summary>Disposes the server's end of the socket, as the owner of the connection does once
+        /// RunAsync has returned. A write still pending then fails.</summary>
+        public void DisposeServerSide() => _server.Dispose();
 
         /// <summary>Opens the held writes once <paramref name="taken"/> says the connection has taken in
         /// everything sent so far. Opening on a timer instead would let a slow reader see the queue
@@ -726,7 +869,7 @@ internal static class Http2ServerHardeningTests
     }
 
     /// <summary>Delays every write to the wrapped stream until opened. Reads pass straight through.</summary>
-    private sealed class GatedStream(Stream inner, bool open) : Stream
+    private sealed class GatedStream(Stream inner, bool open, bool ignoreCancellation = false) : Stream
     {
         private readonly TaskCompletionSource _open = open
             ? Completed()
@@ -743,7 +886,8 @@ internal static class Http2ServerHardeningTests
 
         public override async ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken = default)
         {
-            await _open.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
+            // With ignoreCancellation the token is not honoured, as a socket send already in flight does not.
+            await (ignoreCancellation ? _open.Task : _open.Task.WaitAsync(cancellationToken)).ConfigureAwait(false);
             await inner.WriteAsync(buffer, cancellationToken).ConfigureAwait(false);
         }
 
