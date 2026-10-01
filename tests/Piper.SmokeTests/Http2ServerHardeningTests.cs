@@ -290,6 +290,29 @@ internal static class Http2ServerHardeningTests
             finally { release.TrySetResult(HttpResponseData.Simple(200, "OK", "ok")); }
         });
 
+        await runner.RunAsync("a SETTINGS_INITIAL_WINDOW_SIZE change that would overflow a stream window is refused before any window moves", async () =>
+        {
+            var release = new TaskCompletionSource<Http2StreamResponse>(TaskCreationOptions.RunContinuationsAsynchronously);
+            await using var peer = await Peer.StartAsync(new PeerOptions { Handler = (_, _) => release.Task });
+            try
+            {
+                // Stream 1 sits exactly at the maximum; stream 3 has room for the change.
+                await peer.SendHeadersAsync(1, endStream: true, Get("/full"));
+                await peer.SendHeadersAsync(3, endStream: true, Get("/roomy"));
+                await Poll.UntilAsync(() => peer.Connection.InFlightHandlers == 2);
+                await peer.SendAsync(Http2FrameType.WindowUpdate, Http2FrameFlags.None, 1, WindowUpdate(MaxWindow - 65_535));
+                await peer.SendAsync(Http2FrameType.Ping, Http2FrameFlags.None, 0, new byte[8]);
+                runner.IsTrue(await peer.ReadUntilAsync(f => f.Type == Http2FrameType.Ping) is not null, "the grant to the maximum was taken in");
+
+                await peer.SendAsync(Http2FrameType.Settings, Http2FrameFlags.None, 0, SettingsEntry(4, 65_536));
+                var goAway = await peer.ReadUntilAsync(f => f.Type == Http2FrameType.GoAway);
+                runner.AreEqual(Http2ErrorCode.FlowControlError, GoAwayCode(goAway), "connection error FLOW_CONTROL_ERROR");
+                runner.AreEqual((long)MaxWindow, peer.Connection.SendWindowOf(1) ?? -1, "the full stream's window is untouched");
+                runner.AreEqual(65_535L, peer.Connection.SendWindowOf(3) ?? -1, "and so is the other stream's: nothing was applied");
+            }
+            finally { release.TrySetResult(HttpResponseData.Simple(200, "OK", "ok")); }
+        });
+
         await runner.RunAsync("a stream window may reach 2^31-1 but no SETTINGS change may push it past", async () =>
         {
             await using var peer = await Peer.StartAsync();

@@ -508,12 +508,18 @@ public sealed class Http2Connection(Stream stream, Func<HttpRequestData, Cancell
             var delta = (long)_peerSettings.InitialWindowSize - initialWindowBefore;
             if (delta != 0)
             {
-                foreach (var open in _streams.Values)
+                // Checked for every stream before any is changed, so a refused change leaves all the
+                // windows as they were and none is ever above the maximum. A stream's sender only
+                // spends from its window, which can only lower it, and grants arrive on this thread,
+                // so what the first pass finds still holds for the second.
+                var open = _streams.Values.ToArray();
+                foreach (var candidate in open)
                 {
-                    if (Interlocked.Add(ref open.RemoteWindow, delta) > MaxFlowControlWindow)
+                    if (Interlocked.Read(ref candidate.RemoteWindow) + delta > MaxFlowControlWindow)
                         throw new Http2ProtocolException(Http2ErrorCode.FlowControlError,
                             "SETTINGS_INITIAL_WINDOW_SIZE change pushes a stream's flow-control window past 2^31-1.");
                 }
+                foreach (var candidate in open) Interlocked.Add(ref candidate.RemoteWindow, delta);
                 SignalWindowGranted();
             }
         }
