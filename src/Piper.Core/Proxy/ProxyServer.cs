@@ -46,6 +46,8 @@ public sealed class ProxyServer : IAsyncDisposable
     /// handles so one origin's Alt-Svc informs later requests from any client connection.</summary>
     private readonly Http3.AltSvcCache _altSvc = new();
 
+    internal Http3.AltSvcCache AltSvc => _altSvc; // for tests
+
     private TcpListener? _listener;
     private CancellationTokenSource? _cts;
     private Task? _acceptLoop;
@@ -973,7 +975,7 @@ public sealed class ProxyServer : IAsyncDisposable
             // returning, this measured the time to the last one, so the column reported how long
             // each download was rather than how responsive the origin was.
             session.TimeToFirstByte = stopwatch.Elapsed - beforeResponse;
-            _altSvc.RecordAltSvc(host, response.Headers["Alt-Svc"]);
+            if (targetIsTls) _altSvc.RecordAltSvc(host, port, response.Headers["Alt-Svc"]); // plain HTTP can be forged by the path
 
             session.Response = response;
             session.InvalidateSearchIndex();

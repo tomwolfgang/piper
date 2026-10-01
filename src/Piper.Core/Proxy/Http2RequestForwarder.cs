@@ -127,7 +127,7 @@ internal static class Http2RequestForwarder
             }
 
             session.TimeToFirstByte = stopwatch.Elapsed - beforeResponse;
-            altSvc.RecordAltSvc(host, response.Headers["Alt-Svc"]);
+            if (url.Scheme.Equals("https", StringComparison.OrdinalIgnoreCase)) altSvc.RecordAltSvc(host, port, response.Headers["Alt-Svc"]);
 
             // response.HttpVersion is left exactly as it came from the upstream leg (HttpParser's
             // literal status line for h1.1, or "HTTP/2" from Http2ClientConnection) -- it is

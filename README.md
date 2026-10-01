@@ -366,11 +366,31 @@ browser speaking HTTP/3 *to* a forward proxy. What this does is let Piper dial t
 QUIC to see what it actually serves there.
 
 An origin is only tried over QUIC after it has advertised `h3` in an `Alt-Svc` header on an
-ordinary TCP response - never on the first, cold request, which is the one you are waiting on.
-Failures are remembered per host with a cool-down, so a network that blocks outbound UDP/443
+ordinary HTTPS response - never on the first, cold request, which is the one you are waiting on,
+and never from a plain-HTTP response, which anything on the path could have written. An origin is
+a host *and a port*: what `host:8443` advertises says nothing about `host:443`. The advertisement
+is honoured as given: it expires after its `ma` lifetime (24 hours when absent, 30 days at most),
+and the alternative's UDP port is used. An alternative on a *different host* is ignored, because it
+would let an origin choose where Piper sends UDP. The table of origins is bounded, and so is the
+header it will read.
+
+Failures are remembered per origin with a cool-down, so a network that blocks outbound UDP/443
 (many do) costs one timeout rather than one per request. Any failure falls back to TCP, and only
 safe methods (`GET`, `HEAD`, `OPTIONS`) are attempted, so a fallback can never re-submit a request
-with side effects.
+with side effects. An origin is barred for 30 minutes when h3 itself failed for it: no handshake, a
+stall or a dropped connection, a response that is too slow, or a protocol violation (including a
+body that does not match its `Content-Length`). An origin that merely sends `GOAWAY` for the
+request, or whose response is too big for the buffered path, is left on TCP for a minute only.
+
+The response is read in full before it is relayed, so it is bounded: at most 64 MiB of body (a
+larger `Content-Length` is refused on the headers, and the request goes over TCP, which streams),
+a 128 KiB header section measured decoded, and a limited number of interim responses, unknown
+frames and streams. The wait is an *idle* timeout (15 seconds, `Http3ResponseTimeout`): a complete
+header section re-arms it, and so does a window of at least 1 KiB of body, so a slow download that
+keeps moving completes while a stalled one, or one that trickles a byte now and then, is cut. On top
+of that a response may take at most 15 minutes (`Http3MaxResponseTime`). Frames out of order (for
+example `DATA` before `HEADERS`), a malformed control stream, or a bad `SETTINGS` or `GOAWAY` close
+the connection with the matching HTTP/3 error code.
 
 QUIC comes from `System.Net.Quic` - msquic ships inside the .NET runtime, so this still needs no
 NuGet packages and nothing extra installed. The HTTP/3 layer above it (framing, QPACK) is
