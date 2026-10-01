@@ -233,13 +233,19 @@ public sealed class MainForm : Form, IMessageFilter
         {
             var settings = _autoResponder.Settings;
             _options.AutoResponder.Apply(settings);
-            AutoResponderSettingsStore.Save(settings);
+            if (_rulesFileProtected)
+                NotifyRulesProblemOnce(Strings.AutoResponder.RulesNotSavedProtected(AutoResponderSettingsStore.DefaultPath));
+            else
+                ReportAutoResponderSave(AutoResponderSettingsStore.Save(settings));
             _rightTabs.SetTabChecked(_autoResponderPage, settings.Enabled && settings.Rules.Count > 0);
             foreach (var warning in _options.AutoResponder.Warnings) AppendLog(Strings.Log.AutoResponderWarning(warning));
         };
 
-        if (AutoResponderSettingsStore.Load() is { } autoResponderSettings)
+        var savedRules = AutoResponderSettingsStore.Load();
+        if (savedRules.Settings is { } autoResponderSettings)
             _autoResponder.ApplySettings(autoResponderSettings);
+        else if (savedRules.Status != AutoResponderLoadStatus.Missing)
+            ReportUnusableSavedRules(savedRules);
 
         _sessionList.SendToAutoResponderRequested += (_, session) =>
         {
@@ -292,7 +298,77 @@ public sealed class MainForm : Form, IMessageFilter
         Palette.ApplyWindowChrome(this);
     }
 
-    protected override void OnShown(EventArgs e)
+    /// <summary>
+    /// A problem with the AutoResponder rules file found while the constructor ran. A dialog there
+    /// would run before the window is shown, so the log gets it at once and the user gets it in
+    /// <see cref="OnShown"/>. A one-shot queue for the time before the window is shown: it is drained
+    /// there once, and a problem that arises later is reported directly (or, for a failed save after
+    /// the first one, only logged). Checked: nothing hides the main window today (no tray or
+    /// hide-on-minimise path), so <see cref="OnShown"/> is always reached; revisit if one is added.
+    /// </summary>
+    private string? _pendingRulesNotice;
+
+    /// <summary>True while saving the rules keeps failing, so one broken disk is reported once, not per keystroke.</summary>
+    private bool _autoResponderSaveFailing;
+
+    /// <summary>The unusable saved rules found by the constructor; <see cref="OnShown"/> deals with the file off the UI thread.</summary>
+    private AutoResponderLoadResult? _unusableSavedRules;
+
+    private void ReportUnusableSavedRules(AutoResponderLoadResult result)
+    {
+        // Nothing touches the file system here: the constructor runs on the UI thread before any
+        // window exists. OnShown moves the file aside (if it should be) on a worker and tells the user.
+        _unusableSavedRules = result;
+        _rulesFileProtected = result.OverLimits;
+        AppendLog(Strings.AutoResponder.LoadProblem(result));
+    }
+
+    private async Task<string> SetAsideAndDescribeAsync(AutoResponderLoadResult result)
+    {
+        var path = AutoResponderSettingsStore.DefaultPath;
+        var problem = Strings.AutoResponder.LoadProblem(result);
+
+        // A file that is not a rule set is moved aside so the next save has room. One that is merely
+        // locked or unreadable right now is left alone (it may be fine a minute later), and so is one
+        // that is a valid rule set over Piper's limits: that is somebody's real work with no in-app
+        // way back, so it is neither moved nor, see _rulesFileProtected, overwritten.
+        var keptAs = result.SetAsideAdvised ? await Task.Run(() => AutoResponderSettingsStore.SetAside(path)) : null;
+        return result.OverLimits ? Strings.AutoResponder.StartedWithoutRulesProtected(problem, path)
+            : keptAs is null ? Strings.AutoResponder.StartedWithoutRulesInPlace(problem, path)
+            : Strings.AutoResponder.StartedWithoutRulesKept(problem, keptAs);
+    }
+
+    /// <summary>
+    /// True when the saved rules file was left untouched because it is over Piper's limits. While it
+    /// is, edits are not written to it: the first save would replace the only copy of a rule set
+    /// Piper cannot read. The user is told once; Export still works.
+    /// </summary>
+    private bool _rulesFileProtected;
+
+    private void ReportAutoResponderSave(AutoResponderSaveResult result)
+    {
+        if (result.Succeeded)
+        {
+            _autoResponderSaveFailing = false;
+            return;
+        }
+
+        NotifyRulesProblemOnce(Strings.AutoResponder.SaveFailed(AutoResponderSettingsStore.DefaultPath, result));
+    }
+
+    private void NotifyRulesProblemOnce(string message)
+    {
+        if (_autoResponderSaveFailing) return;
+        _autoResponderSaveFailing = true;
+
+        AppendLog(message);
+
+        // Rules are first saved while the constructor applies the saved set, before the window exists.
+        if (Visible) MessageBox.Show(this, message, Strings.App.Name, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        else _pendingRulesNotice = _pendingRulesNotice is null ? message : $"{_pendingRulesNotice}\n\n{message}";
+    }
+
+    protected override async void OnShown(EventArgs e)
     {
         base.OnShown(e);
         _mainSplit.SplitterDistance = (int)(_mainSplit.Width * 0.55);
@@ -302,6 +378,24 @@ public sealed class MainForm : Form, IMessageFilter
         // lost their connection. Undo it before anything else touches the settings.
         if (SystemProxy.RestoreLeftovers() is { } leftover)
             AppendLog(Strings.Log.RestoredLeftoverProxy(leftover));
+
+        // After the restore, not before: this dialog stays up until it is dismissed, and behind it
+        // the user's connection must already be back.
+        if (_unusableSavedRules is { } unusable)
+        {
+            _unusableSavedRules = null;
+            var described = await SetAsideAndDescribeAsync(unusable);
+            if (IsDisposed) return;
+
+            AppendLog(described);
+            _pendingRulesNotice = _pendingRulesNotice is null ? described : $"{described}\n\n{_pendingRulesNotice}";
+        }
+
+        if (_pendingRulesNotice is { } rulesNotice)
+        {
+            _pendingRulesNotice = null;
+            MessageBox.Show(this, rulesNotice, Strings.App.Name, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
 
         AskAnalyticsConsentIfNeeded();
 

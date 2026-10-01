@@ -714,7 +714,24 @@ public sealed class AutoResponderPanel : UserControl
 
     // ------------------------------------------------------------ import / export
 
-    private void ImportRules()
+    /// <summary>True while an import or export is between its first and last await; a second one is ignored.</summary>
+    private bool _fileOperationRunning;
+
+    private async void ImportRules()
+    {
+        if (_fileOperationRunning) return;
+        _fileOperationRunning = true;
+        try
+        {
+            await ImportRulesCoreAsync();
+        }
+        finally
+        {
+            _fileOperationRunning = false;
+        }
+    }
+
+    private async Task ImportRulesCoreAsync()
     {
         using var dialog = new OpenFileDialog
         {
@@ -723,18 +740,133 @@ public sealed class AutoResponderPanel : UserControl
         };
         if (dialog.ShowDialog(this) != DialogResult.OK) return;
 
-        var imported = AutoResponderSettingsStore.Load(dialog.FileName);
-        if (imported is null)
+        // Everything after an await runs on a panel that may have been closed meanwhile, so each
+        // continuation checks before it touches a control or opens a dialog owned by it.
+        var fileName = dialog.FileName;
+        // Read and measured together: Load bounds the file as written, but Save bounds the indented
+        // form it writes back, so a compact file under the cap can still be one that cannot be saved.
+        var (loaded, importedLimit) = await OffThreadAsync(() =>
         {
-            MessageBox.Show(this, Strings.AutoResponder.UnreadableRuleSet,
+            var result = AutoResponderSettingsStore.Load(fileName);
+            return (result, result.Settings is null
+                ? AutoResponderSaveStatus.Saved
+                : AutoResponderSettingsStore.CheckLimits(result.Settings));
+        });
+        if (IsDisposed) return;
+
+        if (loaded.Settings is not { } imported)
+        {
+            MessageBox.Show(this, Strings.AutoResponder.LoadProblem(loaded),
                 Strings.App.Name, MessageBoxButtons.OK, MessageBoxIcon.Error);
             return;
         }
 
-        ApplySettings(imported);
+        if (importedLimit != AutoResponderSaveStatus.Saved)
+        {
+            MessageBox.Show(this, Strings.AutoResponder.ImportSetTooLarge,
+                Strings.App.Name, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+
+        // An empty list has nothing to lose, so only a list with rules in it is worth a question.
+        // Replacing used to be the only outcome, and it was silent.
+        if (_rules.Count == 0)
+        {
+            ApplySettings(imported);
+            return;
+        }
+
+        switch (AskReplaceOrAppend(imported.Rules.Count))
+        {
+            case ImportChoice.Replace:
+                ApplySettings(imported);
+                break;
+
+            case ImportChoice.Append:
+                // Merged and measured off the UI thread: the merge clones every rule and the
+                // limit check serialises the whole set. Refused before it is applied, because a set
+                // over either limit is one Save refuses, so every later edit would fail to persist.
+                var current = Settings;
+                var (merged, limit) = await OffThreadAsync(() =>
+                {
+                    var combined = current.Appended(imported);
+                    return (combined, AutoResponderSettingsStore.CheckLimits(combined));
+                });
+                if (IsDisposed) return;
+
+                var tooBig = limit switch
+                {
+                    AutoResponderSaveStatus.TooManyRules => Strings.AutoResponder.ImportTooManyRules(imported.Rules.Count),
+                    AutoResponderSaveStatus.TooLarge => Strings.AutoResponder.ImportTooLarge,
+                    _ => null,
+                };
+                if (tooBig is not null)
+                {
+                    MessageBox.Show(this, tooBig, Strings.App.Name, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
+
+                ApplySettings(merged);
+                break;
+        }
     }
 
-    private void ExportRules()
+    /// <summary>
+    /// Runs file reading and serialising, which take real time on a large rule set, off the UI thread.
+    /// The panel is disabled meanwhile so the list cannot change under the result; callers hold
+    /// <see cref="_fileOperationRunning"/>, so this never nests, and the re-enable is skipped once the
+    /// panel is gone.
+    /// </summary>
+    private async Task<T> OffThreadAsync<T>(Func<T> work)
+    {
+        Enabled = false;
+        try
+        {
+            return await Task.Run(work);
+        }
+        finally
+        {
+            if (!IsDisposed) Enabled = true;
+        }
+    }
+
+    private enum ImportChoice { Cancel, Replace, Append }
+
+    private ImportChoice AskReplaceOrAppend(int importedCount)
+    {
+        var replace = new TaskDialogButton(Strings.AutoResponder.ImportReplace);
+        var append = new TaskDialogButton(Strings.AutoResponder.ImportAppend);
+        var page = new TaskDialogPage
+        {
+            Caption = Strings.AutoResponder.ImportChoiceCaption,
+            Heading = Strings.AutoResponder.ImportChoiceHeading(importedCount),
+            Text = Strings.AutoResponder.ImportChoiceText,
+            Icon = TaskDialogIcon.Information,
+            AllowCancel = true,
+            // Appending loses nothing, so it is what Enter does.
+            DefaultButton = append,
+            Buttons = { replace, append, TaskDialogButton.Cancel },
+        };
+
+        var pressed = TaskDialog.ShowDialog(this, page);
+        return pressed == replace ? ImportChoice.Replace : pressed == append ? ImportChoice.Append : ImportChoice.Cancel;
+    }
+
+    private async void ExportRules()
+    {
+        if (_fileOperationRunning) return;
+        _fileOperationRunning = true;
+        try
+        {
+            await ExportRulesCoreAsync();
+        }
+        finally
+        {
+            _fileOperationRunning = false;
+        }
+    }
+
+    private async Task ExportRulesCoreAsync()
     {
         using var dialog = new SaveFileDialog
         {
@@ -746,7 +878,16 @@ public sealed class AutoResponderPanel : UserControl
         };
         if (dialog.ShowDialog(this) != DialogResult.OK) return;
 
-        AutoResponderSettingsStore.Save(Settings, dialog.FileName);
+        // Serialised and written off the UI thread, like Import; the snapshot is taken here so the
+        // worker never reads the live list.
+        var snapshot = Settings;
+        var fileName = dialog.FileName;
+        var result = await OffThreadAsync(() => AutoResponderSettingsStore.Save(snapshot, fileName));
+        if (IsDisposed) return;
+
+        if (!result.Succeeded)
+            MessageBox.Show(this, Strings.AutoResponder.ExportFailed(fileName, result),
+                Strings.App.Name, MessageBoxButtons.OK, MessageBoxIcon.Error);
     }
 
     private void BrowseForFile()

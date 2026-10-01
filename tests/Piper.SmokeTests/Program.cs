@@ -1,5 +1,8 @@
+using System.Diagnostics;
 using System.IO.Compression;
 using System.Net;
+using System.Net.Sockets;
+using System.Reflection;
 using System.Text;
 using Piper.Core.Http;
 using Piper.Core.Proxy;
@@ -8,8 +11,43 @@ using Piper.Core.Sessions;
 
 // End-to-end smoke test: a real origin server, the real proxy, a real HttpClient.
 // No test framework so this always runs without a NuGet restore.
+//
+//   Piper.SmokeTests [--filter <substring>] [--timeout <seconds>] [--list]
+//
+// Every public static `Task Run*Async(TestRunner)` method in this assembly is a test group and runs
+// after the inline proxy tests below; nothing needs registering. --filter runs the tests whose name
+// contains the text (case-insensitive), or every test of a group whose "Class.Method" does. Tests in
+// one group can build on each other, so filter a whole group when in doubt.
 
-var runner = new TestRunner();
+if (!TestOptions.TryParse(args, out var testOptions, out var usageError))
+{
+    Console.Error.WriteLine(usageError);
+    return 2;
+}
+
+if (testOptions.List)
+{
+    foreach (var group in TestDiscovery.Groups) Console.WriteLine(group.Id);
+    return 0;
+}
+
+// Two runs at once (two worktrees, or a run beside CI tooling) must share nothing on disk: the
+// suites keep certificate authorities and files under fixed names in the temp folder. Give this
+// process its own temp folder, which Path.GetTempPath() picks up from here on, and remove it on exit.
+var sandbox = Path.Combine(Path.GetTempPath(), $"{TestOptions.SandboxPrefix}{Environment.ProcessId}-{Guid.NewGuid():N}");
+Directory.CreateDirectory(sandbox);
+Environment.SetEnvironmentVariable("TMP", sandbox);
+Environment.SetEnvironmentVariable("TEMP", sandbox);
+AppDomain.CurrentDomain.ProcessExit += (_, _) =>
+{
+    try { Directory.Delete(sandbox, recursive: true); }
+    catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+    {
+        // A straggler still holds a file; leave the folder for the OS temp cleanup.
+    }
+};
+
+var runner = new TestRunner(Console.Out, testOptions.Filter, testOptions.Timeout);
 
 await runner.RunAsync("generated root has an unmistakable Windows certificate name", () =>
 {
@@ -58,24 +96,23 @@ await runner.RunAsync("legacy root is rotated to the clear certificate name", ()
     return Task.CompletedTask;
 });
 
-const int OriginPort = 19099;
-const int ProxyPort = 19088;
-var originBase = $"http://127.0.0.1:{OriginPort}";
-
-using var origin = new OriginServer(OriginPort);
-origin.Start();
+// Both servers take a port the OS hands out, so two runs can overlap.
+using var origin = OriginServer.StartOnFreePort();
+var originPort = origin.Port;
+var originBase = $"http://127.0.0.1:{originPort}";
 
 var store = new SessionStore();
-var options = new ProxyOptions { Port = ProxyPort, DecryptHttps = false };
+var options = new ProxyOptions { Port = 0, DecryptHttps = false };
 using var ca = CertificateAuthority.LoadOrCreate(
     Path.Combine(Path.GetTempPath(), "Piper-SmokeTest-Certs"));
 
 await using var proxy = new ProxyServer(options, ca, store);
 proxy.Start();
+var proxyPort = proxy.Endpoint!.Port;
 
 using var client = new HttpClient(new HttpClientHandler
 {
-    Proxy = new WebProxy($"http://127.0.0.1:{ProxyPort}", BypassOnLocal: false),
+    Proxy = new WebProxy($"http://127.0.0.1:{proxyPort}", BypassOnLocal: false),
     UseProxy = true,
 });
 client.Timeout = TimeSpan.FromSeconds(20);
@@ -255,9 +292,9 @@ await runner.RunAsync("host remapping redirects the origin connection without ch
     });
     try
     {
-        var response = await client.GetAsync($"http://{requestedHost}:{OriginPort}/api/orders?id=remapped");
+        var response = await client.GetAsync($"http://{requestedHost}:{originPort}/api/orders?id=remapped");
         runner.AreEqual(HttpStatusCode.OK, response.StatusCode, "mapped request reaches the local origin");
-        runner.IsTrue(origin.LastRequestHeaders.Contains($"Host: {requestedHost}:{OriginPort}", StringComparison.OrdinalIgnoreCase),
+        runner.IsTrue(origin.LastRequestHeaders.Contains($"Host: {requestedHost}:{originPort}", StringComparison.OrdinalIgnoreCase),
             "original Host header reaches the remapped origin");
 
         var session = await WaitForAsync(store, s => s.Host == requestedHost && s.Query == "?id=remapped");
@@ -279,9 +316,9 @@ await runner.RunAsync("hostname remapping rewrites the outbound Host authority",
     });
     try
     {
-        var response = await client.GetAsync($"http://{requestedHost}:{OriginPort}/api/orders?id=authority-rewrite");
+        var response = await client.GetAsync($"http://{requestedHost}:{originPort}/api/orders?id=authority-rewrite");
         runner.AreEqual(HttpStatusCode.OK, response.StatusCode, "hostname target reaches the local origin");
-        runner.IsTrue(origin.LastRequestHeaders.Contains($"Host: localhost:{OriginPort}", StringComparison.OrdinalIgnoreCase),
+        runner.IsTrue(origin.LastRequestHeaders.Contains($"Host: localhost:{originPort}", StringComparison.OrdinalIgnoreCase),
             "hostname target replaces the outbound Host header");
 
         var session = await WaitForAsync(store, s => s.Host == requestedHost && s.Query == "?id=authority-rewrite");
@@ -478,7 +515,7 @@ await runner.RunAsync("AutoResponder drops a connection on demand", async () =>
     // would hide the drop on the shared client.
     using var dropClient = new HttpClient(new HttpClientHandler
     {
-        Proxy = new WebProxy($"http://127.0.0.1:{ProxyPort}", BypassOnLocal: false),
+        Proxy = new WebProxy($"http://127.0.0.1:{proxyPort}", BypassOnLocal: false),
         UseProxy = true,
     })
     { Timeout = TimeSpan.FromSeconds(10) };
@@ -532,63 +569,10 @@ await runner.RunAsync("AutoResponder toggles gate the whole rule set", async () 
 await proxy.StopAsync();
 origin.Stop();
 
-// --------------------------------------------------------------------- HPACK
+// ------------------------------------------------- discovered test groups (name order)
 
-await AnalyticsTests.RunAsync(runner);
-await HostFilterTests.RunAsync(runner);
-await UpdateServiceTests.RunAsync(runner);
-await UiStringTests.RunAsync(runner);
-await ColumnLayoutTests.RunAsync(runner);
-await WebFormParserTests.RunAsync(runner);
-await TextTransformsTests.RunAsync(runner);
-await ContentCodecTests.RunAsync(runner);
-await TextTransformDetectorTests.RunAsync(runner);
-await SearchQueryTests.RunAsync(runner);
-await SessionSortTests.RunAsync(runner);
-await FilterSettingsStoreTests.RunAsync(runner);
-await FilterQueryTests.RunAsync(runner);
-await HostFilterHideTests.RunAsync(runner);
-await StatusBarSettingsStoreTests.RunAsync(runner);
-await FontScaleStoreTests.RunAsync(runner);
-await ProxyConfigurationSettingsStoreTests.RunAsync(runner);
-await ConnectionSettingsBlobTests.RunAsync(runner);
-await AutoResponderMatchTests.RunAsync(runner);
-await AutoResponderActionTests.RunAsync(runner);
-await AutoResponderSettingsStoreTests.RunAsync(runner);
-await HttpWireFormatTests.RunAsync(runner);
-await ResponseFramingTests.RunAsync(runner);
-await FramingCorrectnessTests.RunAsync(runner);
-await ConnectionLifetimeTests.RunAsync(runner);
-await StreamingResponseTests.RunAsync(runner);
-await BoundedCaptureTests.RunAsync(runner);
-await ComposerRawRoundTripTests.RunAsync(runner);
-await ComposerBodyTests.RunAsync(runner);
-await JsonEditingTests.RunAsync(runner);
-await HostRemappingTests.RunAsync(runner);
-await SessionStoreAdmissionTests.RunAsync(runner);
-await SazImporterTests.RunAsync(runner);
-await SazImporterTests.RunEmptyResponseAsync(runner);
-await SazImportHardeningTests.RunAsync(runner);
-await DiagnosticsBundleTests.RunAsync(runner);
-await DiagnosticsBundleTests.RunMissingCrashLogAsync(runner);
-await DiagnosticsBundleTests.RunHugeCrashLogAsync(runner);
-await DiagnosticsBundleTests.RunLogSanitisingAsync(runner);
-await DiagnosticsBundleTests.RunLogTrimmingAsync(runner);
-await DiagnosticsBundleTests.RunSummarisingAsync(runner);
-await ComposerHistoryStoreTests.RunAsync(runner);
-await ComposerHistoryViewTests.RunAsync(runner);
-await ComposerHistoryViewTests.RunHostileHostAsync(runner);
-await ComposerViewStateStoreTests.RunAsync(runner);
-await SazExporterTests.RunAsync(runner);
-await HpackTests.RunAsync(runner);
-await Http2FrameTests.RunAsync(runner);
-await Http2MessageAdapterTests.RunAsync(runner);
-await Http2ConnectionTests.RunAsync(runner);
-await Http2StreamingTests.RunAsync(runner);
-await Http2Tests.RunAsync(runner);
-await Http2ClientHardeningTests.RunAsync(runner);
-await Http3CodecTests.RunAsync(runner);
-await Http3Tests.RunAsync(runner);
+foreach (var group in TestDiscovery.Groups)
+    await runner.RunGroupAsync(group.Id, r => group.Run(r));
 
 return runner.Summarize();
 
@@ -617,6 +601,37 @@ sealed class OriginServer(int port) : IDisposable
     /// <summary>Requests actually served. Proving the origin was *never* contacted needs a count,
     /// not a last-write-wins snapshot of the headers.</summary>
     public int RequestCount { get; private set; }
+
+    public int Port => port;
+
+    /// <summary>
+    /// <c>HttpListener</c> cannot bind port 0, so ask the OS for a free port and bind that. Another
+    /// process can take it in between (or hold an HTTP.sys reservation on it, which the TCP probe
+    /// cannot see), so a refused bind retries on a fresh port.
+    /// </summary>
+    public static OriginServer StartOnFreePort()
+    {
+        for (var attempt = 1; ; attempt++)
+        {
+            var server = new OriginServer(FreePort());
+            try
+            {
+                server.Start();
+                return server;
+            }
+            catch (HttpListenerException) when (attempt < 10)
+            {
+                server.Dispose();
+            }
+        }
+    }
+
+    private static int FreePort()
+    {
+        using var probe = new TcpListener(IPAddress.Loopback, 0);
+        probe.Start();
+        return ((IPEndPoint)probe.LocalEndpoint).Port;
+    }
 
     public void Start()
     {
@@ -720,28 +735,185 @@ sealed class OriginServer(int port) : IDisposable
     }
 }
 
-sealed class TestRunner
+/// <summary>Command-line options of the smoke-test runner.</summary>
+sealed record TestOptions(string? Filter, TimeSpan Timeout, bool List)
 {
+    /// <summary>Prefix of the per-process temp folder, which the runner deletes on exit.</summary>
+    public const string SandboxPrefix = "Piper-SmokeTests-";
+
+    /// <summary>The slowest test today takes a few seconds; this leaves room for a loaded machine.</summary>
+    public static readonly TimeSpan DefaultTimeout = TimeSpan.FromSeconds(60);
+
+    public static bool TryParse(string[] args, out TestOptions options, out string error)
+    {
+        string? filter = null;
+        var timeout = DefaultTimeout;
+        var list = false;
+        options = new TestOptions(null, DefaultTimeout, false);
+        error = "usage: Piper.SmokeTests [--filter <substring>] [--timeout <seconds>] [--list]";
+
+        for (var i = 0; i < args.Length; i++)
+        {
+            // "--name value" or "--name=value".
+            var equals = args[i].IndexOf('=', StringComparison.Ordinal);
+            var name = equals < 0 ? args[i] : args[i][..equals];
+            var value = equals < 0 ? (i + 1 < args.Length && name != "--list" ? args[i + 1] : null) : args[i][(equals + 1)..];
+            if (equals < 0 && value is not null) i++;
+
+            switch (name)
+            {
+                case "--filter":
+                    if (string.IsNullOrEmpty(value)) return false;
+                    filter = value;
+                    break;
+                case "--timeout":
+                    if (!int.TryParse(value, out var seconds) || seconds is < 1 or > 3600) return false;
+                    timeout = TimeSpan.FromSeconds(seconds);
+                    break;
+                case "--list" when equals < 0:
+                    list = true;
+                    break;
+                default:
+                    return false;
+            }
+        }
+
+        options = new TestOptions(filter, timeout, list);
+        error = string.Empty;
+        return true;
+    }
+}
+
+/// <summary>One discoverable test group: a public static <c>Task Run*Async(TestRunner)</c> method.</summary>
+sealed record TestGroup(string Id, MethodInfo Method)
+{
+    public Task Run(TestRunner runner) => (Task)Method.Invoke(null, [runner])!;
+}
+
+static class TestDiscovery
+{
+    /// <summary>
+    /// Every test group in this assembly, in ordinal "Class.Method" order, so a run is the same on
+    /// every machine and adding a group needs no registration. Sorting the names (rather than trusting
+    /// reflection order, which the runtime does not promise) is what makes the order stable.
+    /// </summary>
+    public static IReadOnlyList<TestGroup> Groups { get; } = Discover(typeof(TestRunner).Assembly);
+
+    public static IReadOnlyList<TestGroup> Discover(Assembly assembly) =>
+    [
+        .. assembly.GetTypes()
+            .SelectMany(type => type.GetMethods(BindingFlags.Public | BindingFlags.Static | BindingFlags.DeclaredOnly)
+                .Where(IsGroup)
+                .Select(method => new TestGroup($"{type.FullName}.{method.Name}", method)))
+            .OrderBy(group => group.Id, StringComparer.Ordinal),
+    ];
+
+    public static bool IsGroup(MethodInfo method) =>
+        method is { IsPublic: true, IsStatic: true }
+        && method.Name.StartsWith("Run", StringComparison.Ordinal)
+        && method.Name.EndsWith("Async", StringComparison.Ordinal)
+        && method.ReturnType == typeof(Task)
+        && method.GetParameters() is [{ ParameterType: var parameter }]
+        && parameter == typeof(TestRunner);
+}
+
+sealed class TestRunner(TextWriter output, string? filter = null, TimeSpan? testTimeout = null)
+{
+    /// <summary>The state of one running test; assertions find it through <see cref="_current"/>.</summary>
+    private sealed class TestContext(string name)
+    {
+        public string Name { get; } = name;
+
+        /// <summary>Set once the runner has given up on the test; its late assertions are dropped.</summary>
+        public volatile bool Abandoned;
+    }
+
+    private readonly object _gate = new();
+    private readonly AsyncLocal<TestContext?> _current = new();
+    private readonly TimeSpan _testTimeout = testTimeout ?? TestOptions.DefaultTimeout;
+    private readonly List<string> _failures = [];
+    private readonly List<(string Name, TimeSpan Elapsed)> _timings = [];
+    private readonly Stopwatch _total = Stopwatch.StartNew();
+    private bool _groupSelected;
     private int _passed;
     private int _failed;
-    private readonly List<string> _failures = [];
-    private string _currentTest = string.Empty;
+    private int _skipped;
 
-    public async Task RunAsync(string name, Func<Task> body)
+    public int Passed => _passed;
+    public int Failed => _failed;
+    public int Skipped => _skipped;
+    public IReadOnlyList<string> Failures => _failures;
+
+    /// <summary>Elapsed time of each test that ran, in run order.</summary>
+    public IReadOnlyList<(string Name, TimeSpan Elapsed)> Timings => _timings;
+
+    /// <summary>Runs one test group, which selects all of its tests when the filter matches its id.</summary>
+    public async Task RunGroupAsync(string id, Func<TestRunner, Task> group)
     {
-        _currentTest = name;
-        Console.WriteLine($"\n== {name}");
+        _groupSelected = filter is not null && id.Contains(filter, StringComparison.OrdinalIgnoreCase);
         try
         {
-            await body();
+            await group(this);
         }
         catch (Exception ex)
         {
-            _failed++;
+            // Setup that fails outside any test; report it as this group's failure and go on.
+            Fail($"{id}: threw {ex.GetType().Name}: {string.Join(" -> ", InnerMessages(ex))}");
+        }
+        finally
+        {
+            _groupSelected = false;
+        }
+    }
+
+    public async Task RunAsync(string name, Func<Task> body)
+    {
+        if (filter is not null && !_groupSelected && !name.Contains(filter, StringComparison.OrdinalIgnoreCase))
+        {
+            _skipped++;
+            return;
+        }
+
+        var test = new TestContext(name);
+        _current.Value = test;
+        output.WriteLine($"\n== {name}");
+        var stopwatch = Stopwatch.StartNew();
+
+        // Task.Run so a test that blocks synchronously (before its first await) is also caught by the timeout.
+        var running = Task.Run(body);
+        try
+        {
+            await running.WaitAsync(_testTimeout);
+        }
+        catch (TimeoutException) when (!running.IsCompleted)
+        {
+            test.Abandoned = true;
+            _ = running.ContinueWith(static t => _ = t.Exception, TaskContinuationOptions.OnlyOnFaulted);
+            var message = $"{name}: timed out after {_testTimeout.TotalSeconds:0.##} s (hung or too slow)";
+            Fail(message);
+            output.WriteLine($"   TIMEOUT  {message}");
+        }
+        catch (Exception ex)
+        {
             var chain = string.Join(" -> ", InnerMessages(ex));
-            var message = $"{name}: threw {ex.GetType().Name}: {chain}";
+            Fail($"{name}: threw {ex.GetType().Name}: {chain}");
+            output.WriteLine($"   EXCEPTION  {ex.GetType().Name}: {chain}");
+        }
+        finally
+        {
+            _current.Value = null;
+        }
+
+        lock (_gate) _timings.Add((name, stopwatch.Elapsed));
+        output.WriteLine($"   ({stopwatch.Elapsed.TotalMilliseconds:0} ms)");
+    }
+
+    private void Fail(string message)
+    {
+        lock (_gate)
+        {
+            _failed++;
             _failures.Add(message);
-            Console.WriteLine($"   EXCEPTION  {ex.GetType().Name}: {chain}");
         }
     }
 
@@ -757,39 +929,58 @@ sealed class TestRunner
 
     public void IsTrue(bool condition, string what)
     {
+        var test = _current.Value;
+        if (test is { Abandoned: true }) return;
+
         if (condition)
         {
-            _passed++;
-            Console.WriteLine($"   ok    {what}");
+            Interlocked.Increment(ref _passed);
+            output.WriteLine($"   ok    {what}");
         }
         else
         {
-            _failed++;
-            _failures.Add($"{_currentTest} / {what}");
-            Console.WriteLine($"   FAIL  {what}");
+            Fail($"{test?.Name ?? OutsideTest} / {what}");
+            output.WriteLine($"   FAIL  {what}");
         }
     }
 
     public void AreEqual<T>(T expected, T actual, string what)
     {
+        var test = _current.Value;
+        if (test is { Abandoned: true }) return;
+
         if (EqualityComparer<T>.Default.Equals(expected, actual))
         {
-            _passed++;
-            Console.WriteLine($"   ok    {what}");
+            Interlocked.Increment(ref _passed);
+            output.WriteLine($"   ok    {what}");
         }
         else
         {
-            _failed++;
-            _failures.Add($"{_currentTest} / {what}: expected <{expected}>, got <{actual}>");
-            Console.WriteLine($"   FAIL  {what}: expected <{expected}>, got <{actual}>");
+            Fail($"{test?.Name ?? OutsideTest} / {what}: expected <{expected}>, got <{actual}>");
+            output.WriteLine($"   FAIL  {what}: expected <{expected}>, got <{actual}>");
         }
     }
 
+    private const string OutsideTest = "(outside a test)";
+
     public int Summarize()
     {
-        Console.WriteLine($"\n{new string('-', 60)}");
-        Console.WriteLine($"{_passed} passed, {_failed} failed");
-        foreach (var failure in _failures) Console.WriteLine($"  - {failure}");
+        output.WriteLine($"\n{new string('-', 60)}");
+        output.WriteLine($"{_passed} passed, {_failed} failed");
+        output.WriteLine($"{_timings.Count} tests run, {_skipped} skipped by --filter, {_total.Elapsed.TotalSeconds:0.0} s");
+
+        output.WriteLine("Slowest tests:");
+        foreach (var (name, elapsed) in _timings.OrderByDescending(t => t.Elapsed).Take(10))
+            output.WriteLine($"  {elapsed.TotalMilliseconds,7:0} ms  {name}");
+
+        foreach (var failure in _failures) output.WriteLine($"  - {failure}");
+
+        if (filter is not null && _timings.Count == 0)
+        {
+            output.WriteLine($"No test matched --filter \"{filter}\". Use --list for the group names.");
+            return 1;
+        }
+
         return _failed == 0 ? 0 : 1;
     }
 }
