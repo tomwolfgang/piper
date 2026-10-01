@@ -189,45 +189,88 @@ public sealed class ProxyServer : IAsyncDisposable
 
     /// <summary>What the accept loop needs to know about a connection it may have to close: whether it
     /// is idle, since when, and a way to tell it to go.</summary>
-    private sealed class ConnectionState
+    internal sealed class ConnectionState
     {
-        // Not disposed on purpose: it has no timer and no wait handle, and an eviction may race the end
-        // of the connection, where cancelling a disposed source would throw.
-        private readonly CancellationTokenSource _evict = new();
+        private readonly Lock _gate = new();
+
+        // One source per idle period, so that an eviction aimed at one wait can never close the
+        // connection's next. Not disposed on purpose: it has no timer and no wait handle, and an
+        // eviction may race the end of the wait, where cancelling a disposed source would throw.
+        private CancellationTokenSource? _evict;
         private long _idleSince;
 
-        public CancellationToken EvictToken => _evict.Token;
-
         /// <summary>Timestamp from which the connection has been waiting for a request, or 0 while busy.</summary>
-        public long IdleSince => Interlocked.Read(ref _idleSince);
-
-        public void BeginIdle() => Interlocked.Exchange(ref _idleSince, Stopwatch.GetTimestamp());
-
-        public void EndIdle() => Interlocked.Exchange(ref _idleSince, 0);
-
-        public void Evict() => _evict.Cancel();
-    }
-
-    /// <summary>Closes the connection that has been idle longest, if any is idle. Returns whether one was found.</summary>
-    private bool EvictOldestIdle()
-    {
-        ConnectionState? oldest = null;
-        lock (_connectionsLock)
+        public long IdleSince
         {
-            foreach (var candidate in _connections)
-            {
-                var since = candidate.IdleSince;
-                if (since != 0 && (oldest is null || since < oldest.IdleSince)) oldest = candidate;
-            }
-
-            oldest?.EndIdle(); // so a second pass does not pick it again before it has gone
+            get { lock (_gate) return _idleSince; }
         }
 
-        if (oldest is null) return false;
+        /// <summary>Starts an idle period; the token is cancelled if the connection is evicted during it.</summary>
+        public CancellationToken BeginIdle()
+        {
+            lock (_gate)
+            {
+                _evict = new CancellationTokenSource();
+                _idleSince = Stopwatch.GetTimestamp();
+                return _evict.Token;
+            }
+        }
 
-        Interlocked.Increment(ref _evictedIdleConnections);
-        oldest.Evict();
-        return true;
+        public void EndIdle()
+        {
+            lock (_gate)
+            {
+                _evict = null;
+                _idleSince = 0;
+            }
+        }
+
+        /// <summary>Cancels the current idle period, if there is one. False when the connection is busy.</summary>
+        public bool TryEvict()
+        {
+            CancellationTokenSource? evict;
+            lock (_gate)
+            {
+                evict = _evict;
+                _evict = null;
+                _idleSince = 0; // so a second pass does not pick it again before it has gone
+            }
+
+            if (evict is null) return false;
+            evict.Cancel();
+            return true;
+        }
+    }
+
+    /// <summary>Closes the connection that has been idle longest, if any is idle. Returns whether one was closed.</summary>
+    private bool EvictOldestIdle()
+    {
+        // A candidate can stop being idle between choosing it and closing it; then the next oldest is tried.
+        for (var attempt = 0; attempt < 4; attempt++)
+        {
+            ConnectionState? oldest = null;
+            var oldestSince = 0L;
+            lock (_connectionsLock)
+            {
+                foreach (var candidate in _connections)
+                {
+                    var since = candidate.IdleSince;
+                    if (since != 0 && (oldest is null || since < oldestSince))
+                    {
+                        oldest = candidate;
+                        oldestSince = since;
+                    }
+                }
+            }
+
+            if (oldest is null) return false;
+            if (!oldest.TryEvict()) continue;
+
+            Interlocked.Increment(ref _evictedIdleConnections);
+            return true;
+        }
+
+        return false;
     }
 
     /// <param name="accept">Where the next connection comes from: the listener, or a stand-in in a test.</param>
@@ -407,8 +450,8 @@ public sealed class ProxyServer : IAsyncDisposable
         Func<HttpRequestData, Uri?>? locate, string clientEndpoint, string processName, CancellationToken ct)
     {
         reader.IdleTimeout = Timeout.InfiniteTimeSpan; // stages 1 and 2 have clocks of their own
-        state.BeginIdle();
-        using (var idle = CancellationTokenSource.CreateLinkedTokenSource(ct, state.EvictToken))
+        var evicted = state.BeginIdle();
+        using (var idle = CancellationTokenSource.CreateLinkedTokenSource(ct, evicted))
         {
             idle.CancelAfter(first ? _options.RequestHeadTimeout : _options.IdleTimeout);
             try

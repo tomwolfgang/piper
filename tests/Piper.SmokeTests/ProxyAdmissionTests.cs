@@ -280,6 +280,71 @@ internal static class ProxyAdmissionTests
             runner.AreEqual(before, origin.ConnectionCount, "and is never forwarded");
         });
 
+        await runner.RunAsync("blank lines before a request count against the head cap", async () =>
+        {
+            await using var origin = new TestRawOrigin(OkAsync);
+            using var harness = new Harness(ca);
+
+            using var client = await ConnectAsync(harness.Port);
+            var before = origin.ConnectionCount;
+            try { await WriteAsync(client.GetStream(), string.Concat(Enumerable.Repeat("\r\n", 40_000)) + Get(origin.Port, "/after-blanks")); }
+            catch (IOException) { /* the proxy may close before all of it is sent */ }
+            var reply = await ReadAsync(client.GetStream(), null, Patience);
+            runner.IsTrue(!reply.Text.Contains("200 OK", StringComparison.Ordinal), "80 KB of blank lines is not tolerated");
+            runner.AreEqual(before, origin.ConnectionCount, "and the request behind them is never forwarded");
+        });
+
+        await runner.RunAsync("an eviction aimed at one idle wait never closes the connection's next one", () =>
+        {
+            var state = new ProxyServer.ConnectionState();
+
+            var first = state.BeginIdle();
+            state.EndIdle(); // a first byte arrived: the connection is busy
+            runner.IsTrue(!state.TryEvict(), "a busy connection cannot be evicted");
+
+            var second = state.BeginIdle();
+            runner.IsTrue(!second.IsCancellationRequested && !first.IsCancellationRequested,
+                "and a refused eviction leaves the next idle wait alone");
+            runner.IsTrue(state.TryEvict(), "an idle one can");
+            runner.IsTrue(second.IsCancellationRequested, "by cancelling that wait");
+            runner.IsTrue(!state.TryEvict(), "once, not twice");
+            return Task.CompletedTask;
+        });
+
+        await runner.RunAsync("the proxy recognises its own address, on every interface it listens on", () =>
+        {
+            var options = new ProxyOptions { ListeningEndpoint = new IPEndPoint(IPAddress.Any, 1234) };
+            runner.IsTrue(options.IsOwnEndpoint(IPAddress.Loopback, 1234), "IPv4 loopback");
+            runner.IsTrue(options.IsOwnEndpoint(IPAddress.IPv6Loopback, 1234), "IPv6 loopback");
+            runner.IsTrue(options.IsOwnEndpoint(IPAddress.Loopback.MapToIPv6(), 1234), "IPv4-mapped loopback");
+            runner.IsTrue(!options.IsOwnEndpoint(IPAddress.Loopback, 1235), "another port is another service");
+            runner.IsTrue(!options.IsOwnEndpoint(IPAddress.Parse("192.0.2.1"), 1234), "another host is another host");
+
+            var own = System.Net.NetworkInformation.NetworkInterface.GetAllNetworkInterfaces()
+                .SelectMany(n => n.GetIPProperties().UnicastAddresses).Select(u => u.Address)
+                .FirstOrDefault(a => a.AddressFamily == AddressFamily.InterNetwork && !IPAddress.IsLoopback(a));
+            if (own is not null) runner.IsTrue(options.IsOwnEndpoint(own, 1234), "an address of this machine's own interface");
+
+            var loopbackOnly = new ProxyOptions { ListeningEndpoint = new IPEndPoint(IPAddress.Loopback, 1234) };
+            runner.IsTrue(loopbackOnly.IsOwnEndpoint(IPAddress.Loopback, 1234), "a loopback listener is its own loopback address");
+            runner.IsTrue(!loopbackOnly.IsOwnEndpoint(IPAddress.IPv6Loopback, 1234), "but not the other family's, where nothing listens");
+            runner.IsTrue(!new ProxyOptions().IsOwnEndpoint(IPAddress.Loopback, 1234), "and nothing is its own while no proxy is running");
+            return Task.CompletedTask;
+        });
+
+        if (Socket.OSSupportsIPv6)
+        {
+            await runner.RunAsync("a proxy listening on IPv6 refuses a request for its own [::1] address with 508", async () =>
+            {
+                using var harness = new Harness(ca, o => o.ListenAddress = IPAddress.IPv6Loopback);
+                using var client = new TcpClient(AddressFamily.InterNetworkV6);
+                await client.ConnectAsync(IPAddress.IPv6Loopback, harness.Port);
+                await WriteAsync(client.GetStream(), $"GET http://[::1]:{harness.Port}/loop6 HTTP/1.1\r\nHost: [::1]:{harness.Port}\r\n\r\n");
+                var reply = await ReadAsync(client.GetStream(), "\r\n\r\n", Patience);
+                runner.IsTrue(reply.Text.StartsWith("HTTP/1.1 508", StringComparison.Ordinal), $"(got: {FirstLine(reply.Text)})");
+            });
+        }
+
         await runner.RunAsync("an accept loop that fails unexpectedly is logged and the proxy stops reporting that it runs", async () =>
         {
             var lines = new System.Collections.Concurrent.ConcurrentQueue<string>();

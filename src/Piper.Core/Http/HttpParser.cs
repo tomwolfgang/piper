@@ -39,11 +39,14 @@ public static class HttpParser
     public static async Task<HttpRequestData?> ReadRequestHeadAsync(HttpStreamReader reader, CancellationToken ct)
     {
         string? line;
-        // Tolerate leading blank lines between pipelined requests (RFC 9112 2.2).
+        var consumed = 0;
+        // Tolerate leading blank lines between pipelined requests (RFC 9112 2.2), within the head's budget.
         do
         {
             line = await reader.ReadLineAsync(ct).ConfigureAwait(false);
             if (line is null) return null;
+            consumed += line.Length + 2;
+            if (consumed > MaxRequestHeadBytes) throw new HttpParseException($"Request head exceeded {MaxRequestHeadBytes} bytes.");
         } while (line.Length == 0);
 
         var parts = line.Split(' ', 3, StringSplitOptions.RemoveEmptyEntries);
@@ -57,7 +60,7 @@ public static class HttpParser
             HttpVersion = parts.Length > 2 ? parts[2] : "HTTP/1.0",
         };
 
-        request.Headers = await ReadHeadersAsync(reader, ct, MaxRequestHeadBytes - line.Length - 2).ConfigureAwait(false);
+        request.Headers = await ReadHeadersAsync(reader, ct, MaxRequestHeadBytes - consumed).ConfigureAwait(false);
         request.Url = ResolveUrl(request);
         return request;
     }
