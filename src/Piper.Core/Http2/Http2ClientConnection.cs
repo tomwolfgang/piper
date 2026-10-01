@@ -53,7 +53,7 @@ public sealed class Http2ClientConnection(Stream stream, TimeSpan? idleTimeout =
     private int MaxHeaderBlockSize => _localSettings.MaxHeaderListSize ?? 65_536;
 
     private readonly TimeSpan? _idleTimeout =
-        idleTimeout is { } t && t > TimeSpan.Zero && t != Timeout.InfiniteTimeSpan ? t : null;
+        idleTimeout is { } t && t > TimeSpan.Zero && t.TotalMilliseconds <= int.MaxValue ? t : null; // longer than ~24 days (or infinite) is no timeout
 
     // When the origin last did something that counts (see MarkProgress).
     private long _lastProgress = Stopwatch.GetTimestamp();
@@ -444,6 +444,11 @@ public sealed class Http2ClientConnection(Stream stream, TimeSpan? idleTimeout =
                     StreamId = StreamId,
                 };
         }
+        else
+        {
+            // Only stream 1 is ever opened; any other id is idle here (RFC 9113 §5.1).
+            throw new Http2ProtocolException(Http2ErrorCode.ProtocolError, $"WINDOW_UPDATE for idle stream {frame.StreamId}.");
+        }
     }
 
     /// <summary>Returns flow-control credit for received DATA so the origin can keep sending.
@@ -540,7 +545,11 @@ public sealed class Http2ClientConnection(Stream stream, TimeSpan? idleTimeout =
         // HTTP/1.1 relay drops chunked trailers, rather than being mistaken for the head.
         if (_responseFields is not null)
         {
-            if (_sawEndStreamOnHeaders) _responseComplete = true;
+            // RFC 9113 §8.1: trailers end the stream. Without END_STREAM this is no trailer, and
+            // accepting it would let an endless run of such blocks keep re-arming the idle timeout.
+            if (!_sawEndStreamOnHeaders)
+                throw new Http2ProtocolException(Http2ErrorCode.ProtocolError, "A header block after the response head did not end the stream.");
+            _responseComplete = true;
             return;
         }
 

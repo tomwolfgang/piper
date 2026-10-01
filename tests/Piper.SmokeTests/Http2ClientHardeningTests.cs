@@ -236,6 +236,7 @@ internal static class Http2ClientHardeningTests
             ("WINDOW_UPDATE of 0 on the connection", p => p.SendWindowUpdateAsync(0, 0), Http2ErrorCode.ProtocolError),
             ("WINDOW_UPDATE of 0 on the stream", p => p.SendWindowUpdateAsync(1, 0), Http2ErrorCode.ProtocolError),
             ("WINDOW_UPDATE of 0 on a stream that was never opened", p => p.SendWindowUpdateAsync(3, 0), Http2ErrorCode.ProtocolError),
+            ("WINDOW_UPDATE of 1 on a stream that was never opened", p => p.SendWindowUpdateAsync(3, 1), Http2ErrorCode.ProtocolError),
             ("a connection window past 2^31-1", p => p.SendWindowUpdateAsync(0, MaxWindow), Http2ErrorCode.FlowControlError),
             ("a stream window past 2^31-1", p => p.SendWindowUpdateAsync(1, MaxWindow), Http2ErrorCode.FlowControlError),
             ("a connection window pushed over the top by one byte", async p =>
@@ -603,6 +604,50 @@ internal static class Http2ClientHardeningTests
             catch (Exception ex) { failure = ex; }
 
             runner.IsTrue(failure is HttpParseException, $"cut (was: {Describe(failure)})");
+        });
+
+        await runner.RunAsync("h2 client: an idle timeout longer than the timer can hold means no timeout, not an exception", async () =>
+        {
+            await using var peer = new Peer(async p =>
+            {
+                await p.WaitForRequestHeadAsync();
+                await p.SendHeaderBlockAsync(head, Http2FrameFlags.EndStream);
+            });
+
+            var connection = new Http2ClientConnection(await peer.ConnectAsync(), TimeSpan.FromDays(40));
+            var response = await connection.SendRequestHeadAsync(Get(), peer.Ct).WaitAsync(HangLimit);
+
+            runner.AreEqual(200, response.StatusCode, "a 40-day timeout is accepted and the exchange works");
+        });
+
+        await runner.RunAsync("h2 client: header blocks after the head that do not end the stream are refused, trailers that do are fine", async () =>
+        {
+            var trailers = HpackEncoder.Encode([("x-checksum", "abc")]);
+
+            await using var endless = new Peer(async p =>
+            {
+                await p.WaitForRequestHeadAsync();
+                await p.SendHeaderBlockAsync(head, Http2FrameFlags.None);
+                while (true) await p.SendHeaderBlockAsync(trailers, Http2FrameFlags.None);
+            });
+            var connection = new Http2ClientConnection(await endless.ConnectAsync(), idle);
+            await connection.SendRequestHeadAsync(Get(), endless.Ct).WaitAsync(HangLimit);
+            Exception? failure = null;
+            try { await ReadAllAsync(connection.ResponseBody).WaitAsync(HangLimit); }
+            catch (Exception ex) { failure = ex; }
+            runner.IsTrue(failure is Http2ProtocolException { ErrorCode: Http2ErrorCode.ProtocolError },
+                $"a trailers block without END_STREAM is PROTOCOL_ERROR (was: {Describe(failure)})");
+
+            await using var proper = new Peer(async p =>
+            {
+                await p.WaitForRequestHeadAsync();
+                await p.SendHeaderBlockAsync(head, Http2FrameFlags.None);
+                await p.SendAsync(Http2FrameType.Data, Http2FrameFlags.None, 1, "body"u8.ToArray());
+                await p.SendHeaderBlockAsync(trailers, Http2FrameFlags.EndStream);
+            });
+            var ok = new Http2ClientConnection(await proper.ConnectAsync(), idle);
+            await ok.SendRequestHeadAsync(Get(), proper.Ct).WaitAsync(HangLimit);
+            runner.AreEqual("body", await ReadAllAsync(ok.ResponseBody).WaitAsync(HangLimit), "trailers that carry END_STREAM still end the body");
         });
 
         await runner.RunAsync("h2 client: a slow consumer is not mistaken for an idle origin", async () =>
