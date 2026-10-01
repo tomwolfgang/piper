@@ -277,9 +277,11 @@ public sealed class Http3ClientConnection : IAsyncDisposable
                     if (trailersSeen)
                         throw new Http3ProtocolException(Http3ErrorCode.FrameUnexpected, "HEADERS after the trailer section.");
 
-                    // The encoded section is no larger than the decoded one, so the limit advertised in
-                    // SETTINGS is also the most a HEADERS frame may carry; the decoder enforces it on
-                    // the decoded form, which is the one it is defined for. Both are the same breach.
+                    // The limit advertised in SETTINGS is defined on the decoded section, which is at least
+                    // as large as the encoded one (a one-byte reference can stand for dozens of bytes). So
+                    // a frame longer than the limit is certainly over it, and is refused on its length
+                    // before being read; the decoder is the authority for the rest, and counts as it builds.
+                    // Both are the same breach.
                     if (length > MaxFieldSectionSize)
                         throw new Http3ProtocolException(Http3ErrorCode.ExcessiveLoad,
                             $"HEADERS frame of {length} bytes exceeds the {MaxFieldSectionSize}-byte field section limit.");
