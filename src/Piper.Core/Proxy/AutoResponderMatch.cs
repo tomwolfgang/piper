@@ -4,12 +4,22 @@ using Piper.Core.Sessions;
 
 namespace Piper.Core.Proxy;
 
-/// <summary>The outcome of testing one rule, carrying any regex captures for the action to use.</summary>
-public readonly record struct AutoResponderMatchResult(bool Success, IReadOnlyDictionary<string, string>? Captures)
+/// <summary>
+/// The outcome of testing one rule, carrying any regex captures for the action to use. There are three
+/// outcomes: a hit (<see cref="Success"/>), a miss, and a regex that ran past its timeout
+/// (<see cref="TimedOut"/>, which is never a <see cref="Success"/>). A timeout is its own state because
+/// "could not tell" is not "did not match": negating the second is a hit, negating the first would
+/// answer traffic with a rule that never actually matched it.
+/// </summary>
+public readonly record struct AutoResponderMatchResult(
+    bool Success, IReadOnlyDictionary<string, string>? Captures, bool TimedOut = false)
 {
     public static AutoResponderMatchResult Fail => new(false, null);
 
     public static AutoResponderMatchResult Hit => new(true, null);
+
+    /// <summary>A pattern ran past its timeout: the rule does not apply, whether or not it is negated.</summary>
+    public static AutoResponderMatchResult RegexTimeout => new(false, null, TimedOut: true);
 
     /// <summary>
     /// Substitutes <c>${name}</c> and <c>${1}</c> references to this match's regex captures. Unknown
@@ -29,6 +39,21 @@ public readonly record struct AutoResponderMatchResult(bool Success, IReadOnlyDi
 
     private static readonly Regex CaptureReference =
         new(@"\$\{(?<name>[A-Za-z0-9_]+)\}", RegexOptions.CultureInvariant, TimeSpan.FromMilliseconds(250));
+}
+
+/// <summary>
+/// What is worked out about one request while the rules are tried in turn, so a value several rules
+/// need is computed once: the first <c>URLWithBody:</c> rule decodes the request body and every later
+/// one reuses the text. A struct passed by <c>ref</c>, so the common request (no such rule) allocates
+/// nothing.
+/// </summary>
+internal struct MatchScratch
+{
+    /// <summary>The URL and the bounded, decoded request body, once some rule has asked for them.</summary>
+    public string? UrlWithBody;
+
+    /// <summary>How many times a body was decoded for this request; a test hook for "once, not once per rule".</summary>
+    public int BodyDecodes;
 }
 
 /// <summary>
@@ -180,25 +205,46 @@ public sealed class AutoResponderMatch
     /// </summary>
     public AutoResponderMatchResult Match(Session session)
     {
+        var scratch = default(MatchScratch);
+        return Match(session, ref scratch);
+    }
+
+    /// <summary>
+    /// As <see cref="Match(Session)"/>, sharing <paramref name="scratch"/> with the other rules tried
+    /// for the same request.
+    /// </summary>
+    internal AutoResponderMatchResult Match(Session session, ref MatchScratch scratch)
+    {
         ArgumentNullException.ThrowIfNull(session);
         if (Warning is not null || IsEmpty || session.Request is not { } request) return AutoResponderMatchResult.Fail;
 
-        var result = Evaluate(session, request);
+        var result = Evaluate(session, request, ref scratch);
+
+        // Checked before the negation: NOT: turns a miss into a hit, and a timeout is not a miss. A
+        // pattern the rule could not finish does not apply to this request either way.
+        if (result.TimedOut) return result;
 
         // A negated rule has nothing to capture -- it matched by *not* finding the pattern.
         if (!_negated) return result;
         return result.Success ? AutoResponderMatchResult.Fail : AutoResponderMatchResult.Hit;
     }
 
-    private AutoResponderMatchResult Evaluate(Session session, HttpRequestData request) => _kind switch
+    private AutoResponderMatchResult Evaluate(Session session, HttpRequestData request, ref MatchScratch scratch) => _kind switch
     {
         Kind.Substring => Result(UrlOf(request).Contains(_value, StringComparison.OrdinalIgnoreCase)),
         Kind.Exact => Result(string.Equals(UrlOf(request), _value, StringComparison.Ordinal)),
         Kind.Method => Result(string.Equals(request.Method, _value, StringComparison.OrdinalIgnoreCase)),
         Kind.Regex => MatchRegex(UrlOf(request)),
         Kind.Header => Result(MatchHeader(request)),
-        Kind.UrlWithBody => Result(UrlWithBody(request).Contains(_value, StringComparison.OrdinalIgnoreCase)),
-        Kind.Query => Result(_query!.Matches(session)),
+        Kind.UrlWithBody => Result(UrlWithBody(request, ref scratch).Contains(_value, StringComparison.OrdinalIgnoreCase)),
+        Kind.Query => MatchQuery(session),
+        _ => AutoResponderMatchResult.Fail,
+    };
+
+    private AutoResponderMatchResult MatchQuery(Session session) => _query!.Evaluate(session) switch
+    {
+        SearchOutcome.Match => AutoResponderMatchResult.Hit,
+        SearchOutcome.TimedOut => AutoResponderMatchResult.RegexTimeout,
         _ => AutoResponderMatchResult.Fail,
     };
 
@@ -211,7 +257,7 @@ public sealed class AutoResponderMatch
         }
         catch (RegexMatchTimeoutException)
         {
-            return AutoResponderMatchResult.Fail;
+            return AutoResponderMatchResult.RegexTimeout;
         }
 
         if (!match.Success) return AutoResponderMatchResult.Fail;
@@ -237,20 +283,36 @@ public sealed class AutoResponderMatch
     private static string UrlOf(HttpRequestData request) => request.Url?.ToString() ?? request.RequestTarget;
 
     /// <summary>
-    /// URL and request body as one haystack. Fiddler documents URLWithBody only loosely; matching the
-    /// two joined by a newline keeps a bare substring working against either half.
+    /// The most of a request body, once decoded, that <c>URLWithBody:</c> reads. A rule runs before the
+    /// request is sent, on every request, so it cannot afford the 64 MiB a viewer may decode; a match
+    /// beyond this is not found.
     /// </summary>
-    private static string UrlWithBody(HttpRequestData request)
+    internal const int MaxBodyBytes = 1024 * 1024;
+
+    /// <summary>
+    /// URL and request body as one haystack. Fiddler documents URLWithBody only loosely; matching the
+    /// two joined by a newline keeps a bare substring working against either half. Built on the first
+    /// call for a request and kept in <paramref name="scratch"/>, so any number of rules cost one
+    /// decode; the body is decoded to at most <see cref="MaxBodyBytes"/>.
+    /// </summary>
+    private static string UrlWithBody(HttpRequestData request, ref MatchScratch scratch)
     {
-        if (request.Body.Length == 0) return UrlOf(request);
-        try
+        if (scratch.UrlWithBody is { } cached) return cached;
+
+        var haystack = UrlOf(request);
+        if (request.Body.Length > 0)
         {
-            return $"{UrlOf(request)}\n{request.BodyAsText()}";
+            scratch.BodyDecodes++;
+
+            // DecodeBounded never throws on a hostile or corrupt body: it returns what it could read
+            // and says so. The cut also applies to a body with no Content-Encoding.
+            var bytes = ContentCodec.DecodeBounded(request.Body, request.ContentEncoding, MaxBodyBytes).Bytes;
+            if (bytes.Length > MaxBodyBytes) bytes = bytes.AsSpan(0, MaxBodyBytes).ToArray();
+            haystack = $"{haystack}\n{request.BodyAsText(bytes)}";
         }
-        catch (Exception) // a body that will not decode simply has nothing to match against
-        {
-            return UrlOf(request);
-        }
+
+        scratch.UrlWithBody = haystack;
+        return haystack;
     }
 
     private static AutoResponderMatchResult Result(bool success) =>

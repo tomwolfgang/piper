@@ -44,6 +44,9 @@ public sealed class AutoResponderPanel : UserControl
     private bool _applyingSettings;
     private bool _loadingRule;
 
+    // Rules whose pattern timed out and are being skipped, as of the last refresh.
+    private IReadOnlySet<string> _timedOutRules = new HashSet<string>();
+
     /// <summary>Raised after any edit, so the rule set can be applied to the proxy and persisted.</summary>
     public event EventHandler? SettingsChanged;
 
@@ -118,6 +121,7 @@ public sealed class AutoResponderPanel : UserControl
             MultiSelect = false,
             HideSelection = false,
             HeaderStyle = ColumnHeaderStyle.Nonclickable,
+            ShowItemToolTips = true,
         };
         _list.Columns.Add(Strings.AutoResponder.ColumnOn, 44);
         _list.Columns.Add(Strings.AutoResponder.ColumnMatch, 300);
@@ -419,18 +423,29 @@ public sealed class AutoResponderPanel : UserControl
     {
         if (_rules.Count == 0 || _list.Items.Count != _rules.Count) return;
 
+        _timedOutRules = _responder.TimedOutRuleIds;
         for (var i = 0; i < _rules.Count; i++)
         {
             var stats = _responder.StatsFor(_rules[i].Id);
             var item = _list.Items[i];
             var hits = stats.Hits.ToString("N0");
-            var last = stats.LastMatched?.ToString("HH:mm:ss") ?? string.Empty;
+            var last = LastMatchText(_rules[i], stats);
             if (item.SubItems[3].Text == hits && item.SubItems[4].Text == last) continue;
 
             item.SubItems[3].Text = hits;
             item.SubItems[4].Text = last;
+            item.ToolTipText = _timedOutRules.Contains(_rules[i].Id) ? Strings.AutoResponder.RuleTimedOutTooltip : string.Empty;
         }
     }
+
+    /// <summary>
+    /// The Last match cell. A rule whose pattern timed out says so there, in words as well as colour:
+    /// it is being skipped, and the empty cell of a rule that has simply not matched yet would hide that.
+    /// </summary>
+    private string LastMatchText(AutoResponderRule rule, AutoResponderRuleStats stats) =>
+        _timedOutRules.Contains(rule.Id)
+            ? Strings.AutoResponder.RuleTimedOut
+            : stats.LastMatched?.ToString("HH:mm:ss") ?? string.Empty;
 
     // --------------------------------------------------------------- rule editing
 
@@ -532,6 +547,7 @@ public sealed class AutoResponderPanel : UserControl
         try
         {
             _list.Items.Clear();
+            _timedOutRules = _responder.TimedOutRuleIds;
             foreach (var rule in _rules)
             {
                 var stats = _responder.StatsFor(rule.Id);
@@ -539,7 +555,8 @@ public sealed class AutoResponderPanel : UserControl
                 item.SubItems.Add(rule.Match);
                 item.SubItems.Add(rule.Action);
                 item.SubItems.Add(stats.Hits.ToString("N0"));
-                item.SubItems.Add(stats.LastMatched?.ToString("HH:mm:ss") ?? string.Empty);
+                item.SubItems.Add(LastMatchText(rule, stats));
+                if (_timedOutRules.Contains(rule.Id)) item.ToolTipText = Strings.AutoResponder.RuleTimedOutTooltip;
                 _list.Items.Add(item);
             }
         }
@@ -574,8 +591,11 @@ public sealed class AutoResponderPanel : UserControl
         }
 
         // A disabled rule stays readable but visibly inert, which is the state people forget about.
+        // A rule whose pattern timed out is skipped, which is worse: it reads as an error.
+        var color = e.ColumnIndex == 4 && _timedOutRules.Contains(rule.Id) ? Palette.StatusServerError
+            : rule.Enabled ? Palette.Text : Palette.TextDim;
         TextRenderer.DrawText(e.Graphics, e.SubItem?.Text ?? string.Empty, Palette.Mono,
-            Rectangle.Inflate(e.Bounds, -5, 0), rule.Enabled ? Palette.Text : Palette.TextDim,
+            Rectangle.Inflate(e.Bounds, -5, 0), color,
             TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
     }
 

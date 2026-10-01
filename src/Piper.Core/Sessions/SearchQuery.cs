@@ -6,6 +6,16 @@ using Piper.Core.Http;
 
 namespace Piper.Core.Sessions;
 
+/// <summary>What testing a session against a <see cref="SearchQuery"/> found out.</summary>
+public enum SearchOutcome
+{
+    NoMatch,
+    Match,
+
+    /// <summary>A regular expression ran past its timeout, so the session was neither matched nor ruled out.</summary>
+    TimedOut,
+}
+
 /// <summary>
 /// Compiled filter over captured sessions. Drives both the session-list filter box and
 /// the Composer's request search.
@@ -79,34 +89,52 @@ public sealed class SearchQuery
     private volatile bool _regexTimedOut;
 
     /// <summary>
-    /// True once one of this query's patterns has run past its match timeout. From then on the
-    /// query matches nothing: see <see cref="Matches"/>. Lets the UI show why a list went empty.
+    /// True once one of this query's patterns has run past its match timeout. From then on every
+    /// session is <see cref="SearchOutcome.TimedOut"/>, so <see cref="Matches"/> matches nothing. Lets
+    /// the UI show why a list went empty, or that a filter is not being applied.
     /// </summary>
     public bool RegexTimedOut => _regexTimedOut;
 
     /// <remarks>
-    /// A pattern and the captured text are both outside Piper's control, so a catastrophic backtrack
-    /// is an ordinary input. The first one fails the query closed for good: this session does not
-    /// match, and nor does any later one. Carrying on would cost a full timeout for every session on
-    /// every refresh of the grid, and treating one term as "no match" would turn a negated term into
-    /// "matches everything", which an AutoResponder rule would then answer. Letting the timeout
-    /// escape, as it used to, crashed the grid refresh instead.
+    /// For a view the user is looking at, so a timeout fails the query closed: see <see cref="Evaluate"/>
+    /// for why, and <see cref="MatchesFailOpen"/> for callers that must not discard what they could not
+    /// judge. A caller that negates the answer, such as an AutoResponder <c>NOT:</c> rule, must use
+    /// <see cref="Evaluate"/>: negating this method's false turns a timeout into a match.
     /// </remarks>
-    public bool Matches(Session session)
+    public bool Matches(Session session) => Evaluate(session) == SearchOutcome.Match;
+
+    /// <summary>
+    /// Whether <paramref name="session"/> matches, counting a query that timed out as a match. For the
+    /// admission filters: a pattern that cannot be evaluated must not decide that nothing is wanted, or
+    /// one slow regex silently discards every later session from capture. The caller shows
+    /// <see cref="RegexTimedOut"/> so the user knows the filter is not being applied.
+    /// </summary>
+    public bool MatchesFailOpen(Session session) => Evaluate(session) != SearchOutcome.NoMatch;
+
+    /// <summary>
+    /// Tests one session and says whether the answer is known. A pattern and the captured text are both
+    /// outside Piper's control, so a catastrophic backtrack is an ordinary input, and it is reported as
+    /// <see cref="SearchOutcome.TimedOut"/>, never as "no match": treating it as no match would turn a
+    /// negated term into "matches everything", which an AutoResponder rule would then answer. The
+    /// first timeout stays with the query for good: carrying on would cost a full timeout for every
+    /// session on every refresh of the grid. Letting the timeout escape, as it used to, crashed the
+    /// grid refresh instead.
+    /// </summary>
+    public SearchOutcome Evaluate(Session session)
     {
-        if (_regexTimedOut) return false;
+        if (_regexTimedOut) return SearchOutcome.TimedOut;
 
         try
         {
             for (var i = 0; i < _predicates.Count; i++)
                 if (!_predicates[i](session))
-                    return false;
-            return true;
+                    return SearchOutcome.NoMatch;
+            return SearchOutcome.Match;
         }
         catch (RegexMatchTimeoutException)
         {
             _regexTimedOut = true;
-            return false;
+            return SearchOutcome.TimedOut;
         }
     }
 

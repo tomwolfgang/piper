@@ -36,9 +36,30 @@ public sealed record AutoResponderDecision(
 /// </remarks>
 public sealed class AutoResponder
 {
-    private sealed record CompiledRule(
-        string Id, bool Enabled, string Description,
-        AutoResponderMatch Match, AutoResponderAction Action, AutoResponderRule Source);
+    private sealed class CompiledRule(
+        string id, bool enabled, string description,
+        AutoResponderMatch match, AutoResponderAction action, AutoResponderRule source)
+    {
+        private int _timedOut;
+
+        public string Id { get; } = id;
+        public bool Enabled { get; } = enabled;
+        public string Description { get; } = description;
+        public AutoResponderMatch Match { get; } = match;
+        public AutoResponderAction Action { get; } = action;
+        public AutoResponderRule Source { get; } = source;
+
+        /// <summary>
+        /// True once a pattern in this rule ran past its timeout. The rule is then skipped for the life
+        /// of this snapshot, which both stops it fabricating a response (a negated rule would read the
+        /// timeout as a miss) and stops it costing a full timeout on every later request. Editing the
+        /// rules compiles a fresh snapshot, so fixing the pattern clears it.
+        /// </summary>
+        public bool TimedOut => Volatile.Read(ref _timedOut) != 0;
+
+        /// <summary>Marks the rule; true only for the caller that did, so it is announced once.</summary>
+        public bool TryMarkTimedOut() => Interlocked.Exchange(ref _timedOut, 1) == 0;
+    }
 
     private sealed record Snapshot(
         bool Enabled, bool PassthroughUnmatched, AutoResponderSettings Settings,
@@ -79,6 +100,30 @@ public sealed class AutoResponder
 
     /// <summary>Problems found while compiling the current rule set. Bad rules are skipped, not fatal.</summary>
     public IReadOnlyList<string> Warnings => Volatile.Read(ref _snapshot).Warnings;
+
+    /// <summary>
+    /// Raised, from whichever thread was evaluating a request, the first time a rule's pattern runs past
+    /// its timeout. The argument describes the rule. Such a rule is skipped from then on, so this fires
+    /// once per rule per <see cref="Apply"/>.
+    /// </summary>
+    public event EventHandler<string>? RuleTimedOut;
+
+    /// <summary>
+    /// The ids of the rules of the current set that have timed out and are being skipped, for the panel
+    /// to mark as broken. Empty (and allocation-free) in the normal case.
+    /// </summary>
+    public IReadOnlySet<string> TimedOutRuleIds
+    {
+        get
+        {
+            HashSet<string>? ids = null;
+            foreach (var rule in Volatile.Read(ref _snapshot).Rules)
+                if (rule.TimedOut) (ids ??= new HashSet<string>(StringComparer.Ordinal)).Add(rule.Id);
+            return ids ?? NoRuleIds;
+        }
+    }
+
+    private static readonly IReadOnlySet<string> NoRuleIds = new HashSet<string>();
 
     public AutoResponderSettings Export() => Volatile.Read(ref _snapshot).Settings.Clone();
 
@@ -131,11 +176,19 @@ public sealed class AutoResponder
         var snapshot = Volatile.Read(ref _snapshot);
         if (!snapshot.Enabled || session?.Request is null) return AutoResponderDecision.Passthrough;
 
+        var scratch = default(MatchScratch);
         foreach (var rule in snapshot.Rules)
         {
-            if (!rule.Enabled) continue;
+            if (!rule.Enabled || rule.TimedOut) continue;
 
-            var match = rule.Match.Match(session);
+            var match = rule.Match.Match(session, ref scratch);
+            if (match.TimedOut)
+            {
+                // The rule does not apply to this request and is not tried again (see CompiledRule).
+                if (rule.TryMarkTimedOut()) RuleTimedOut?.Invoke(this, rule.Description);
+                continue;
+            }
+
             if (!match.Success) continue;
 
             if (recordHit) _counters.GetOrAdd(rule.Id, _ => new Counter()).Record();

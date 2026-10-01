@@ -1,6 +1,7 @@
 using System.Runtime.InteropServices;
 using Piper.App.Controls;
 using Piper.Core.Http;
+using Piper.Core.Proxy;
 using Piper.Core.Sessions;
 
 // Regression: after Ctrl+X cleared a grid scrolled down to its newest rows, the next rows were drawn
@@ -64,8 +65,43 @@ internal static class Program
             Check(list.VirtualListSize == 1, $"live traffic stays hidden (got {list.VirtualListSize})");
         });
 
+        RunPanel("an AutoResponder rule whose pattern timed out is marked broken in the panel");
+
         Console.WriteLine(_failures == 0 ? "UI tests passed." : $"{_failures} UI check(s) failed.");
         return _failures == 0 ? 0 : 1;
+    }
+
+    /// <summary>A rule that was skipped for timing out says so in its Last match cell, until it is edited.</summary>
+    private static void RunPanel(string name)
+    {
+        Console.WriteLine($"== {name}");
+        var broken = new AutoResponderRule { Match = @"NOT:REGEX:^http://api\.example\.test/(a+)+$", Action = "*418" };
+        var healthy = new AutoResponderRule { Match = "orders", Action = "*503" };
+        var settings = new AutoResponderSettings { Enabled = true, Rules = [broken, healthy] };
+
+        var responder = new AutoResponder();
+        responder.Apply(settings);
+        using var form = new Form { Width = 1000, Height = 500, ShowInTaskbar = false, StartPosition = FormStartPosition.Manual, Location = new Point(0, 0) };
+        var panel = new AutoResponderPanel(responder) { Dock = DockStyle.Fill };
+        form.Controls.Add(panel);
+        form.Show();
+        panel.ApplySettings(settings);
+        var list = FindListView(panel);
+        Check(list.Items.Count == 2, "setup: both rules are listed");
+        Check(list.Items[0].SubItems[4].Text.Length == 0, "before any request the Last match cell is empty");
+
+        var uri = new Uri("http://api.example.test/" + new string('a', 40) + "!");
+        var trap = new Session { Request = new HttpRequestData { Method = "GET", Url = uri, RequestTarget = uri.PathAndQuery } };
+        Check(responder.Evaluate(trap).Outcome == AutoResponderOutcome.Passthrough, "the catastrophic request is not answered");
+        panel.RefreshStatistics();
+        Check(list.Items[0].SubItems[4].Text.Length > 0, "the timed-out rule's Last match cell says so");
+        Check(list.Items[0].ToolTipText.Length > 0, "and explains it in a tooltip");
+        Check(list.Items[1].SubItems[4].Text.Length == 0 && list.Items[1].ToolTipText.Length == 0, "its neighbour is not marked");
+
+        responder.Apply(settings); // an edit recompiles the rules
+        panel.RefreshStatistics();
+        Check(list.Items[0].SubItems[4].Text.Length == 0 && list.Items[0].ToolTipText.Length == 0, "editing the rules clears the mark");
+        form.Close();
     }
 
     /// <summary>Hosts a real grid, fills it past a screen so it follows the tail, then runs the case.</summary>

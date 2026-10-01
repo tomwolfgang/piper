@@ -116,6 +116,7 @@
     "httpsOn": "on",
     "httpsOff": "off",
     "listening": "Listening on {{endpoint}}   -   HTTPS decryption {{state}}",
+    "filterTimedOutSuffix": "   -   Warning: a filter pattern timed out, so the filters are not being applied",
 
     "sessions_one": "{{count, N0}} session",
     "sessions_other": "{{count, N0}} sessions",
@@ -248,6 +249,8 @@
     "importedSessionsDropped_other": "{{count, N0}} imported sessions did not fit within the limit of {{capacity, N0}} sessions and were dropped, oldest first.",
     "sazImportWarning": "SAZ import warning ({{fileName}}): {{warning}}",
     "autoResponderWarning": "AutoResponder: {{warning}}",
+    "autoResponderRuleTimedOut": "AutoResponder: a pattern took too long on a request and was stopped, so this rule is skipped until the rules are edited: {{rule}}",
+    "filterTimedOut": "A regular expression in the applied filters took too long on captured text and was stopped. The filters are not being applied and all traffic is being kept until you change them. Simplify the pattern.",
 
     "listenFailed": "Could not listen on 127.0.0.1:{{port}} - {{exceptionType}}: {{message}}",
     "portInUseHint": "Another proxy may be using the port. Change it, or stop the other proxy, then press F12.",
@@ -630,6 +633,8 @@
     "columnAction": "Action",
     "columnHits": "Hits",
     "columnLastMatch": "Last match",
+    "ruleTimedOut": "Timed out",
+    "ruleTimedOutTooltip": "A pattern in this rule took too long on a request and was stopped, so the rule is skipped. Edit the rules to re-enable it.",
 
     "labelMatch": "Match",
     "labelAction": "Action",

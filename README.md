@@ -290,8 +290,14 @@ copied from a Fiddler setup work unchanged.
 | `REGEX:/v(?<n>\d+)/items` | a regular expression; `${n}` is then usable in the action |
 | `METHOD:POST` | the request method |
 | `HEADER:X-Env=staging` | a request header |
-| `URLWithBody:coupon` | the URL and request body together |
+| `URLWithBody:coupon` | the URL and request body together (the first 1 MiB of the decoded body) |
 | `Q:method:POST host:api` | Piper's own [search grammar](#search-grammar), request fields only |
+
+A regular expression (`REGEX:`, or a `/regex/` inside `Q:`) that takes longer than 250 ms on a
+request is stopped. The rule is then skipped, even a `NOT:` one: a timeout is never treated as "did
+not match". The rule's **Last match** cell shows *Timed out* and the log says so; editing the rules
+re-enables it. A filter pattern on the Filters tab that times out stops filtering, so no traffic is
+discarded, and the status bar warns until you change the filters.
 
 | Action | |
 |---|---|
