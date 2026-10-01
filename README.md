@@ -224,8 +224,8 @@ targets, so `Invoke-WebRequest -Proxy` would never reach Piper.
   rest wait in the operating system's accept queue. When that limit is reached the log says so
   once, and each waiting client closes the connection that has been idle longest (no per-address
   quota: every local process connects from 127.0.0.1). A connection's first byte must arrive within
-  `RequestHeadTimeout` (30 s), a request's line and headers within that time in total and at most
-  64 KB, and so must a decrypted tunnel's TLS handshake. A body may pause for at most `IdleTimeout`
+  `RequestHeadTimeout` (30 s); from that first byte, a request's line and headers have a further
+  `RequestHeadTimeout` in total, and at most 64 KB; a decrypted tunnel's TLS handshake gets the same. A body may pause for at most `IdleTimeout`
   (120 s) and must deliver `MinRequestBodyBytesPerWindow` (1,024) bytes in each such window, so a
   slow upload that keeps moving succeeds and a trickle does not; a client cut off mid-request gets
   a `408` (best effort, especially over TLS) and a failed session. A client that stops reading a
