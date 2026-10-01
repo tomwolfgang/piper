@@ -194,8 +194,12 @@ public sealed class MainForm : Form, IMessageFilter
         _filterPanel.FilterChanged += (_, query) =>
         {
             var admissionQuery = SearchQuery.Parse(query);
-            _sessionList.FiltersetFilter = admissionQuery.IsEmpty ? null : admissionQuery.Matches;
-            _store.CompletedSessionFilter = admissionQuery.IsEmpty ? null : admissionQuery.Matches;
+            _admissionQuery = admissionQuery;
+            _admissionTimeoutLogged = false;
+            // Fail open: a pattern that ran past its timeout must not decide that nothing is wanted,
+            // which would silently discard every later session. UpdateStatus warns instead.
+            _sessionList.FiltersetFilter = admissionQuery.IsEmpty ? null : admissionQuery.MatchesFailOpen;
+            _store.CompletedSessionFilter = admissionQuery.IsEmpty ? null : admissionQuery.MatchesFailOpen;
             var ignoredHosts = FilterQuery.IgnoredHostPatterns(_filterPanel.Settings);
             if (ignoredHosts > 0) AppendLog(Strings.Log.HostPatternsIgnored(ignoredHosts));
             // Keep this save unconditional. The Use Filters checkbox no longer raises
@@ -239,6 +243,12 @@ public sealed class MainForm : Form, IMessageFilter
                 ReportAutoResponderSave(AutoResponderSettingsStore.Save(settings));
             _rightTabs.SetTabChecked(_autoResponderPage, settings.Enabled && settings.Rules.Count > 0);
             foreach (var warning in _options.AutoResponder.Warnings) AppendLog(Strings.Log.AutoResponderWarning(warning));
+        };
+
+        // Raised on a proxy thread. The panel marks the rule on its next refresh; this makes the log say why.
+        _options.AutoResponder.RuleTimedOut += (_, description) =>
+        {
+            if (IsHandleCreated && !IsDisposed) BeginInvoke(() => AppendLog(Strings.Log.AutoResponderRuleTimedOut(description)));
         };
 
         var savedRules = AutoResponderSettingsStore.Load();
@@ -344,6 +354,10 @@ public sealed class MainForm : Form, IMessageFilter
     /// Piper cannot read. The user is told once; Export still works.
     /// </summary>
     private bool _rulesFileProtected;
+
+    // The applied filterset's query, kept so UpdateStatus can say when one of its patterns timed out.
+    private SearchQuery? _admissionQuery;
+    private bool _admissionTimeoutLogged;
 
     private void ReportAutoResponderSave(AutoResponderSaveResult result)
     {
@@ -2043,6 +2057,16 @@ public sealed class MainForm : Form, IMessageFilter
         _statusLabel.Text = _proxy.IsRunning
             ? Strings.StatusBar.Listening(_proxy.Endpoint, _options.DecryptHttps)
             : Strings.StatusBar.NotCapturingStatus;
+        if (_admissionQuery is { RegexTimedOut: true })
+        {
+            _statusLabel.Text += Strings.StatusBar.FilterTimedOutSuffix;
+            if (!_admissionTimeoutLogged)
+            {
+                _admissionTimeoutLogged = true;
+                AppendLog(Strings.Log.FilterTimedOut);
+            }
+        }
+
         UpdateCaptureStatus();
         UpdateSessionsStatus();
         _autoResponder.RefreshStatistics();

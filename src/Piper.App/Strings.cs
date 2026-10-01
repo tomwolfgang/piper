@@ -185,6 +185,8 @@ internal static class Strings
         public static string SelectedSessionTooltip => I18n.T("statusBar.selectedSessionTooltip");
         public static string ZoomTooltip => I18n.T("statusBar.zoomTooltip");
 
+        public static string FilterTimedOutSuffix => I18n.T("statusBar.filterTimedOutSuffix");
+
         public static string Listening(object? endpoint, bool decryptHttps) =>
             I18n.T("statusBar.listening", ("endpoint", endpoint),
                 ("state", decryptHttps ? I18n.T("statusBar.httpsOn") : I18n.T("statusBar.httpsOff")));
@@ -345,6 +347,11 @@ internal static class Strings
             I18n.T("log.sazImportWarning", ("fileName", fileName), ("warning", warning));
         public static string AutoResponderWarning(string warning) =>
             I18n.T("log.autoResponderWarning", ("warning", warning));
+
+        public static string AutoResponderRuleTimedOut(string rule) =>
+            I18n.T("log.autoResponderRuleTimedOut", ("rule", rule));
+
+        public static string FilterTimedOut => I18n.T("log.filterTimedOut");
 
         public static string ListenFailed(int port, string exceptionType, string message) =>
             I18n.T("log.listenFailed", ("port", port), ("exceptionType", exceptionType), ("message", message));
@@ -822,6 +829,8 @@ internal static class Strings
         public static string ColumnAction => I18n.T("autoResponder.columnAction");
         public static string ColumnHits => I18n.T("autoResponder.columnHits");
         public static string ColumnLastMatch => I18n.T("autoResponder.columnLastMatch");
+        public static string RuleTimedOut => I18n.T("autoResponder.ruleTimedOut");
+        public static string RuleTimedOutTooltip => I18n.T("autoResponder.ruleTimedOutTooltip");
 
         public static string LabelMatch => I18n.T("autoResponder.labelMatch");
         public static string LabelAction => I18n.T("autoResponder.labelAction");
