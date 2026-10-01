@@ -110,13 +110,17 @@ internal static class Http3HardeningTests
             if (Quic) runner.AreEqual(8443, port, "the UDP port comes from the authority, not the origin port");
             runner.IsTrue(!Eligible(cache, "p.example", 444), "the same host on another origin port is a different origin");
 
-            // Without the origin port only the unambiguous case can be trusted.
+            // The proxy's call sites do not say which port the header arrived on. Two cases can be trusted.
             var unknown = new AltSvcCache(new ManualTime());
             unknown.RecordAltSvc("q.example", "h3=\":8443\"");
-            runner.IsTrue(!Eligible(unknown, "q.example", 443), "an alternative on another port is not applied to an origin port nobody vouched for");
-            runner.AreEqual(Quic, Eligible(unknown, "q.example", 8443), "same port both ways is fine");
+            var onDefault = unknown.TryGetEndpoint("q.example", 443, out var defaultPort);
+            runner.AreEqual(Quic, onDefault, "an alternative on another UDP port applies to the default https port");
+            if (Quic) runner.AreEqual(8443, defaultPort, "and its port is used");
+            runner.AreEqual(Quic, Eligible(unknown, "q.example", 8443), "an alternative on the very port asked about applies");
+            runner.IsTrue(!Eligible(unknown, "q.example", 9000), "but not to some third port nobody vouched for");
             unknown.RecordAltSvc("r.example", "h3=\":443\"");
-            runner.AreEqual(Quic, Eligible(unknown, "r.example", 443), "the common case (h3=\":443\" from port 443) still works");
+            runner.AreEqual(Quic, Eligible(unknown, "r.example", 443), "the common case (h3=\":443\" from port 443) works");
+            runner.IsTrue(!Eligible(unknown, "r.example", 444), "and does not leak to another port of the host");
             return Task.CompletedTask;
         });
 

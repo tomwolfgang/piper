@@ -32,6 +32,7 @@ public sealed class AltSvcCache(TimeProvider? timeProvider = null)
     /// <summary>The longest Alt-Svc header value parsed. A longer one is ignored outright.</summary>
     public const int MaxHeaderLength = 8 * 1024;
 
+    private const int DefaultHttpsPort = 443;
     private const int MaxAlternatives = 16;
     private const int MaxHostLength = 255;
     private static readonly TimeSpan DefaultMaxAge = TimeSpan.FromHours(24);
@@ -68,9 +69,9 @@ public sealed class AltSvcCache(TimeProvider? timeProvider = null)
     /// origin's own host counts; "h3-29" and friends are drafts msquic will not negotiate.</summary>
     public void RecordAltSvc(string host, string? altSvcHeader) => RecordAltSvc(host, null, altSvcHeader);
 
-    /// <summary>As above, for a caller that knows the port the header arrived on. An alternative is
-    /// only ever used for that origin port; without it, an alternative on another port than the one
-    /// asked for is not used at all.</summary>
+    /// <summary>As above, for a caller that knows the port the header arrived on. The alternative is
+    /// then used for that origin port and no other; without it, it is used for the default https
+    /// port and for the alternative's own port (see <see cref="TryGetEndpoint"/>).</summary>
     public void RecordAltSvc(string host, int? originPort, string? altSvcHeader)
     {
         if (string.IsNullOrWhiteSpace(host) || host.Length > MaxHostLength) return;
@@ -219,10 +220,15 @@ public sealed class AltSvcCache(TimeProvider? timeProvider = null)
             }
             if (entry.FailedUntil is { } until && now < until) return false;
 
-            // Advertised on one port, asked about on another: only the same-port case is known to
-            // be right, because an h3 server on host:443 answers for host:443, not host:8444.
-            if (entry.OriginPort is { } advertisedFor ? advertisedFor != originPort : entry.AltPort != originPort)
-                return false;
+            // Advertised for one origin port, asked about another: not applicable, because an h3
+            // server on host:443 answers for host:443, not host:8444. A caller that did not say which
+            // port the header arrived on (the proxy's two call sites) gets the two cases that can be
+            // trusted: the default https port, where nearly every advertisement comes from, and an
+            // alternative on the very port asked about, which is what was always assumed.
+            var applies = entry.OriginPort is { } advertisedFor
+                ? advertisedFor == originPort
+                : originPort == DefaultHttpsPort || entry.AltPort == originPort;
+            if (!applies) return false;
 
             entry.LastUsed = ++_tick;
             port = entry.AltPort;
