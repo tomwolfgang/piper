@@ -82,7 +82,8 @@ public sealed class ProxyServer : IAsyncDisposable
         // they took it from, not to the next run's.
         var gate = new SemaphoreSlim(_options.MaxConcurrentConnections, _options.MaxConcurrentConnections);
         var token = _cts.Token;
-        _acceptLoop = Task.Run(() => AcceptLoopAsync(gate, token));
+        var listener = _listener;
+        _acceptLoop = Task.Run(() => AcceptLoopAsync(gate, ct => listener.AcceptTcpClientAsync(ct), token));
 
         Log?.Invoke(this, $"Listening on {Endpoint}. HTTPS decryption {(_options.DecryptHttps ? "enabled" : "disabled")}.");
     }
@@ -146,7 +147,9 @@ public sealed class ProxyServer : IAsyncDisposable
         Log?.Invoke(this, "Proxy stopped.");
     }
 
-    private async Task AcceptLoopAsync(SemaphoreSlim gate, CancellationToken ct)
+    /// <param name="accept">Where the next connection comes from: the listener, or a stand-in in a test.</param>
+    internal async Task AcceptLoopAsync(
+        SemaphoreSlim gate, Func<CancellationToken, ValueTask<TcpClient>> accept, CancellationToken ct)
     {
         while (!ct.IsCancellationRequested)
         {
@@ -156,34 +159,36 @@ public sealed class ProxyServer : IAsyncDisposable
             try { await gate.WaitAsync(ct).ConfigureAwait(false); }
             catch (OperationCanceledException) { break; }
 
-            TcpClient client;
+            // The slot is this iteration's until a connection takes it over. The one finally gives
+            // it back on every other way out, including an exception nothing here expects.
+            var handedOver = false;
+            var failed = false;
             try
             {
-                client = await _listener!.AcceptTcpClientAsync(ct).ConfigureAwait(false);
+                var client = await accept(ct).ConfigureAwait(false);
+                handedOver = true;
+                _ = ServeConnectionAsync(client, gate, ct);
             }
-            catch (OperationCanceledException) { gate.Release(); break; }
-            catch (ObjectDisposedException) { gate.Release(); break; }
+            catch (OperationCanceledException) { break; }
+            catch (ObjectDisposedException) { break; }
             // A Stop that lands before the listener was accepting, which is how a stop racing the
             // start reaches this loop.
-            catch (InvalidOperationException) when (ct.IsCancellationRequested) { gate.Release(); break; }
+            catch (InvalidOperationException) when (ct.IsCancellationRequested) { break; }
             catch (SocketException ex)
             {
-                gate.Release();
                 Log?.Invoke(this, $"Accept failed: {ex.Message}");
-
-                // A failure that persists (out of handles, say) must not spin this loop and the log.
-                try { await Task.Delay(AcceptRetryDelay, ct).ConfigureAwait(false); }
-                catch (OperationCanceledException) { break; }
-                continue;
+                failed = true;
             }
-            catch (Exception)
+            finally
             {
-                // Nothing expected: still gives the slot back, and the failure goes on to end the loop.
-                gate.Release();
-                throw;
+                if (!handedOver) gate.Release();
             }
 
-            _ = ServeConnectionAsync(client, gate, ct);
+            if (!failed) continue;
+
+            // A failure that persists (out of handles, say) must not spin this loop and the log.
+            try { await Task.Delay(AcceptRetryDelay, ct).ConfigureAwait(false); }
+            catch (OperationCanceledException) { break; }
         }
     }
 

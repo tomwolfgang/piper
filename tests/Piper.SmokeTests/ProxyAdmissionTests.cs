@@ -138,6 +138,37 @@ internal static class ProxyAdmissionTests
             runner.IsTrue(again.IsRunning, "and a new one starts");
         });
 
+        await runner.RunAsync("a failing accept gives its slot back, so errors cannot starve the gate", async () =>
+        {
+            using var cts = new CancellationTokenSource();
+            var gate = new SemaphoreSlim(2, 2);
+            var calls = 0;
+            var proxy = new ProxyServer(new ProxyOptions(), ca, new SessionStore());
+
+            // Three failed accepts, then a Stop. With two slots, a slot kept per failure would have
+            // starved the loop at the third.
+            await proxy.AcceptLoopAsync(gate, token =>
+            {
+                if (Interlocked.Increment(ref calls) < 4)
+                    return ValueTask.FromException<TcpClient>(new SocketException((int)SocketError.TooManyOpenSockets));
+                cts.Cancel();
+                return ValueTask.FromException<TcpClient>(new OperationCanceledException(token));
+            }, cts.Token);
+
+            runner.AreEqual(4, calls, "the loop kept accepting after each failure");
+            runner.AreEqual(2, gate.CurrentCount, "and every slot was given back");
+
+            var surprise = new InvalidOperationException("not an error the loop expects");
+            InvalidOperationException? escaped = null;
+            try
+            {
+                await proxy.AcceptLoopAsync(gate, _ => ValueTask.FromException<TcpClient>(surprise), CancellationToken.None);
+            }
+            catch (InvalidOperationException ex) { escaped = ex; }
+            runner.IsTrue(ReferenceEquals(escaped, surprise), "an unexpected failure ends the loop rather than being hidden");
+            runner.AreEqual(2, gate.CurrentCount, "and it too gives its slot back");
+        });
+
         await runner.RunAsync("the cap is clamped to a usable range", () =>
         {
             var options = new ProxyOptions { MaxConcurrentConnections = 0 };

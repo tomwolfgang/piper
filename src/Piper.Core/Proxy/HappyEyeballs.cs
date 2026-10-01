@@ -42,8 +42,8 @@ internal static class HappyEyeballs
                                          || (a.AddressFamily == AddressFamily.InterNetworkV6 && Socket.OSSupportsIPv6))
             .ToArray();
 
-        // The name exists but has only addresses this machine cannot use (IPv6 alone, without IPv6):
-        // say so, rather than reporting an unknown host.
+        // The name exists but every address it has is one this machine cannot use (an IPv6-only name
+        // on a machine with no IPv6): say so, rather than reporting an unknown host.
         if (usable.Length == 0 && resolved.Length > 0)
             throw new SocketException((int)SocketError.AddressFamilyNotSupported);
         return usable;
@@ -128,7 +128,11 @@ internal static class HappyEyeballs
 
                     var done = (Task<T>)finished;
                     running.Remove(done);
-                    if (done.IsCompletedSuccessfully) return done.Result;
+                    if (done.IsCompletedSuccessfully)
+                    {
+                        await pause.CancelAsync().ConfigureAwait(false); // the timer is not left running
+                        return done.Result;
+                    }
 
                     lastFailure = done.IsCanceled
                         ? new OperationCanceledException(attempts.Token)
