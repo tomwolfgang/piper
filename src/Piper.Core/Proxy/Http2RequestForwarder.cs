@@ -224,7 +224,9 @@ internal static class Http2RequestForwarder
                                        or HttpParseException or Http2ProtocolException or OperationCanceledException)
         {
             var detail = ProxyServer.Describe(ex);
-            var failure = HttpResponseData.Simple(502, "Bad Gateway", $"Piper could not reach {host}:{port}.\r\n\r\n{detail}");
+            var failure = ex is ProxyLoopException
+                ? HttpResponseData.Simple(508, "Loop Detected", $"Piper will not forward a request to itself.\r\n\r\n{detail}")
+                : HttpResponseData.Simple(502, "Bad Gateway", $"Piper could not reach {host}:{port}.\r\n\r\n{detail}");
             FinishFailed(session, store, detail, failure);
             return failure;
         }

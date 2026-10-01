@@ -90,12 +90,22 @@ internal static class ProxyAdmissionTests
 
         await runner.RunAsync("connections over the cap wait for a free slot instead of being served at once", async () =>
         {
-            await using var origin = new TestRawOrigin(OkAsync);
+            // The two served connections are busy (waiting on an origin that is held), so there is
+            // no idle one to close for the third and it has to wait.
+            var release = new TaskCompletionSource();
+            await using var origin = new TestRawOrigin(async (head, stream, ct) =>
+            {
+                if (head.Contains("/hold", StringComparison.Ordinal)) await release.Task.WaitAsync(ct);
+                return await OkAsync(head, stream, ct);
+            });
             using var harness = new Harness(ca, o => o.MaxConcurrentConnections = 2);
 
             using var first = await ConnectAsync(harness.Port);
             using var second = await ConnectAsync(harness.Port);
-            runner.IsTrue(await Poll.UntilAsync(() => harness.Proxy.ActiveConnections == 2), "two connections are being served");
+            await WriteAsync(first.GetStream(), Get(origin.Port, "/hold-1"));
+            await WriteAsync(second.GetStream(), Get(origin.Port, "/hold-2"));
+            runner.IsTrue(await Poll.UntilAsync(() => harness.Store.Snapshot().Count(s => s.State == SessionState.AwaitingResponse) == 2),
+                "two connections are being served, each waiting on the origin");
 
             using var third = await ConnectAsync(harness.Port);
             await WriteAsync(third.GetStream(), Get(origin.Port, "/queued"));
@@ -103,12 +113,13 @@ internal static class ProxyAdmissionTests
             runner.AreEqual("", early.Text, "a third connection is not served while two are open");
             runner.IsTrue(harness.Proxy.ActiveConnections <= 2, $"the cap holds ({harness.Proxy.ActiveConnections} served)");
 
-            first.Dispose(); // one slot frees up
+            release.SetResult(); // the origin answers, the two connections end, slots free up
             var late = await ReadAsync(third.GetStream(), "ok", Patience);
             runner.IsTrue(late.Text.Contains("200 OK", StringComparison.Ordinal),
                 $"and is served as soon as one ends (got: {FirstLine(late.Text)})");
             runner.IsTrue(harness.Proxy.ActiveConnections <= 2, "still within the cap");
 
+            first.Dispose();
             second.Dispose();
             third.Dispose();
             runner.IsTrue(await Poll.UntilAsync(() => harness.Proxy.ActiveConnections == 0),
@@ -118,6 +129,173 @@ internal static class ProxyAdmissionTests
             await WriteAsync(fresh.GetStream(), Get(origin.Port, "/after"));
             var after = await ReadAsync(fresh.GetStream(), "ok", Patience);
             runner.IsTrue(after.Text.Contains("200 OK", StringComparison.Ordinal), "and a later connection is served");
+        });
+
+        await runner.RunAsync("a full gate closes the connection idle longest to make room, and says so once", async () =>
+        {
+            // Idle sockets must not be able to starve real clients: every local process connects from
+            // 127.0.0.1, so there is nothing per address to count, but an idle connection is cheap to lose.
+            await using var origin = new TestRawOrigin(OkAsync);
+            var lines = new System.Collections.Concurrent.ConcurrentQueue<string>();
+            using var harness = new Harness(ca, o => o.MaxConcurrentConnections = 2, lines);
+
+            using var first = await ConnectAsync(harness.Port);
+            runner.IsTrue(await Poll.UntilAsync(() => harness.Proxy.ActiveConnections == 1), "the first connection is served");
+            await Task.Delay(50); // so that it is unambiguously the older of the two
+            using var second = await ConnectAsync(harness.Port);
+            runner.IsTrue(await Poll.UntilAsync(() => harness.Proxy.ActiveConnections == 2), "and the second");
+
+            using var third = await ConnectAsync(harness.Port);
+            await WriteAsync(third.GetStream(), Get(origin.Port, "/third"));
+            var clock = Stopwatch.StartNew();
+            var served = await ReadAsync(third.GetStream(), "ok", Patience);
+            runner.IsTrue(served.Text.Contains("200 OK", StringComparison.Ordinal),
+                $"a third client is served though both slots were taken (got: {FirstLine(served.Text)})");
+            runner.IsTrue(clock.Elapsed < TimeSpan.FromSeconds(5), $"promptly ({clock.ElapsedMilliseconds}ms)");
+
+            var oldest = await ReadAsync(first.GetStream(), null, Patience);
+            runner.IsTrue(oldest.Eof && oldest.Text == "", "by closing the connection that had been idle longest");
+            var newer = await ReadAsync(second.GetStream(), null, TimeSpan.FromMilliseconds(300));
+            runner.IsTrue(!newer.Eof, "and only that one");
+
+            runner.AreEqual(1L, harness.Proxy.EvictedIdleConnections, "one eviction is counted");
+            runner.AreEqual(1L, harness.Proxy.SaturationEpisodes, "one saturation episode is counted");
+            runner.AreEqual(1, lines.Count(l => l.Contains("connection limit", StringComparison.OrdinalIgnoreCase)),
+                "and logged once, without naming a host or an address");
+        });
+
+        await runner.RunAsync("a body trickled at a byte per window is cut even though it is never silent", async () =>
+        {
+            // Content-Length 1000, one byte every 300 ms: each gap is inside the 500 ms idle timeout,
+            // so silence alone never trips; the progress floor is what ends it. In a tunnel, because
+            // some antivirus loopback filters hold back an unfinished plaintext message.
+            using var harness = new Harness(ca, o =>
+            {
+                o.DecryptHttps = true;
+                o.IdleTimeout = TimeSpan.FromMilliseconds(500);
+            });
+
+            using var client = await ConnectAsync(harness.Port);
+            await using var tunnel = await OpenTunnelAsync(client, "127.0.0.1:9", ca.RootCertificate);
+            await WriteAsync(tunnel, "POST /drip HTTP/1.1\r\nHost: 127.0.0.1:9\r\nContent-Length: 1000\r\n\r\n");
+
+            using var stop = new CancellationTokenSource();
+            var dripping = Task.Run(async () =>
+            {
+                try
+                {
+                    while (!stop.IsCancellationRequested)
+                    {
+                        await Task.Delay(300, stop.Token);
+                        await tunnel.WriteAsync("a"u8.ToArray(), stop.Token);
+                    }
+                }
+                catch (Exception ex) when (ex is IOException or OperationCanceledException or ObjectDisposedException
+                                               or InvalidOperationException)
+                {
+                    // The proxy closed on us, which is the point; or the test ended.
+                }
+            });
+
+            var clock = Stopwatch.StartNew();
+            var reply = await ReadAsync(tunnel, null, TimeSpan.FromSeconds(8));
+            await stop.CancelAsync();
+            await dripping;
+
+            runner.IsTrue(reply.Text.StartsWith("HTTP/1.1 408", StringComparison.Ordinal),
+                $"it is told 408 (got: {FirstLine(reply.Text)})");
+            runner.IsTrue(clock.Elapsed < TimeSpan.FromSeconds(6), $"within a couple of windows ({clock.ElapsedMilliseconds}ms)");
+
+            var session = await WaitForSessionAsync(harness.Store, s => s.Path == "/drip");
+            runner.AreEqual(SessionState.Failed, session.State, "and recorded as failed");
+            runner.IsTrue(await Poll.UntilAsync(() => harness.Proxy.ActiveConnections == 0), "and its slot is given back");
+        });
+
+        await runner.RunAsync("a client that asks for a download and never reads it is cut, not waited on for ever", async () =>
+        {
+            const long Size = 256L * 1024 * 1024;
+            await using var origin = new TestRawOrigin(async (_, stream, ct) =>
+            {
+                await TestRawOrigin.WriteAsync(stream, $"HTTP/1.1 200 OK\r\nContent-Length: {Size}\r\nConnection: close\r\n\r\n", ct);
+                var chunk = new byte[64 * 1024];
+                for (long sent = 0; sent < Size; sent += chunk.Length) await stream.WriteAsync(chunk, ct);
+                return false;
+            });
+            using var harness = new Harness(ca, o => o.IdleTimeout = TimeSpan.FromMilliseconds(800));
+
+            using var client = await ConnectAsync(harness.Port);
+            await WriteAsync(client.GetStream(), Get(origin.Port, "/never-read")); // and then reads nothing
+
+            runner.IsTrue(await Poll.UntilAsync(() =>
+                    harness.Store.Snapshot().Any(s => s.Path == "/never-read" && s.State == SessionState.Failed)),
+                "the transfer is failed once the client has stopped reading for the idle timeout");
+            runner.IsTrue(await Poll.UntilAsync(() => harness.Proxy.ActiveConnections == 0), "and its slot is given back");
+        });
+
+        await runner.RunAsync("a request for the proxy's own address is refused with 508 instead of looping through it", async () =>
+        {
+            using var harness = new Harness(ca, o => o.MaxConcurrentConnections = 2);
+
+            foreach (var host in new[] { "127.0.0.1", "localhost" })
+            {
+                using var client = await ConnectAsync(harness.Port);
+                await WriteAsync(client.GetStream(),
+                    $"GET http://{host}:{harness.Port}/loop HTTP/1.1\r\nHost: {host}:{harness.Port}\r\n\r\n");
+                var reply = await ReadAsync(client.GetStream(), "\r\n\r\n", Patience);
+                runner.IsTrue(reply.Text.StartsWith("HTTP/1.1 508", StringComparison.Ordinal),
+                    $"{host}: 508 Loop Detected (got: {FirstLine(reply.Text)})");
+            }
+
+            var session = await WaitForSessionAsync(harness.Store, s => s.Path == "/loop");
+            runner.AreEqual(SessionState.Failed, session.State, "and recorded as failed");
+            runner.IsTrue(session.Error?.Contains("loop", StringComparison.OrdinalIgnoreCase) == true, $"with the reason (got: {session.Error})");
+
+            using var other = new Harness(ca, o => o.DecryptHttps = false);
+            using var tunnel = await ConnectAsync(other.Port);
+            await WriteAsync(tunnel.GetStream(), $"CONNECT 127.0.0.1:{other.Port} HTTP/1.1\r\nHost: 127.0.0.1:{other.Port}\r\n\r\n");
+            var refused = await ReadAsync(tunnel.GetStream(), "\r\n\r\n", Patience);
+            runner.IsTrue(refused.Text.StartsWith("HTTP/1.1 508", StringComparison.Ordinal),
+                $"a CONNECT to the proxy itself too (got: {FirstLine(refused.Text)})");
+        });
+
+        await runner.RunAsync("a request head has a total size cap, not only per line and per header count", async () =>
+        {
+            await using var origin = new TestRawOrigin(OkAsync);
+            using var harness = new Harness(ca);
+
+            string WithHeaders(int count) => Get(origin.Port, "/big-head")[..^2]
+                + string.Concat(Enumerable.Range(0, count).Select(i => $"X-Pad-{i}: {new string('a', 20_000)}\r\n")) + "\r\n";
+
+            using var fits = await ConnectAsync(harness.Port);
+            await WriteAsync(fits.GetStream(), WithHeaders(3));
+            var served = await ReadAsync(fits.GetStream(), "ok", Patience);
+            runner.IsTrue(served.Text.Contains("200 OK", StringComparison.Ordinal), $"60 KB of headers is served (got: {FirstLine(served.Text)})");
+
+            var before = origin.ConnectionCount;
+            using var tooBig = await ConnectAsync(harness.Port);
+            try { await WriteAsync(tooBig.GetStream(), WithHeaders(6)); }
+            catch (IOException) { /* the proxy may close before the whole head is sent */ }
+            var refused = await ReadAsync(tooBig.GetStream(), null, Patience);
+            runner.IsTrue(refused.Eof, "120 KB of headers gets the connection closed");
+            runner.AreEqual(before, origin.ConnectionCount, "and is never forwarded");
+        });
+
+        await runner.RunAsync("an accept loop that fails unexpectedly is logged and the proxy stops reporting that it runs", async () =>
+        {
+            var lines = new System.Collections.Concurrent.ConcurrentQueue<string>();
+            var proxy = new ProxyServer(new ProxyOptions { Port = 0 }, ca, new SessionStore());
+            proxy.Log += (_, message) => lines.Enqueue(message);
+            proxy.Start();
+            runner.IsTrue(proxy.IsRunning, "it started");
+
+            await proxy.RunAcceptLoopAsync(new SemaphoreSlim(1, 1),
+                _ => ValueTask.FromException<TcpClient>(new InvalidOperationException("not an error the loop expects")),
+                () => false, CancellationToken.None);
+
+            runner.IsTrue(!proxy.IsRunning, "it no longer claims to be running");
+            runner.IsTrue(lines.Any(l => l.Contains("Accept loop failed", StringComparison.Ordinal)), "and says why");
+            await proxy.StopAsync(); // and stopping afterwards does not throw
+            runner.IsTrue(true, "stopping it afterwards is clean");
         });
 
         await runner.RunAsync("a proxy stopped straight after it started stops cleanly and can start again", async () =>
@@ -153,7 +331,7 @@ internal static class ProxyAdmissionTests
                     return ValueTask.FromException<TcpClient>(new SocketException((int)SocketError.TooManyOpenSockets));
                 cts.Cancel();
                 return ValueTask.FromException<TcpClient>(new OperationCanceledException(token));
-            }, cts.Token);
+            }, () => false, cts.Token);
 
             runner.AreEqual(4, calls, "the loop kept accepting after each failure");
             runner.AreEqual(2, gate.CurrentCount, "and every slot was given back");
@@ -162,7 +340,7 @@ internal static class ProxyAdmissionTests
             InvalidOperationException? escaped = null;
             try
             {
-                await proxy.AcceptLoopAsync(gate, _ => ValueTask.FromException<TcpClient>(surprise), CancellationToken.None);
+                await proxy.AcceptLoopAsync(gate, _ => ValueTask.FromException<TcpClient>(surprise), () => false, CancellationToken.None);
             }
             catch (InvalidOperationException ex) { escaped = ex; }
             runner.IsTrue(ReferenceEquals(escaped, surprise), "an unexpected failure ends the loop rather than being hidden");
@@ -186,12 +364,14 @@ internal static class ProxyAdmissionTests
         await runner.RunAsync("a slow upload that keeps sending is not cut for taking long", async () =>
         {
             // The old read wrapped line, headers and body in one budget of IdleTimeout, so this
-            // 2.4 second upload died at 0.6 seconds, silently. Every byte now re-arms the timer.
+            // 3 second upload died at 1.5 seconds, silently. Every byte now re-arms the timer. The
+            // progress floor is turned right down: this is about a slow client that is still moving.
             await using var origin = new TestRawOrigin(OkAsync);
             using var harness = new Harness(ca, o =>
             {
-                o.IdleTimeout = TimeSpan.FromMilliseconds(600);
-                o.RequestHeadTimeout = TimeSpan.FromMilliseconds(700);
+                o.IdleTimeout = TimeSpan.FromMilliseconds(1500);
+                o.RequestHeadTimeout = TimeSpan.FromMilliseconds(1700);
+                o.MinRequestBodyBytesPerWindow = 1;
             });
 
             using var client = await ConnectAsync(harness.Port);
@@ -201,7 +381,7 @@ internal static class ProxyAdmissionTests
             var clock = Stopwatch.StartNew();
             for (var i = 0; i < 12; i++)
             {
-                await Task.Delay(200);
+                await Task.Delay(250);
                 await stream.WriteAsync("x"u8.ToArray());
             }
 
@@ -240,9 +420,11 @@ internal static class ProxyAdmissionTests
             runner.AreEqual(408, session.StatusCode, "and the answer it was given");
         });
 
-        await runner.RunAsync("a client that says nothing at all is closed quietly after the idle timeout", async () =>
+        await runner.RunAsync("a client that says nothing at all is closed quietly after the request head timeout", async () =>
         {
-            using var harness = new Harness(ca, o => o.IdleTimeout = TimeSpan.FromMilliseconds(400));
+            // The idle timeout stays at its default: a connection's first request waits only the
+            // (shorter) head timeout, so a flood of silent sockets cannot hold slots for two minutes.
+            using var harness = new Harness(ca, o => o.RequestHeadTimeout = TimeSpan.FromMilliseconds(400));
 
             using var client = await ConnectAsync(harness.Port);
             var reply = await ReadAsync(client.GetStream(), null, Patience);
@@ -490,12 +672,14 @@ internal static class ProxyAdmissionTests
 
     private sealed class Harness : IDisposable
     {
-        public Harness(CertificateAuthority ca, Action<ProxyOptions>? configure = null)
+        public Harness(CertificateAuthority ca, Action<ProxyOptions>? configure = null,
+            System.Collections.Concurrent.ConcurrentQueue<string>? log = null)
         {
             Store = new SessionStore();
             var options = new ProxyOptions { Port = 0 };
             configure?.Invoke(options);
             Proxy = new ProxyServer(options, ca, Store);
+            if (log is not null) Proxy.Log += (_, message) => log.Enqueue(message);
             Proxy.Start();
             Port = Proxy.Endpoint!.Port;
         }

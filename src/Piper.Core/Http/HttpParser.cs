@@ -7,6 +7,10 @@ public static class HttpParser
 {
     private const long MaxBodyBytes = 256L * 1024 * 1024;
 
+    /// <summary>The most a request line and its headers may add up to. Each line and the header
+    /// count were already capped, which on their own allowed hundreds of megabytes of headers.</summary>
+    private const int MaxRequestHeadBytes = 64 * 1024;
+
     /// <summary>
     /// How many interim (1xx) responses may precede the real one before the exchange is treated as
     /// hostile. RFC 9112 puts no limit on them, so without a cap an origin can hold a connection
@@ -53,7 +57,7 @@ public static class HttpParser
             HttpVersion = parts.Length > 2 ? parts[2] : "HTTP/1.0",
         };
 
-        request.Headers = await ReadHeadersAsync(reader, ct).ConfigureAwait(false);
+        request.Headers = await ReadHeadersAsync(reader, ct, MaxRequestHeadBytes - line.Length - 2).ConfigureAwait(false);
         request.Url = ResolveUrl(request);
         return request;
     }
@@ -181,7 +185,8 @@ public static class HttpParser
                && long.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out length);
     }
 
-    private static async Task<HeaderCollection> ReadHeadersAsync(HttpStreamReader reader, CancellationToken ct)
+    private static async Task<HeaderCollection> ReadHeadersAsync(
+        HttpStreamReader reader, CancellationToken ct, long budget = long.MaxValue)
     {
         var headers = new HeaderCollection();
         while (true)
@@ -189,6 +194,9 @@ public static class HttpParser
             var line = await reader.ReadLineAsync(ct).ConfigureAwait(false);
             if (line is null) throw new HttpParseException("Connection closed inside the header block.");
             if (line.Length == 0) return headers;
+
+            budget -= line.Length + 2;
+            if (budget < 0) throw new HttpParseException($"Request head exceeded {MaxRequestHeadBytes} bytes.");
 
             if (line[0] == ' ' || line[0] == '\t')
             {

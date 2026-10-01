@@ -75,7 +75,7 @@ internal sealed class UpstreamConnection : IDisposable
             timeout.CancelAfter(options.ConnectTimeout);
             try
             {
-                client = await HappyEyeballs.ConnectAsync(remapping.Host, port, options.ConnectionAttemptDelay, timeout.Token)
+                client = await HappyEyeballs.ConnectAsync(remapping.Host, port, options, timeout.Token)
                     .ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (timeout.IsCancellationRequested && !ct.IsCancellationRequested)

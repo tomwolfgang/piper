@@ -22,13 +22,20 @@ internal static class HappyEyeballs
     internal const int MaxAttempts = 6;
 
     /// <summary>Resolves <paramref name="host"/> and returns the first connection that is established.</summary>
-    /// <exception cref="SocketException">Every attempt failed; this is the last attempt's error.</exception>
+    /// <exception cref="SocketException">Every attempt failed; this is the most informative attempt's error.</exception>
+    /// <exception cref="ProxyLoopException">An address of the name is the running proxy itself.</exception>
     /// <exception cref="OperationCanceledException"><paramref name="ct"/> was cancelled.</exception>
-    public static async Task<Socket> ConnectAsync(string host, int port, TimeSpan attemptDelay, CancellationToken ct)
+    public static async Task<Socket> ConnectAsync(string host, int port, ProxyOptions options, CancellationToken ct)
     {
-        var addresses = Order(await ResolveAsync(host, ct).ConfigureAwait(false));
-        return await RaceAsync(addresses, (address, token) => ConnectOneAsync(address, port, token),
-            attemptDelay, MaxAttempts, ct).ConfigureAwait(false);
+        var resolved = await ResolveAsync(host, ct).ConfigureAwait(false);
+
+        // Refused before anything is dialled: a request for the proxy's own address would be
+        // forwarded straight back to it, once per hop, each hop holding a connection slot.
+        if (resolved.Any(address => options.IsOwnEndpoint(address, port)))
+            throw new ProxyLoopException(host, port);
+
+        return await RaceAsync(Order(resolved), (address, token) => ConnectOneAsync(address, port, token),
+            options.ConnectionAttemptDelay, MaxAttempts, ct).ConfigureAwait(false);
     }
 
     private static async Task<IPAddress[]> ResolveAsync(string host, CancellationToken ct)
@@ -134,9 +141,14 @@ internal static class HappyEyeballs
                         return done.Result;
                     }
 
-                    lastFailure = done.IsCanceled
+                    var failure = done.IsCanceled
                         ? new OperationCanceledException(attempts.Token)
                         : done.Exception!.GetBaseException();
+
+                    // "Network unreachable" from an address family this path cannot use says less
+                    // than a refusal or a timeout from one that can, whichever came last.
+                    if (lastFailure is null || !IsUninformative(failure) || IsUninformative(lastFailure))
+                        lastFailure = failure;
                     if (started < total) break;
                 }
 
@@ -154,6 +166,12 @@ internal static class HappyEyeballs
             foreach (var loser in running) _ = ReleaseAsync(loser);
         }
     }
+
+    private static bool IsUninformative(Exception failure) => failure is SocketException
+    {
+        SocketErrorCode: SocketError.NetworkUnreachable or SocketError.HostUnreachable
+            or SocketError.AddressFamilyNotSupported or SocketError.AddressNotAvailable,
+    };
 
     private static Task<T> Start<T>(
         IPAddress address, Func<IPAddress, CancellationToken, Task<T>> attempt, CancellationToken ct)

@@ -28,29 +28,44 @@ public sealed class ProxyOptions
     public TimeSpan ConnectTimeout { get; set; } = TimeSpan.FromSeconds(15);
 
     /// <summary>
-    /// How long a client may say nothing before its connection is closed: waiting for the next
-    /// request on a kept-alive connection, or part-way through sending a request body. It is
-    /// re-armed by every byte received, so a slow but steady upload is never cut for taking long;
-    /// only silence is. An idle keep-alive connection is closed quietly, a stalled request body is
-    /// answered with <c>408</c> and recorded as a failed session.
+    /// How long a client may say nothing before its connection is closed. It applies to waiting for
+    /// the next request on a kept-alive connection (the first request of a connection waits only
+    /// <see cref="RequestHeadTimeout"/>), to each pause while a request body is being sent, and to
+    /// each write of a response to a client that has stopped reading. An idle connection is closed
+    /// quietly; a stalled request body is answered with <c>408</c> (best effort: a client that is
+    /// not reading, or a TLS stream broken by the cancelled read, may not receive it) and recorded as
+    /// a failed session. A body is also held to <see cref="MinRequestBodyBytesPerWindow"/>, so
+    /// trickling a byte per window does not keep a connection for ever.
     /// </summary>
     public TimeSpan IdleTimeout { get; set; } = TimeSpan.FromSeconds(120);
 
     /// <summary>
-    /// How long a client has, from the first byte of a request, to finish sending its request line
-    /// and headers, and how long it has to complete the TLS handshake of a decrypted tunnel. A
-    /// budget rather than an idle timeout on purpose: a peer that drips one byte every few seconds
-    /// stays "active" for ever and would otherwise hold a connection slot indefinitely. It does not
-    /// cover the body, which is only bounded by <see cref="IdleTimeout"/>.
+    /// How long a client has to send the first byte of the first request on a connection, then,
+    /// from the first byte of any request, to finish its request line and headers, and how long it
+    /// has to complete the TLS handshake of a decrypted tunnel. A budget rather than an idle timeout
+    /// on purpose: a peer that drips one byte every few seconds stays "active" for ever and would
+    /// otherwise hold a connection slot indefinitely. It does not cover the body.
     /// </summary>
     public TimeSpan RequestHeadTimeout { get; set; } = TimeSpan.FromSeconds(30);
 
     /// <summary>
+    /// The least a request body must deliver in each <see cref="IdleTimeout"/>-long window for the
+    /// upload to be allowed to continue (default 1,024 bytes, about 9 bytes a second at the default
+    /// timeout). Silence is already cut by <see cref="IdleTimeout"/>; this is what stops a client
+    /// that sends one byte just inside every window, and so never looks silent.
+    /// </summary>
+    public long MinRequestBodyBytesPerWindow { get; set; } = 1024;
+
+    /// <summary>
     /// How many client connections are served at once. A connection over the limit is not refused:
     /// it waits, unserved, in the operating system's accept queue (at most 512 of them; beyond that
-    /// the system itself turns clients away) until a connection ends, so a burst is absorbed and a
-    /// flood cannot make the proxy allocate without bound. Read when the proxy starts; clamped to
-    /// 1..100,000.
+    /// the system itself turns clients away) until a slot frees. When the limit is reached the
+    /// connection that has been idle longest (waiting for a first byte, or between kept-alive
+    /// requests) is closed to make room, so silent sockets cannot starve real clients. It bounds the
+    /// number of connections, not what each may hold: a request body is still read into memory up to
+    /// the declared length (at most 256 MB), so the worst case is this many such connections.
+    /// There is deliberately no per-address quota: every local process connects from 127.0.0.1.
+    /// Read when the proxy starts; clamped to 1..100,000.
     /// </summary>
     public int MaxConcurrentConnections
     {
@@ -139,6 +154,30 @@ public sealed class ProxyOptions
     /// the handshake but drops later UDP leaves the request hanging with no error to fall back on,
     /// which is worse than never having tried h3 at all.</summary>
     public TimeSpan Http3ResponseTimeout { get; set; } = TimeSpan.FromSeconds(15);
+
+    /// <summary>Where the running <see cref="ProxyServer"/> is listening; null while none is. Set by
+    /// the server so that a connection made on its behalf can tell it would be dialling itself.</summary>
+    internal IPEndPoint? ListeningEndpoint { get; set; }
+
+    /// <summary>
+    /// True when connecting to <paramref name="address"/>:<paramref name="port"/> would reach the
+    /// running proxy itself. Such a request would be forwarded back into the proxy, each hop holding a
+    /// connection slot, until the cap is exhausted. The port is compared first, so the common case
+    /// costs nothing.
+    /// </summary>
+    internal bool IsOwnEndpoint(IPAddress address, int port)
+    {
+        if (ListeningEndpoint is not { } own || port != own.Port) return false;
+
+        if (address.IsIPv4MappedToIPv6) address = address.MapToIPv4();
+        var listensEverywhere = own.Address.Equals(IPAddress.Any) || own.Address.Equals(IPAddress.IPv6Any);
+        if (!listensEverywhere) return address.Equals(own.Address);
+
+        if (IPAddress.IsLoopback(address) || address.Equals(IPAddress.Any) || address.Equals(IPAddress.IPv6Any)) return true;
+        return System.Net.NetworkInformation.NetworkInterface.GetAllNetworkInterfaces()
+            .SelectMany(nic => nic.GetIPProperties().UnicastAddresses)
+            .Any(unicast => unicast.Address.Equals(address));
+    }
 
     public bool ShouldDecrypt(string host)
     {

@@ -219,16 +219,25 @@ targets, so `Invoke-WebRequest -Proxy` would never reach Piper.
   both sides close rather than until the first one does. An upgrade is always sent to the origin
   over HTTP/1.1, even when the origin would negotiate HTTP/2 for an ordinary request, because
   HTTP/2 has no `Connection` or `Upgrade` header to carry it
-- Clients are treated as hostile too. At most `MaxConcurrentConnections` (default 1,024) are served
-  at once; the rest wait in the operating system's accept queue until one ends. A client has
-  `RequestHeadTimeout` (default 30 s) from its first byte to send a request's line and headers and
-  to complete a decrypted tunnel's TLS handshake, so one that drips bytes cannot hold a connection
-  for ever. The body is bounded only by silence (`IdleTimeout`, default 120 s, re-armed by every
-  byte), so a large upload that keeps flowing is never cut for taking long; a client that goes
-  silent mid-body gets a `408` and a failed session. Connecting to a host name tries its addresses
-  as RFC 8305 describes (IPv6 and IPv4 alternating, one more every 250 ms or as soon as one fails,
-  at most six), so an unreachable IPv6 address ahead of a working IPv4 one costs a fraction of a
-  second rather than the whole connect timeout
+- Clients are limited, but a local proxy cannot treat them as fully trusted or fully hostile.
+  What is bounded: at most `MaxConcurrentConnections` (default 1,024) are served at once, and the
+  rest wait in the operating system's accept queue. When that limit is reached the log says so
+  once, and each waiting client closes the connection that has been idle longest (no per-address
+  quota: every local process connects from 127.0.0.1). A connection's first byte must arrive within
+  `RequestHeadTimeout` (30 s), a request's line and headers within that time in total and at most
+  64 KB, and so must a decrypted tunnel's TLS handshake. A body may pause for at most `IdleTimeout`
+  (120 s) and must deliver `MinRequestBodyBytesPerWindow` (1,024) bytes in each such window, so a
+  slow upload that keeps moving succeeds and a trickle does not; a client cut off mid-request gets
+  a `408` (best effort, especially over TLS) and a failed session. A client that stops reading a
+  response is cut after `IdleTimeout`. A request for the proxy's own address is answered `508`
+  instead of looping through it. What is **not** bounded: a request body is read into memory up to
+  its declared length (at most 256 MB) as soon as the headers arrive, whether or not the bytes
+  follow, so the worst case is the connection limit times that; an established blind `CONNECT`
+  tunnel or WebSocket relay has no idle limit, and a browser-facing HTTP/2 connection only the
+  five-minute one of its own. Connecting to a host name tries its addresses as RFC 8305 describes
+  (IPv6 and IPv4 alternating, one more every 250 ms or as soon as one fails, at most six), so an
+  unreachable IPv6 address ahead of a working IPv4 one costs a fraction of a second rather than the
+  whole connect timeout
 - Virtual-mode session grid that stays responsive under load
 - Request and response inspectors: headers, decoded body, pretty-printed JSON, hex dump
 - Composer with search, raw-request editing, repeat-N, and verbatim header sending
