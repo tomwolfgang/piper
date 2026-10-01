@@ -155,9 +155,11 @@ internal static class HappyEyeballs
     private static async Task ReleaseAsync<T>(Task<T> loser) where T : class, IDisposable
     {
         try { (await loser.ConfigureAwait(false)).Dispose(); }
-        catch (Exception ex) when (ex is SocketException or OperationCanceledException or ObjectDisposedException)
+        catch (Exception)
         {
-            // It lost: cancelled by the winner, or failed on its own. Neither is the caller's business.
+            // It lost, so whatever it ended in (cancelled by the winner, failed on its own, anything
+            // a connect delegate throws) is discarded unobserved on purpose: there is no result to
+            // dispose and nobody waiting for the error.
         }
     }
 }

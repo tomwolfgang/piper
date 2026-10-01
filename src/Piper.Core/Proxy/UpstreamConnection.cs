@@ -73,8 +73,17 @@ internal sealed class UpstreamConnection : IDisposable
         using (var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct))
         {
             timeout.CancelAfter(options.ConnectTimeout);
-            client = await HappyEyeballs.ConnectAsync(remapping.Host, port, options.ConnectionAttemptDelay, timeout.Token)
-                .ConfigureAwait(false);
+            try
+            {
+                client = await HappyEyeballs.ConnectAsync(remapping.Host, port, options.ConnectionAttemptDelay, timeout.Token)
+                    .ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (timeout.IsCancellationRequested && !ct.IsCancellationRequested)
+            {
+                // An IOException so that every caller reports it as the upstream failing, with a
+                // reason, instead of as an anonymous cancellation.
+                throw new IOException($"Timed out after {options.ConnectTimeout.TotalSeconds:0.#}s connecting to {host}:{port}.");
+            }
         }
 
         Stream stream = new NetworkStream(client, ownsSocket: true);
@@ -114,6 +123,13 @@ internal sealed class UpstreamConnection : IDisposable
                 await ssl.DisposeAsync().ConfigureAwait(false);
                 client.Dispose();
                 throw new AuthenticationException($"{ex.Message} ({rejectionDetail})", ex);
+            }
+            catch (Exception) when (handshakeTimeout.IsCancellationRequested && !ct.IsCancellationRequested)
+            {
+                await ssl.DisposeAsync().ConfigureAwait(false);
+                client.Dispose();
+                throw new IOException(
+                    $"Timed out after {options.ConnectTimeout.TotalSeconds:0.#}s waiting for the TLS handshake with {host}:{port}.");
             }
             catch
             {

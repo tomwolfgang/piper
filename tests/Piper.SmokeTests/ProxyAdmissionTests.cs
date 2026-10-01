@@ -292,6 +292,34 @@ internal static class ProxyAdmissionTests
 
         // ------------------------------------------------------------------ connecting
 
+        await runner.RunAsync("an origin that accepts the TCP connection and never answers the TLS handshake fails the request", async () =>
+        {
+            // Nothing bounded this handshake: the request, and the client connection slot it
+            // occupied, waited for an origin that was never going to speak.
+            await using var origin = new TestRawOrigin(OkAsync); // takes the connection, never writes
+            using var harness = new Harness(ca, o =>
+            {
+                o.DecryptHttps = true;
+                o.ConnectTimeout = TimeSpan.FromMilliseconds(500);
+            });
+
+            using var client = await ConnectAsync(harness.Port);
+            await using var tunnel = await OpenTunnelAsync(client, $"127.0.0.1:{origin.Port}", ca.RootCertificate);
+            await WriteAsync(tunnel, $"GET /silent-handshake HTTP/1.1\r\nHost: 127.0.0.1:{origin.Port}\r\n\r\n");
+
+            var clock = Stopwatch.StartNew();
+            var reply = await ReadAsync(tunnel, "\r\n\r\n", Patience);
+            runner.IsTrue(reply.Text.StartsWith("HTTP/1.1 502", StringComparison.Ordinal),
+                $"the client gets a 502 (got: {FirstLine(reply.Text)})");
+            runner.IsTrue(clock.Elapsed < TimeSpan.FromSeconds(5), $"promptly ({clock.ElapsedMilliseconds}ms)");
+
+            var session = await WaitForSessionAsync(harness.Store, s => s.Path == "/silent-handshake");
+            runner.AreEqual(SessionState.Failed, session.State, "and the session is failed");
+            runner.IsTrue(session.Error?.Contains("TLS handshake", StringComparison.Ordinal) == true
+                          && session.Error.Contains("Timed out", StringComparison.Ordinal),
+                $"with a reason that names the handshake (got: {session.Error})");
+        });
+
         await runner.RunAsync("a name is reached over IPv4 when the origin listens only there", async () =>
         {
             // "localhost" lists ::1 as well as 127.0.0.1 on most machines, and the origin is on the
