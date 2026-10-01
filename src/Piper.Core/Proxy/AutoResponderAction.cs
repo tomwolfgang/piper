@@ -38,6 +38,13 @@ public sealed class AutoResponderAction
 {
     private enum Kind { Passthrough, Status, File, Raw, Inline, Redirect, ClientRedirect, Drop, Reset, Cors }
 
+    /// <summary>
+    /// The longest pause a rule can ask for. Clamping the running total after every prefix is what
+    /// keeps the sum from overflowing; the particular value, one hour, is a deliberate and documented
+    /// behaviour change (a single longer <c>*delay:</c> now waits an hour), not a limit anything else needs.
+    /// </summary>
+    public const long MaxDelayMilliseconds = 60L * 60 * 1000;
+
     private readonly Kind _kind;
     private readonly string _argument;
     private readonly int _status;
@@ -70,11 +77,20 @@ public sealed class AutoResponderAction
     public static AutoResponderAction Parse(string? expression)
     {
         var text = expression?.Trim() ?? string.Empty;
-        var delay = TimeSpan.Zero;
 
-        // *delay: accumulates and then hands the rest of the string to the real action.
-        while (TryTakeDelay(ref text, out var milliseconds))
-            delay += TimeSpan.FromMilliseconds(milliseconds);
+        // *delay: accumulates and then hands the rest of the string to the real action. Walks an
+        // offset instead of re-slicing, and clamps the total: a rules file is hostile input and
+        // this runs when it loads, so a long run of prefixes must neither take quadratic time nor
+        // overflow the TimeSpan (about 429,000 stacked *delay:2147483647 prefixes do). Bounding the
+        // accumulated total is what prevents that; the one-hour value itself is a deliberate,
+        // documented behaviour change (a single *delay: above an hour now waits an hour; see the README).
+        var offset = 0;
+        var delayMilliseconds = 0L;
+        while (TryTakeDelay(text, ref offset, out var milliseconds))
+            delayMilliseconds = Math.Min(delayMilliseconds + milliseconds, MaxDelayMilliseconds);
+
+        var delay = TimeSpan.FromMilliseconds(delayMilliseconds);
+        if (offset > 0) text = text[offset..];
 
         if (text.Length == 0) return new AutoResponderAction(Kind.Passthrough, delay: delay);
 
@@ -242,17 +258,20 @@ public sealed class AutoResponderAction
         return true;
     }
 
-    private static bool TryTakeDelay(ref string text, out int milliseconds)
+    private static bool TryTakeDelay(string text, ref int offset, out int milliseconds)
     {
         milliseconds = 0;
-        if (!text.StartsWith("*delay:", StringComparison.OrdinalIgnoreCase)) return false;
+        const string prefix = "*delay:";
+        var rest = text.AsSpan(offset);
+        if (!rest.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) return false;
 
-        var rest = text["*delay:".Length..];
+        rest = rest[prefix.Length..];
         var end = 0;
         while (end < rest.Length && char.IsAsciiDigit(rest[end])) end++;
         if (end == 0 || !int.TryParse(rest[..end], out milliseconds)) return false;
 
-        text = rest[end..].TrimStart(' ', '\t', ';');
+        while (end < rest.Length && rest[end] is ' ' or '\t' or ';') end++;
+        offset += prefix.Length + end;
         return true;
     }
 

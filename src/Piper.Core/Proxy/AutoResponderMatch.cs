@@ -111,12 +111,17 @@ public sealed class AutoResponderMatch
         var text = expression?.Trim() ?? string.Empty;
         if (text.Length == 0) return Empty;
 
+        // A span, not repeated string slices: a rules file is hostile input and "NOT:NOT:NOT:..."
+        // repeated across megabytes would otherwise copy the remainder once per prefix.
         var negated = false;
-        while (TryStripPrefix(ref text, "NOT:"))
+        var rest = text.AsSpan();
+        while (rest.StartsWith("NOT:", StringComparison.OrdinalIgnoreCase))
         {
             negated = !negated;
-            text = text.TrimStart();
+            rest = rest["NOT:".Length..].TrimStart();
         }
+
+        text = rest.Length == text.Length ? text : rest.ToString();
 
         if (TryStripPrefix(ref text, "EXACT:")) return new AutoResponderMatch(Kind.Exact, text, negated);
         if (TryStripPrefix(ref text, "METHOD:")) return new AutoResponderMatch(Kind.Method, text, negated);
