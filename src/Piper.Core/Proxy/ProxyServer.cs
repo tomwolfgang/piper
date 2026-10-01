@@ -194,8 +194,8 @@ public sealed class ProxyServer : IAsyncDisposable
         private readonly Lock _gate = new();
 
         // One source per idle period, so that an eviction aimed at one wait can never close the
-        // connection's next. Not disposed on purpose: it has no timer and no wait handle, and an
-        // eviction may race the end of the wait, where cancelling a disposed source would throw.
+        // connection's next. Whoever takes it out of this field under the lock (the end of the wait,
+        // or an eviction) is its only user from then on, and disposes it.
         private CancellationTokenSource? _evict;
         private long _idleSince;
 
@@ -218,11 +218,15 @@ public sealed class ProxyServer : IAsyncDisposable
 
         public void EndIdle()
         {
+            CancellationTokenSource? ended;
             lock (_gate)
             {
+                ended = _evict;
                 _evict = null;
                 _idleSince = 0;
             }
+
+            ended?.Dispose();
         }
 
         /// <summary>Cancels the current idle period, if there is one. False when the connection is busy.</summary>
@@ -238,6 +242,7 @@ public sealed class ProxyServer : IAsyncDisposable
 
             if (evict is null) return false;
             evict.Cancel();
+            evict.Dispose();
             return true;
         }
     }

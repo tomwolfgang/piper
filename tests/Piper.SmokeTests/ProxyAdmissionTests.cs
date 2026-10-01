@@ -280,6 +280,32 @@ internal static class ProxyAdmissionTests
             runner.AreEqual(before, origin.ConnectionCount, "and is never forwarded");
         });
 
+        await runner.RunAsync("the guarded client stream enforces its write deadline and progress floor on the sync surface too", async () =>
+        {
+            async Task<Type?> ThrownAsync(Func<Task> action)
+            {
+                try { await action(); return null; }
+                catch (Exception ex) { return ex.GetType(); }
+            }
+
+            using var stalled = new GuardedClientStream(new StallingStream(), TimeSpan.FromMilliseconds(200));
+            var clock = Stopwatch.StartNew();
+            runner.AreEqual(typeof(IOException), await ThrownAsync(() => stalled.WriteAsync(new byte[1]).AsTask()), "an async write that never completes ends in an IOException");
+            runner.AreEqual(typeof(IOException), await ThrownAsync(() => Task.Run(() => stalled.Write(new byte[1], 0, 1))), "and so does a synchronous one");
+            runner.IsTrue(clock.Elapsed < TimeSpan.FromSeconds(5), $"promptly ({clock.ElapsedMilliseconds}ms)");
+
+            stalled.ArmProgressFloor(TimeSpan.FromMilliseconds(50), 1000);
+            await Task.Delay(120);
+            runner.AreEqual(typeof(HttpStalledException), await ThrownAsync(async () => _ = await stalled.ReadAsync(new byte[8]).AsTask()),
+                "a read that completes a window short of the minimum is a stall");
+            stalled.ArmProgressFloor(TimeSpan.FromMilliseconds(50), 1000);
+            await Task.Delay(120);
+            runner.AreEqual(typeof(HttpStalledException), await ThrownAsync(() => Task.Run(() => _ = stalled.Read(new byte[8], 0, 8))),
+                "on the synchronous surface too");
+            stalled.DisarmProgressFloor();
+            runner.IsTrue(await ThrownAsync(async () => _ = await stalled.ReadAsync(new byte[8]).AsTask()) is null, "and a disarmed floor never throws");
+        });
+
         await runner.RunAsync("blank lines before a request count against the head cap", async () =>
         {
             await using var origin = new TestRawOrigin(OkAsync);
@@ -726,6 +752,35 @@ internal static class ProxyAdmissionTests
     }
 
     // -------------------------------------------------------------------------- helpers
+
+    /// <summary>Hands out one byte per read at once, and never completes a write.</summary>
+    private sealed class StallingStream : Stream
+    {
+        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            buffer.Span[0] = 1;
+            return ValueTask.FromResult(1);
+        }
+
+        public override int Read(byte[] buffer, int offset, int count)
+        {
+            buffer[offset] = 1;
+            return 1;
+        }
+
+        public override async ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken = default) =>
+            await Task.Delay(Timeout.Infinite, cancellationToken);
+
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => true;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => 0; set => throw new NotSupportedException(); }
+        public override void Flush() { }
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+    }
 
     private sealed class Fake(IPAddress address) : IDisposable
     {

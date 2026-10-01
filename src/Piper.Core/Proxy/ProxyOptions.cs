@@ -174,9 +174,19 @@ public sealed class ProxyOptions
         if (!listensEverywhere) return address.Equals(own.Address);
 
         if (IPAddress.IsLoopback(address) || address.Equals(IPAddress.Any) || address.Equals(IPAddress.IPv6Any)) return true;
-        return System.Net.NetworkInformation.NetworkInterface.GetAllNetworkInterfaces()
-            .SelectMany(nic => nic.GetIPProperties().UnicastAddresses)
-            .Any(unicast => unicast.Address.Equals(address));
+        try
+        {
+            return System.Net.NetworkInformation.NetworkInterface.GetAllNetworkInterfaces()
+                .SelectMany(nic => nic.GetIPProperties().UnicastAddresses)
+                .Any(unicast => unicast.Address.Equals(address));
+        }
+        catch (System.Net.NetworkInformation.NetworkInformationException)
+        {
+            // The system will not list its interfaces (a restricted or containerised host): treat the
+            // address as someone else's. If it was in fact our own, the connect that follows ends in
+            // the same loop that was always possible, bounded by the connection cap and eviction.
+            return false;
+        }
     }
 
     public bool ShouldDecrypt(string host)

@@ -90,9 +90,17 @@ internal sealed class GuardedClientStream(Stream inner, TimeSpan writeTimeout) :
     public override Task WriteAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken) =>
         WriteAsync(buffer.AsMemory(offset, count), cancellationToken).AsTask();
 
-    public override int Read(byte[] buffer, int offset, int count) => inner.Read(buffer, offset, count);
+    // The synchronous surface keeps both limits too, so a caller that takes it (nothing here does on
+    // purpose) cannot step around them.
+    public override int Read(byte[] buffer, int offset, int count)
+    {
+        var read = inner.Read(buffer, offset, count);
+        if (read > 0 && _floorArmed) CountProgress(read);
+        return read;
+    }
 
-    public override void Write(byte[] buffer, int offset, int count) => inner.Write(buffer, offset, count);
+    public override void Write(byte[] buffer, int offset, int count) =>
+        WriteAsync(buffer.AsMemory(offset, count)).AsTask().GetAwaiter().GetResult();
 
     public override void Flush() => inner.Flush();
 
