@@ -188,6 +188,11 @@ public sealed class Http2Connection(Stream stream, Func<HttpRequestData, Cancell
     /// <summary>Whether something other than the reader has already decided to end the connection.</summary>
     internal bool IsClosing => Volatile.Read(ref _closeReason) != NoCloseReason;
 
+    /// <summary>The send window of an open stream, or null. Lets a test see that an overflowing
+    /// WINDOW_UPDATE was refused rather than applied.</summary>
+    internal long? SendWindowOf(int streamId) =>
+        _streams.TryGetValue(streamId, out var open) ? Interlocked.Read(ref open.RemoteWindow) : null;
+
     /// <summary>Stream handlers still running. Lets a test see that finished ones are forgotten.</summary>
     internal int InFlightHandlers
     {
@@ -812,7 +817,9 @@ public sealed class Http2Connection(Stream stream, Func<HttpRequestData, Cancell
         }
         else if (_streams.TryGetValue(frame.StreamId, out var http2Stream))
         {
-            if (Interlocked.Add(ref http2Stream.RemoteWindow, increment) > MaxFlowControlWindow)
+            // Validated before it is applied, as for the connection: a compare-and-swap, because this
+            // stream's sender is concurrently spending from the same field.
+            if (!TryGrantStreamWindow(http2Stream, increment))
             {
                 // A stream error: only this stream is reset. As elsewhere, a dispatched stream stays
                 // registered until its handler has stopped (see HandleRstStream).
@@ -828,6 +835,19 @@ public sealed class Http2Connection(Stream stream, Func<HttpRequestData, Cancell
         }
 
         SignalWindowGranted();
+    }
+
+    /// <summary>Adds <paramref name="increment"/> to a stream's send window unless that would pass
+    /// 2^31-1, in which case the window is left untouched and false is returned.</summary>
+    private static bool TryGrantStreamWindow(Http2Stream http2Stream, int increment)
+    {
+        while (true)
+        {
+            var current = Interlocked.Read(ref http2Stream.RemoteWindow);
+            var next = current + increment;
+            if (next > MaxFlowControlWindow) return false;
+            if (Interlocked.CompareExchange(ref http2Stream.RemoteWindow, next, current) == current) return true;
+        }
     }
 
     /// <summary>

@@ -270,6 +270,26 @@ internal static class Http2ServerHardeningTests
             runner.IsTrue(after is { Type: not Http2FrameType.GoAway }, "the connection carries on and stream 3 is answered");
         });
 
+        await runner.RunAsync("a stream WINDOW_UPDATE that would overflow is refused, leaving the window as it was", async () =>
+        {
+            // A sender must never be able to reserve against a window above the maximum, even for a
+            // moment, so the grant is validated before it is applied, not undone afterwards.
+            var release = new TaskCompletionSource<Http2StreamResponse>(TaskCreationOptions.RunContinuationsAsynchronously);
+            await using var peer = await Peer.StartAsync(new PeerOptions { Handler = (_, _) => release.Task });
+            try
+            {
+                await peer.SendHeadersAsync(1, endStream: true, Get("/held"));
+                await Poll.UntilAsync(() => peer.Connection.InFlightHandlers == 1);
+                runner.AreEqual(65_535L, peer.Connection.SendWindowOf(1) ?? -1, "the stream starts with the default window");
+
+                await peer.SendAsync(Http2FrameType.WindowUpdate, Http2FrameFlags.None, 1, WindowUpdate(MaxWindow));
+                var reset = await peer.ReadUntilAsync(f => f.Type == Http2FrameType.RstStream && f.StreamId == 1);
+                runner.AreEqual(Http2ErrorCode.FlowControlError, RstCode(reset), "the stream is reset with FLOW_CONTROL_ERROR");
+                runner.AreEqual(65_535L, peer.Connection.SendWindowOf(1) ?? -1, "and the window was never raised past the maximum");
+            }
+            finally { release.TrySetResult(HttpResponseData.Simple(200, "OK", "ok")); }
+        });
+
         await runner.RunAsync("a stream window may reach 2^31-1 but no SETTINGS change may push it past", async () =>
         {
             await using var peer = await Peer.StartAsync();
