@@ -245,42 +245,8 @@ public sealed class ProxyServer : IAsyncDisposable
         await WriteAsciiAsync(clientStream, "HTTP/1.1 200 Connection Established\r\n\r\n", ct).ConfigureAwait(false);
 
         var ssl = new SslStream(clientStream, leaveInnerStreamOpen: false);
-        try
-        {
-            await ssl.AuthenticateAsServerAsync(new SslServerAuthenticationOptions
-            {
-                // Honour SNI when the client sends it; fall back to the CONNECT authority.
-                ServerCertificateSelectionCallback = (_, sni) =>
-                    _ca.GetCertificateFor(string.IsNullOrEmpty(sni) ? host : sni),
-                ClientCertificateRequired = false,
-                EnabledSslProtocols = SslProtocols.Tls12 | SslProtocols.Tls13,
-                CertificateRevocationCheckMode = System.Security.Cryptography.X509Certificates.X509RevocationMode.NoCheck,
-                // Omitted entirely (rather than set to just http/1.1) when the toggle is off, so
-                // behaviour is byte-for-byte unchanged from before this feature existed.
-                ApplicationProtocols = _options.EnableHttp2Downstream
-                    ? [SslApplicationProtocol.Http2, SslApplicationProtocol.Http11]
-                    : null,
-            }, ct).ConfigureAwait(false);
-        }
-        catch (Exception ex)
-        {
-            // Typically an untrusted root or a pinned client. Record it so the cause is visible.
-            var failed = new Session
-            {
-                Request = connect,
-                IsTunnel = true,
-                IsHttps = true,
-                State = SessionState.Failed,
-                ClientEndpoint = clientEndpoint,
-                ProcessName = processName,
-                ServerEndpoint = $"{host}:{port}",
-                Error = $"TLS handshake with client failed: {Describe(ex)}",
-                Completed = DateTimeOffset.Now,
-            };
-            _store.Add(failed);
-            await ssl.DisposeAsync().ConfigureAwait(false);
+        if (!await AuthenticateClientAsync(ssl, connect, host, port, clientEndpoint, processName, ct).ConfigureAwait(false))
             return;
-        }
 
         if (ssl.NegotiatedApplicationProtocol == SslApplicationProtocol.Http2)
         {
@@ -316,6 +282,61 @@ public sealed class ProxyServer : IAsyncDisposable
             // stream, in which case writing close_notify throws.
             try { await ssl.DisposeAsync().ConfigureAwait(false); }
             catch (Exception) { /* the connection is already gone */ }
+        }
+    }
+
+    /// <summary>
+    /// Completes the TLS handshake of a decrypted tunnel with the client, within
+    /// <see cref="ProxyOptions.TlsHandshakeTimeout"/>: a client that opened the tunnel and then never
+    /// sends its ClientHello would otherwise hold the connection for ever. The timer lives only for
+    /// the handshake. A failure (typically an untrusted root or a pinned client) is recorded as a
+    /// failed session so the cause is visible, and the stream is disposed.
+    /// </summary>
+    private async Task<bool> AuthenticateClientAsync(
+        SslStream ssl, HttpRequestData connect, string host, int port, string clientEndpoint, string processName,
+        CancellationToken ct)
+    {
+        using var handshakeBudget = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        handshakeBudget.CancelAfter(_options.TlsHandshakeTimeout);
+        try
+        {
+            await ssl.AuthenticateAsServerAsync(new SslServerAuthenticationOptions
+            {
+                // Honour SNI when the client sends it; fall back to the CONNECT authority.
+                ServerCertificateSelectionCallback = (_, sni) =>
+                    _ca.GetCertificateFor(string.IsNullOrEmpty(sni) ? host : sni),
+                ClientCertificateRequired = false,
+                EnabledSslProtocols = SslProtocols.Tls12 | SslProtocols.Tls13,
+                CertificateRevocationCheckMode = System.Security.Cryptography.X509Certificates.X509RevocationMode.NoCheck,
+                // Omitted entirely (rather than set to just http/1.1) when the toggle is off, so
+                // behaviour is byte-for-byte unchanged from before this feature existed.
+                ApplicationProtocols = _options.EnableHttp2Downstream
+                    ? [SslApplicationProtocol.Http2, SslApplicationProtocol.Http11]
+                    : null,
+            }, handshakeBudget.Token).ConfigureAwait(false);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            var timedOut = ex is OperationCanceledException && handshakeBudget.IsCancellationRequested && !ct.IsCancellationRequested;
+            // Typically an untrusted root or a pinned client. Record it so the cause is visible.
+            var failed = new Session
+            {
+                Request = connect,
+                IsTunnel = true,
+                IsHttps = true,
+                State = SessionState.Failed,
+                ClientEndpoint = clientEndpoint,
+                ProcessName = processName,
+                ServerEndpoint = $"{host}:{port}",
+                Error = timedOut
+                    ? $"TLS handshake with client failed: no handshake within {_options.TlsHandshakeTimeout.TotalSeconds:0.#}s"
+                    : $"TLS handshake with client failed: {Describe(ex)}",
+                Completed = DateTimeOffset.Now,
+            };
+            _store.Add(failed);
+            await ssl.DisposeAsync().ConfigureAwait(false);
+            return false;
         }
     }
 
@@ -363,12 +384,9 @@ public sealed class ProxyServer : IAsyncDisposable
         TcpClient? server = null;
         try
         {
-            server = new TcpClient { NoDelay = true };
-            using (var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct))
-            {
-                timeout.CancelAfter(_options.ConnectTimeout);
-                await server.ConnectAsync(_options.HostRemapping.Resolve(host), port, timeout.Token).ConfigureAwait(false);
-            }
+            var socket = await HappyEyeballs.ConnectAsync(_options.HostRemapping.Resolve(host), port, _options, ct)
+                .ConfigureAwait(false);
+            server = HappyEyeballs.Adopt(socket);
 
             await WriteAsciiAsync(clientStream, "HTTP/1.1 200 Connection Established\r\n\r\n", ct).ConfigureAwait(false);
 

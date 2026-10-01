@@ -20,7 +20,28 @@ public sealed class ProxyOptions
     /// <summary>Reject a request body larger than this instead of buffering it.</summary>
     public long MaxBodyBytes { get; set; } = 128L * 1024 * 1024;
 
+    /// <summary>
+    /// How long to wait for the TCP connection to an origin before giving up. Name resolution and
+    /// every address tried (see <see cref="ConnectionAttemptDelay"/>) are inside this one budget.
+    /// </summary>
     public TimeSpan ConnectTimeout { get; set; } = TimeSpan.FromSeconds(15);
+
+    /// <summary>
+    /// How long a connection attempt to an origin gets before the next address of the same name is
+    /// tried in parallel with it (RFC 8305 "Connection Attempt Delay"; 250 ms is the value it
+    /// recommends). A failed attempt starts the next one at once, and at most six addresses are tried.
+    /// A name with an unreachable IPv6 address ahead of a working IPv4 one is therefore reached after
+    /// this delay rather than after <see cref="ConnectTimeout"/>.
+    /// </summary>
+    public TimeSpan ConnectionAttemptDelay { get; set; } = TimeSpan.FromMilliseconds(250);
+
+    /// <summary>
+    /// How long a TLS handshake may take, separately for the handshake with an origin (it starts once
+    /// the TCP connection is made) and for the one with a client of a decrypted tunnel. A peer that
+    /// completes the TCP connection and then never speaks would otherwise hold the request, and its
+    /// client connection, for ever. A handshake that outlasts it fails with an <see cref="IOException"/>.
+    /// </summary>
+    public TimeSpan TlsHandshakeTimeout { get; set; } = TimeSpan.FromSeconds(15);
 
     public TimeSpan IdleTimeout { get; set; } = TimeSpan.FromSeconds(120);
 

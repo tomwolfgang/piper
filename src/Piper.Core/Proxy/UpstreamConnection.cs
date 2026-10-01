@@ -65,20 +65,13 @@ internal sealed class UpstreamConnection : IDisposable
     public static async Task<UpstreamConnection> ConnectAsync(
         string host, int port, bool isTls, ProxyOptions options, CancellationToken ct, bool allowHttp2 = true)
     {
-        var client = new TcpClient { NoDelay = true };
         var remapping = options.HostRemapping.ResolveTarget(host);
         var tlsHost = remapping.RewritesAuthority ? remapping.Host : host;
-        try
-        {
-            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            timeout.CancelAfter(options.ConnectTimeout);
-            await client.ConnectAsync(remapping.Host, port, timeout.Token).ConfigureAwait(false);
-        }
-        catch
-        {
-            client.Dispose();
-            throw;
-        }
+
+        // Raced across the name's addresses and bounded by ConnectTimeout as a whole. The TcpClient
+        // only adopts the socket: it is the type the rest of the proxy holds an upstream as.
+        var socket = await HappyEyeballs.ConnectAsync(remapping.Host, port, options, ct).ConfigureAwait(false);
+        var client = HappyEyeballs.Adopt(socket);
 
         Stream stream = client.GetStream();
         var isHttp2 = false;
@@ -93,6 +86,11 @@ internal sealed class UpstreamConnection : IDisposable
                 return false;
             });
 
+            // Its own budget, scoped to the handshake: an origin that accepts the TCP connection and
+            // then says nothing cannot hold the request (and a client connection slot) for ever.
+            using var handshakeTimeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            handshakeTimeout.CancelAfter(options.TlsHandshakeTimeout);
+
             try
             {
                 await ssl.AuthenticateAsClientAsync(new SslClientAuthenticationOptions
@@ -105,13 +103,20 @@ internal sealed class UpstreamConnection : IDisposable
                     ApplicationProtocols = options.EnableHttp2Upstream && allowHttp2
                         ? [SslApplicationProtocol.Http2, SslApplicationProtocol.Http11]
                         : null,
-                }, ct).ConfigureAwait(false);
+                }, handshakeTimeout.Token).ConfigureAwait(false);
             }
             catch (AuthenticationException ex) when (rejectionDetail is not null)
             {
                 await ssl.DisposeAsync().ConfigureAwait(false);
                 client.Dispose();
                 throw new AuthenticationException($"{ex.Message} ({rejectionDetail})", ex);
+            }
+            catch (OperationCanceledException) when (handshakeTimeout.IsCancellationRequested && !ct.IsCancellationRequested)
+            {
+                await ssl.DisposeAsync().ConfigureAwait(false);
+                client.Dispose();
+                throw new IOException(
+                    $"Timed out after {options.TlsHandshakeTimeout.TotalSeconds:0.#}s waiting for the TLS handshake with {host}:{port}.");
             }
             catch
             {

@@ -451,6 +451,22 @@ The trade this makes is that a body can no longer be edited on its way back to t
 has never offered that -- the AutoResponder replaces responses rather than editing real ones -- so
 there is nothing to give up here, which is why there is no buffering mode to switch between.
 
+## Connecting to an origin
+
+Piper connects the way browsers do (RFC 8305, "Happy Eyeballs"). When a name has several addresses
+they are tried alternately by IP family, a new attempt starting when the last has failed or has had
+250 ms (`ConnectionAttemptDelay`), at most six in all, and the first to connect wins; the others are
+cancelled and closed. A name whose IPv6 address silently drops packets is therefore reached over IPv4
+after a quarter of a second instead of after the whole connect timeout. An IP literal is never looked
+up. The whole connect, name lookup included, is bounded by `ConnectTimeout` (15 s). When every attempt
+fails, the failure that says most is reported (a timeout rather than a later refusal), as an
+`IOException` that names the host and port.
+
+The TLS handshake has its own bound, `TlsHandshakeTimeout` (15 s), both with an origin and with a
+client of a decrypted HTTPS tunnel, so a peer that connects and then says nothing no longer holds a
+connection for ever. A timed-out handshake with an origin fails the request with a 502; with a client
+it is recorded as a failed tunnel session. Certificate validation is unchanged.
+
 ## Not implemented
 
 - HTTP/2 or HTTP/3 in the Composer (raw/verbatim sending stays HTTP/1.1-only - the mandatory
