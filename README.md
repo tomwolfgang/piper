@@ -300,6 +300,19 @@ times it has fired.
 
 Sessions a rule answered are coloured differently in the grid, and searchable with `is:auto`.
 
+Rules are saved as `%LOCALAPPDATA%\Piper\autoresponder-rules.json`, which is also the format of
+**Actions > Export rules...** and **Import rules...**. A rule file is read as untrusted input: it may
+be at most 8 MB and 5,000 rules, and a `*delay:` is capped at one hour. Importing into a list that
+already has rules asks whether to **Replace** it or **Append** to it. If the saved file is not valid
+JSON, Piper starts with no rules, says so, and keeps the file as
+`autoresponder-rules.json.invalid` so nothing you wrote is lost (up to five such copies are kept, as
+`.invalid`, `.invalid.1` to `.invalid.4`; after that the oldest is replaced). An import whose rules
+would be over the limits once written out is refused. If it is a valid rule set that is
+over the limits, Piper starts with no rules and leaves the file exactly where it is; rules you add in
+that session are not saved (Piper says so), so the file is never overwritten. Export them, or shrink
+or remove the file and restart. If rules cannot be saved or exported, Piper tells you rather than
+carrying on as if it had.
+
 Rules cannot see inside an undecrypted `CONNECT` tunnel, so a rule for an HTTPS host only fires when
 that host is being decrypted.
 
