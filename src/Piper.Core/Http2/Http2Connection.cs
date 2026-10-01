@@ -561,8 +561,12 @@ public sealed class Http2Connection(Stream stream, Func<HttpRequestData, Cancell
             throw new Http2ProtocolException(Http2ErrorCode.ProtocolError, $"HEADERS on stream {streamId}, which cannot open a new stream.");
         _highestStreamId = streamId;
 
+        // The peer has said it is going away (see HandleGoAway). What it already opened is finished;
+        // anything new is refused, which is also what keeps the drain from never ending under a
+        // peer that follows its GOAWAY with an endless run of new streams. REFUSED_STREAM tells it
+        // nothing was processed, so it may retry on another connection.
         var maxConcurrent = _localSettings.MaxConcurrentStreams ?? int.MaxValue;
-        if (_streams.Count >= maxConcurrent)
+        if (Volatile.Read(ref _peerGoingAway) || _streams.Count >= maxConcurrent)
         {
             ResetStream(streamId, Http2ErrorCode.RefusedStream, peerStillSending: !endStream);
             return;

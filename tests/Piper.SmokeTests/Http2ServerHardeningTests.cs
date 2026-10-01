@@ -441,6 +441,22 @@ internal static class Http2ServerHardeningTests
             runner.IsTrue(await peer.EndedWithinAsync(TimeSpan.FromSeconds(5)), "and RunAsync returns without waiting for the peer to close");
         });
 
+        await runner.RunAsync("a stream opened after the peer's GOAWAY is refused, so the drain cannot be kept open", async () =>
+        {
+            await using var peer = await Peer.StartAsync(new PeerOptions { HandlerDelay = TimeSpan.FromMilliseconds(400) });
+            await peer.SendHeadersAsync(1, endStream: true, Get("/before"));
+            await peer.SendAsync(Http2FrameType.GoAway, Http2FrameFlags.None, 0, GoAway(0, Http2ErrorCode.NoError));
+            await peer.SendHeadersAsync(3, endStream: true, Get("/after"));
+            await peer.SendHeadersAsync(5, endStream: true, Get("/after-too"));
+
+            var refused = await peer.ReadUntilAsync(f => f.Type == Http2FrameType.RstStream && f.StreamId == 3);
+            runner.AreEqual(Http2ErrorCode.RefusedStream, RstCode(refused), "REFUSED_STREAM: nothing was processed");
+            var answered = await peer.ReadUntilAsync(f => f.StreamId == 1 && f.HasFlag(Http2FrameFlags.EndStream));
+            runner.IsTrue(answered is not null, "the stream opened before the GOAWAY is still answered");
+            runner.AreEqual(1, peer.Requests.Count, "only that one reached the handler");
+            runner.IsTrue(await peer.EndedWithinAsync(TimeSpan.FromSeconds(5)), "and the connection then ends");
+        });
+
         await runner.RunAsync("a peer GOAWAY lets a request still being uploaded finish", async () =>
         {
             await using var peer = await Peer.StartAsync();
