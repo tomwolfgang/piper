@@ -258,6 +258,21 @@ internal static class ProxyAdmissionTests
                 $"a CONNECT to the proxy itself too (got: {FirstLine(refused.Text)})");
         });
 
+        await runner.RunAsync("a request for the proxy's own address over HTTP/2 is refused with 508 as well", async () =>
+        {
+            using var harness = new Harness(ca, o => o.EnableHttp2Downstream = true);
+            using var client = harness.CreateTlsClient(ca.RootCertificate);
+            client.DefaultRequestVersion = HttpVersion.Version20;
+            client.DefaultVersionPolicy = HttpVersionPolicy.RequestVersionExact;
+
+            using var response = await client.GetAsync($"https://127.0.0.1:{harness.Port}/loop-h2");
+            runner.AreEqual("2.0", response.Version.ToString(), "over an h2 stream");
+            runner.AreEqual(508, (int)response.StatusCode, "508 Loop Detected, not a 502 and not a loop");
+
+            var session = await WaitForSessionAsync(harness.Store, s => s.Path == "/loop-h2");
+            runner.AreEqual(SessionState.Failed, session.State, "and the session is failed");
+        });
+
         await runner.RunAsync("a request head has a total size cap, not only per line and per header count", async () =>
         {
             await using var origin = new TestRawOrigin(OkAsync);
