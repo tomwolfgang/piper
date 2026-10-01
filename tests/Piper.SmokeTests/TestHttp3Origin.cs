@@ -20,22 +20,49 @@ internal sealed class TestHttp3Origin : IAsyncDisposable
 {
     private readonly QuicListener _listener;
     private readonly Func<HttpRequestData, CancellationToken, Task<HttpResponseData>> _handler;
+    private readonly Behavior? _behavior;
     private readonly CancellationTokenSource _cts = new();
     private readonly Task _acceptLoop;
+    private readonly TaskCompletionSource<long> _clientCloseCode = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    /// <summary>Lets a test make the origin misbehave in one specific way. Each hook replaces the
+    /// well-behaved default for that part only.</summary>
+    public sealed class Behavior
+    {
+        /// <summary>Writes the origin's whole control stream (stream type included) in place of the
+        /// default SETTINGS preamble.</summary>
+        public Func<QuicStream, CancellationToken, Task>? WriteControlStream { get; init; }
+
+        /// <summary>Runs once the connection is up, e.g. to open further unidirectional streams.</summary>
+        public Func<QuicConnection, CancellationToken, Task>? OnConnected { get; init; }
+
+        /// <summary>Answers a request itself, frame by frame, once it has been read to its end.</summary>
+        public Func<QuicStream, CancellationToken, Task>? RespondRaw { get; init; }
+    }
 
     public static bool IsSupported => QuicListener.IsSupported;
 
-    private TestHttp3Origin(QuicListener listener, Func<HttpRequestData, CancellationToken, Task<HttpResponseData>> handler)
+    private TestHttp3Origin(
+        QuicListener listener, Func<HttpRequestData, CancellationToken, Task<HttpResponseData>> handler, Behavior? behavior)
     {
         _listener = listener;
         _handler = handler;
+        _behavior = behavior;
         _acceptLoop = Task.Run(AcceptLoopAsync);
     }
 
     public int Port => _listener.LocalEndPoint.Port;
 
+    /// <summary>The application error code the client closed the connection with, once it has.</summary>
+    public async Task<long?> ClientCloseCodeAsync(TimeSpan timeout)
+    {
+        var finished = await Task.WhenAny(_clientCloseCode.Task, Task.Delay(timeout));
+        return finished == _clientCloseCode.Task ? _clientCloseCode.Task.Result : null;
+    }
+
     public static async Task<TestHttp3Origin> StartAsync(
-        X509Certificate2 certificate, Func<HttpRequestData, CancellationToken, Task<HttpResponseData>> handler)
+        X509Certificate2 certificate, Func<HttpRequestData, CancellationToken, Task<HttpResponseData>> handler,
+        Behavior? behavior = null)
     {
         var listener = await QuicListener.ListenAsync(new QuicListenerOptions
         {
@@ -53,7 +80,7 @@ internal sealed class TestHttp3Origin : IAsyncDisposable
             }),
         });
 
-        return new TestHttp3Origin(listener, handler);
+        return new TestHttp3Origin(listener, handler, behavior);
     }
 
     private async Task AcceptLoopAsync()
@@ -74,12 +101,19 @@ internal sealed class TestHttp3Origin : IAsyncDisposable
         {
             // Our own control stream + SETTINGS, as RFC 9114 6.2.1 requires of both peers.
             var control = await connection.OpenOutboundStreamAsync(QuicStreamType.Unidirectional, _cts.Token);
-            var preamble = new List<byte>();
-            VarInt.Write(preamble, Http3StreamType.Control);
-            preamble.AddRange(Http3FrameWriter.Encode(Http3FrameType.Settings,
-                Http3FrameWriter.EncodeSettings((Http3SettingId.QpackMaxTableCapacity, 0), (Http3SettingId.QpackBlockedStreams, 0))));
-            await control.WriteAsync(preamble.ToArray(), _cts.Token);
-            await control.FlushAsync(_cts.Token);
+            if (_behavior?.WriteControlStream is { } writeControl)
+            {
+                await writeControl(control, _cts.Token);
+            }
+            else
+            {
+                var preamble = new List<byte>();
+                VarInt.Write(preamble, Http3StreamType.Control);
+                preamble.AddRange(Http3FrameWriter.Encode(Http3FrameType.Settings,
+                    Http3FrameWriter.EncodeSettings((Http3SettingId.QpackMaxTableCapacity, 0), (Http3SettingId.QpackBlockedStreams, 0))));
+                await control.WriteAsync(preamble.ToArray(), _cts.Token);
+                await control.FlushAsync(_cts.Token);
+            }
 
             // Drain whatever the client opens (its control and QPACK streams).
             _ = Task.Run(async () =>
@@ -97,8 +131,11 @@ internal sealed class TestHttp3Origin : IAsyncDisposable
                         });
                     }
                 }
+                catch (QuicException ex) when (ex.ApplicationErrorCode is { } code) { _clientCloseCode.TrySetResult(code); }
                 catch { }
             });
+
+            if (_behavior?.OnConnected is { } onConnected) await onConnected(connection, _cts.Token);
 
             await Task.Delay(Timeout.Infinite, _cts.Token);
         }
@@ -126,6 +163,12 @@ internal sealed class TestHttp3Origin : IAsyncDisposable
             }
 
             if (fields is null) return;
+
+            if (_behavior?.RespondRaw is { } respondRaw)
+            {
+                await respondRaw(s, _cts.Token);
+                return;
+            }
 
             var request = Http2MessageAdapter.ToRequest(fields);
             request.Body = body.ToArray();

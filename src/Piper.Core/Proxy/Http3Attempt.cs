@@ -34,35 +34,37 @@ internal static class Http3Attempt
         if (!options.EnableHttp3Upstream) return null;
         if (!url.Scheme.Equals("https", StringComparison.OrdinalIgnoreCase)) return null; // h3 is always over QUIC+TLS
         if (!IsSafeToRetry(outbound.Method)) return null;
-        if (!altSvc.ShouldAttempt(url.Host)) return null;
+        if (!altSvc.TryGetEndpoint(url.Host, url.Port, out var udpPort)) return null;
 
         Http3ClientConnection? connection = null;
 
-        // One budget covering the whole attempt, re-armed after the handshake. Bounding only the
-        // handshake is not enough: a network that completes the QUIC handshake and then drops UDP
-        // leaves the response hanging forever, and because the caller's own token is the one that
-        // eventually fires, the failure would not be attributed to h3 and the host would stay
-        // eligible -- hanging every subsequent request too.
-        using var attempt = CancellationTokenSource.CreateLinkedTokenSource(ct);
-
         try
         {
-            attempt.CancelAfter(options.Http3ConnectTimeout);
-            connection = await Http3ClientConnection.ConnectAsync(url.Host, url.Port, options, attempt.Token).ConfigureAwait(false);
+            // The handshake gets its own short budget: a network that drops UDP never answers, and
+            // that must not cost the request more than a moment before it goes over TCP.
+            using (var handshake = CancellationTokenSource.CreateLinkedTokenSource(ct))
+            {
+                handshake.CancelAfter(options.Http3ConnectTimeout);
+                connection = await Http3ClientConnection.ConnectAsync(url.Host, udpPort, options, handshake.Token).ConfigureAwait(false);
+            }
 
-            attempt.CancelAfter(options.Http3ResponseTimeout);
+            // After the handshake the wait is an idle timeout owned by the connection, re-armed by the
+            // origin's progress. A total budget here killed every long download, restarted it over TCP
+            // from its first byte and barred the host from h3 for half an hour; a network that passes
+            // the handshake and then drops UDP is still caught, because then nothing arrives.
+            connection.IdleTimeout = options.Http3ResponseTimeout;
             onRequestSent();
-            var response = await connection.SendRequestAsync(outbound, attempt.Token).ConfigureAwait(false);
+            var response = await connection.SendRequestAsync(outbound, ct).ConfigureAwait(false);
 
             altSvc.RecordSuccess(url.Host);
             return response;
         }
-        catch (Exception) when (!ct.IsCancellationRequested)
+        catch (Exception ex) when (!ct.IsCancellationRequested)
         {
-            // Blocked UDP, an unreachable QUIC endpoint, a handshake or response timeout, a
-            // protocol disagreement -- all the same decision: stop trying this host for a while
-            // and let the caller proceed over TCP as though h3 had never been considered.
-            altSvc.RecordFailure(url.Host);
+            // Blocked UDP, an unreachable QUIC endpoint, a handshake or idle timeout, a protocol
+            // disagreement -- the same decision for the request: proceed over TCP as though h3 had
+            // never been considered. Whether the HOST is blamed depends on what failed.
+            if (BlamesHost(ex, connection)) altSvc.RecordFailure(url.Host);
             return null;
         }
         finally
@@ -70,4 +72,20 @@ internal static class Http3Attempt
             if (connection is not null) await connection.DisposeAsync().ConfigureAwait(false);
         }
     }
+
+    /// <summary>
+    /// Whether a failed attempt says h3 does not work for this host. It does not when the origin
+    /// merely will not take this request on this connection (GOAWAY), when the response is too big for
+    /// the buffered path (TCP streams it; the same host's other resources are fine), or when it was
+    /// answering and then went quiet or dropped the connection: that is the network or the one
+    /// resource, not the protocol, and barring the host would cost every later request its h3.
+    /// Everything else -- no handshake, no response at all, a protocol violation -- counts.
+    /// </summary>
+    private static bool BlamesHost(Exception failure, Http3ClientConnection? connection) => failure switch
+    {
+        Http3GoAwayException or Http3ResponseTooLargeException => false,
+        HttpParseException or Http3ProtocolException => true,
+        _ when connection is { ResponseStarted: true } => false, // an idle timeout, or a connection dropped mid-response
+        _ => true,
+    };
 }

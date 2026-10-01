@@ -346,10 +346,27 @@ QUIC to see what it actually serves there.
 
 An origin is only tried over QUIC after it has advertised `h3` in an `Alt-Svc` header on an
 ordinary TCP response - never on the first, cold request, which is the one you are waiting on.
+The advertisement is honoured as given: it expires after its `ma` lifetime (24 hours when absent,
+30 days at most), and the alternative's UDP port is used. An alternative on a *different host* is
+ignored, because it would let an origin choose where Piper sends UDP. The table of hosts is
+bounded, and so is the header it will read.
+
 Failures are remembered per host with a cool-down, so a network that blocks outbound UDP/443
 (many do) costs one timeout rather than one per request. Any failure falls back to TCP, and only
 safe methods (`GET`, `HEAD`, `OPTIONS`) are attempted, so a fallback can never re-submit a request
-with side effects.
+with side effects. The host is only barred when the failure says something about h3 itself: no
+handshake, no response at all, or a protocol violation. An origin that sends `GOAWAY` for the
+request, a response too big for the buffered path, or a download that was arriving and then
+stalled is retried over TCP without barring the host.
+
+The response is read in full before it is relayed, so it is bounded: at most 64 MiB of body (a
+larger `Content-Length` is refused on the headers, and the request goes over TCP, which streams),
+a 128 KiB header section measured decoded, and a limited number of interim responses, unknown
+frames and streams. There is no total time limit: the wait is an *idle* timeout (15 seconds,
+`Http3ResponseTimeout`) that header sections and body bytes re-arm, so a slow download that keeps
+moving completes and a stalled one is cut. Frames out of order (for example `DATA` before
+`HEADERS`), a malformed control stream, or a bad `SETTINGS` or `GOAWAY` close the connection with
+the matching HTTP/3 error code.
 
 QUIC comes from `System.Net.Quic` - msquic ships inside the .NET runtime, so this still needs no
 NuGet packages and nothing extra installed. The HTTP/3 layer above it (framing, QPACK) is

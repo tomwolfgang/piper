@@ -16,17 +16,17 @@ internal static class Http3Tests
             runner.IsTrue(!AltSvcCache.AdvertisesHttp3("h2=\"alt.example.com:443\""), "h2 alternative is not h3");
 
             var cache = new AltSvcCache();
-            runner.IsTrue(!cache.ShouldAttempt("example.com"), "never attempted before the origin advertises it");
+            runner.IsTrue(!cache.TryGetEndpoint("example.com", 443, out _), "never attempted before the origin advertises it");
 
             cache.RecordAltSvc("example.com", "h3=\":443\"; ma=86400");
-            runner.AreEqual(Http3ClientConnection.IsSupported, cache.ShouldAttempt("example.com"),
+            runner.AreEqual(Http3ClientConnection.IsSupported, cache.TryGetEndpoint("example.com", 443, out _),
                 "eligible once advertised (subject to QUIC being available at all)");
 
             cache.RecordFailure("example.com");
-            runner.IsTrue(!cache.ShouldAttempt("example.com"), "a failed attempt suppresses retries during the cool-down");
+            runner.IsTrue(!cache.TryGetEndpoint("example.com", 443, out _), "a failed attempt suppresses retries during the cool-down");
 
             cache.RecordAltSvc("example.com", "clear");
-            runner.IsTrue(!cache.ShouldAttempt("example.com"), "Alt-Svc: clear removes eligibility");
+            runner.IsTrue(!cache.TryGetEndpoint("example.com", 443, out _), "Alt-Svc: clear removes eligibility");
             return Task.CompletedTask;
         });
 
