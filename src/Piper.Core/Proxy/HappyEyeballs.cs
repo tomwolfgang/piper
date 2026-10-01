@@ -38,8 +38,15 @@ internal static class HappyEyeballs
             ? [literal]
             : await Dns.GetHostAddressesAsync(host, ct).ConfigureAwait(false);
 
-        return [.. resolved.Where(a => a.AddressFamily == AddressFamily.InterNetwork
-                                       || (a.AddressFamily == AddressFamily.InterNetworkV6 && Socket.OSSupportsIPv6))];
+        var usable = resolved.Where(a => a.AddressFamily == AddressFamily.InterNetwork
+                                         || (a.AddressFamily == AddressFamily.InterNetworkV6 && Socket.OSSupportsIPv6))
+            .ToArray();
+
+        // The name exists but has only addresses this machine cannot use (IPv6 alone, without IPv6):
+        // say so, rather than reporting an unknown host.
+        if (usable.Length == 0 && resolved.Length > 0)
+            throw new SocketException((int)SocketError.AddressFamilyNotSupported);
+        return usable;
     }
 
     /// <summary>

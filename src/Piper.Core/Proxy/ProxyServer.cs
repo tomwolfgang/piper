@@ -176,6 +176,12 @@ public sealed class ProxyServer : IAsyncDisposable
                 catch (OperationCanceledException) { break; }
                 continue;
             }
+            catch (Exception)
+            {
+                // Nothing expected: still gives the slot back, and the failure goes on to end the loop.
+                gate.Release();
+                throw;
+            }
 
             _ = ServeConnectionAsync(client, gate, ct);
         }
