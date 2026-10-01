@@ -52,6 +52,50 @@ internal static class Http2ClientHardeningTests
             runner.AreEqual(Http2ErrorCode.EnhanceYourCalm, await peer.GoAwayCodeAsync(), "and the origin is told with GOAWAY");
         });
 
+        await runner.RunAsync("h2 client: endless empty CONTINUATION frames are refused, with or without an idle timeout", async () =>
+        {
+            // Nothing is ever added to the block, so the byte cap cannot trip: the number of frames has to.
+            foreach (var idle in new TimeSpan?[] { null, TimeSpan.FromMilliseconds(400) })
+            {
+                await using var peer = new Peer(async p =>
+                {
+                    await p.WaitForRequestHeadAsync();
+                    await p.SendAsync(Http2FrameType.Headers, Http2FrameFlags.None, 1, ReadOnlyMemory<byte>.Empty);
+                    while (true)
+                        await p.SendAsync(Http2FrameType.Continuation, Http2FrameFlags.None, 1, ReadOnlyMemory<byte>.Empty);
+                });
+
+                var failure = await FailureOfAsync(peer, idle, Get());
+
+                runner.IsTrue(failure is Http2ProtocolException { ErrorCode: Http2ErrorCode.EnhanceYourCalm },
+                    $"idle timeout {(idle is null ? "off" : "on")}: refused as ENHANCE_YOUR_CALM (was: {Describe(failure)})");
+            }
+        });
+
+        await runner.RunAsync("h2 client: a block of many tiny fragments is refused under the byte cap, and 64 fragments are fine", async () =>
+        {
+            await using var tiny = new Peer(async p =>
+            {
+                await p.WaitForRequestHeadAsync();
+                await p.SendAsync(Http2FrameType.Headers, Http2FrameFlags.None, 1, new byte[1]);
+                for (var i = 0; i < 300; i++)
+                    await p.SendAsync(Http2FrameType.Continuation, Http2FrameFlags.None, 1, new byte[1]);
+            });
+            var failure = await FailureOfAsync(tiny, null, Get());
+            runner.IsTrue(failure is Http2ProtocolException { ErrorCode: Http2ErrorCode.EnhanceYourCalm },
+                $"300 one-byte fragments (301 bytes in all) are refused (was: {Describe(failure)})");
+
+            var block = HpackEncoder.Encode([(":status", "200"), ("x-pad", new string('p', 200))]);
+            await using var exact = new Peer(async p =>
+            {
+                await p.WaitForRequestHeadAsync();
+                await p.SendHeaderBlockAsync(block, Http2FrameFlags.EndStream, chunkSize: (block.Length + 63) / 64);
+            });
+            var connection = new Http2ClientConnection(await exact.ConnectAsync());
+            var head = await connection.SendRequestHeadAsync(Get(), exact.Ct).WaitAsync(HangLimit);
+            runner.AreEqual(200, head.StatusCode, "a block split into 64 fragments is still accepted");
+        });
+
         await runner.RunAsync("h2 client: a small block that expands to a huge header list is refused", async () =>
         {
             // One 4 KiB dynamic-table entry, then 60,000 one-byte references to it: a 64 KB block that
@@ -141,6 +185,8 @@ internal static class Http2ClientHardeningTests
                 p.SendAsync(Http2FrameType.Headers, Http2FrameFlags.EndHeaders, 3, okBlock)),
             ("HEADERS on stream 0", p =>
                 p.SendAsync(Http2FrameType.Headers, Http2FrameFlags.EndHeaders, 0, okBlock)),
+            ("DATA before the response HEADERS", p =>
+                p.SendAsync(Http2FrameType.Data, Http2FrameFlags.None, 1, "early"u8.ToArray())),
             ("PUSH_PROMISE, which the client disabled", p =>
                 p.SendAsync(Http2FrameType.PushPromise, Http2FrameFlags.EndHeaders, 1, new byte[] { 0, 0, 0, 2 }.Concat(okBlock).ToArray())),
         };
@@ -189,6 +235,7 @@ internal static class Http2ClientHardeningTests
         {
             ("WINDOW_UPDATE of 0 on the connection", p => p.SendWindowUpdateAsync(0, 0), Http2ErrorCode.ProtocolError),
             ("WINDOW_UPDATE of 0 on the stream", p => p.SendWindowUpdateAsync(1, 0), Http2ErrorCode.ProtocolError),
+            ("WINDOW_UPDATE of 0 on a stream that was never opened", p => p.SendWindowUpdateAsync(3, 0), Http2ErrorCode.ProtocolError),
             ("a connection window past 2^31-1", p => p.SendWindowUpdateAsync(0, MaxWindow), Http2ErrorCode.FlowControlError),
             ("a stream window past 2^31-1", p => p.SendWindowUpdateAsync(1, MaxWindow), Http2ErrorCode.FlowControlError),
             ("a connection window pushed over the top by one byte", async p =>
@@ -202,6 +249,14 @@ internal static class Http2ClientHardeningTests
                 await p.SendSettingsAsync((4, (uint)MaxWindow)); // the stream window is now exactly the maximum: legal
                 await p.SendWindowUpdateAsync(1, 1);
             }, Http2ErrorCode.FlowControlError),
+        };
+
+        // RFC 9113 §6.9: errors on a stream's own window reset the stream; the connection's close it.
+        var streamErrors = new HashSet<string>
+        {
+            "WINDOW_UPDATE of 0 on the stream",
+            "a stream window past 2^31-1",
+            "a stream window pushed over the top by a SETTINGS change",
         };
 
         foreach (var (name, script, expected) in rejected)
@@ -218,7 +273,15 @@ internal static class Http2ClientHardeningTests
 
                 runner.IsTrue(failure is Http2ProtocolException ex && ex.ErrorCode == expected,
                     $"{expected} (was: {Describe(failure)})");
-                runner.AreEqual(expected, await peer.GoAwayCodeAsync(), "and the origin gets the same code in GOAWAY");
+                if (streamErrors.Contains(name))
+                {
+                    runner.AreEqual(expected, await peer.RstStreamCodeAsync(1), "a stream error: the origin gets RST_STREAM with the same code");
+                    runner.AreEqual(0, peer.GoAwaysReceived(), "and no GOAWAY");
+                }
+                else
+                {
+                    runner.AreEqual(expected, await peer.GoAwayCodeAsync(), "a connection error: the origin gets the same code in GOAWAY");
+                }
             });
         }
 
@@ -344,6 +407,45 @@ internal static class Http2ClientHardeningTests
                 $"a typed, replayable failure naming last-stream-id 0 (was: {Describe(failure)})");
         });
 
+        await runner.RunAsync("h2 client: GOAWAY below the stream after it was answered is a connection error, not a replay signal", async () =>
+        {
+            foreach (var withPendingData in new[] { false, true })
+            {
+                await using var peer = new Peer(async p =>
+                {
+                    await p.WaitForRequestHeadAsync();
+                    await p.SendHeaderBlockAsync(head, Http2FrameFlags.None);
+                    if (withPendingData) await p.SendAsync(Http2FrameType.Data, Http2FrameFlags.None, 1, "got it"u8.ToArray());
+                    await p.SendGoAwayAsync(lastStreamId: 0, Http2ErrorCode.NoError);
+                });
+
+                var connection = new Http2ClientConnection(await peer.ConnectAsync());
+                await connection.SendRequestHeadAsync(Get(), peer.Ct).WaitAsync(HangLimit);
+                Exception? failure = null;
+                try { await ReadAllAsync(connection.ResponseBody).WaitAsync(HangLimit); }
+                catch (Exception ex) { failure = ex; }
+
+                runner.IsTrue(failure is Http2ProtocolException { ErrorCode: Http2ErrorCode.ProtocolError },
+                    $"{(withPendingData ? "with" : "without")} body data already read: PROTOCOL_ERROR, never Http2GoAwayException (was: {Describe(failure)})");
+            }
+        });
+
+        await runner.RunAsync("h2 client: GOAWAY below the stream after an interim 1xx response is not a replay signal either", async () =>
+        {
+            // A 1xx proves the origin received the request; only a silent origin can claim it did not.
+            await using var peer = new Peer(async p =>
+            {
+                await p.WaitForRequestHeadAsync();
+                await p.SendHeaderBlockAsync(HpackEncoder.Encode([(":status", "103"), ("link", "</a.css>; rel=preload")]), Http2FrameFlags.None);
+                await p.SendGoAwayAsync(lastStreamId: 0, Http2ErrorCode.NoError);
+            });
+
+            var failure = await FailureOfAsync(peer, null, Get());
+
+            runner.IsTrue(failure is Http2ProtocolException { ErrorCode: Http2ErrorCode.ProtocolError },
+                $"PROTOCOL_ERROR, never Http2GoAwayException (was: {Describe(failure)})");
+        });
+
         await runner.RunAsync("h2 client: a drained stream the origin then abandons is a failure, not a short success", async () =>
         {
             await using var peer = new Peer(async p =>
@@ -444,6 +546,23 @@ internal static class Http2ClientHardeningTests
             var failure = await FailureOfAsync(peer, idle, Post(150_000));
 
             runner.IsTrue(failure is HttpParseException, $"the send stalls on window and is cut (was: {Describe(failure)})");
+        });
+
+        await runner.RunAsync("h2 client: an upload an origin stops reading (TCP back-pressure) is cut", async () =>
+        {
+            // The window is granted in full, so the client never waits on window: it writes until the
+            // socket buffers are full and the write itself stalls. The origin never reads.
+            await using var peer = new Peer(async p =>
+            {
+                await p.SendSettingsAsync((4, (uint)int.MaxValue));
+                await p.SendWindowUpdateAsync(0, int.MaxValue - 65_535);
+                await Task.Delay(Timeout.Infinite, p.Ct);
+            }, readFrames: false);
+
+            var failure = await FailureOfAsync(peer, idle, Post(48_000_000));
+
+            runner.IsTrue(failure is HttpParseException ex && ex.Message.Contains("stalled", StringComparison.Ordinal),
+                $"the stalled write is cut (was: {Describe(failure)})");
         });
 
         await runner.RunAsync("h2 client: an origin that goes silent mid-body is cut on the body read", async () =>
@@ -659,8 +778,12 @@ internal static class Http2ClientHardeningTests
         private readonly Lock _gate = new();
         private readonly Task _run;
         private TcpClient? _accepted;
+        private TcpClient? _connected;
 
-        public Peer(Func<Peer, Task> script)
+        /// <param name="script">What the origin does once the client has connected.</param>
+        /// <param name="readFrames">False for an origin that never reads its socket, so the client's
+        /// writes meet TCP back-pressure.</param>
+        public Peer(Func<Peer, Task> script, bool readFrames = true)
         {
             _listener.Start();
             _run = Task.Run(async () =>
@@ -670,7 +793,7 @@ internal static class Http2ClientHardeningTests
                     _accepted = await _listener.AcceptTcpClientAsync(Ct).ConfigureAwait(false);
                     _accepted.NoDelay = true;
                     _wire.TrySetResult(_accepted.GetStream());
-                    var reader = ReadLoopAsync();
+                    var reader = readFrames ? ReadLoopAsync() : Task.CompletedTask;
                     await script(this).ConfigureAwait(false);
                     await reader.ConfigureAwait(false);
                 }
@@ -686,9 +809,9 @@ internal static class Http2ClientHardeningTests
         /// <summary>The client's end of the connection.</summary>
         public async Task<Stream> ConnectAsync()
         {
-            var client = new TcpClient { NoDelay = true };
-            await client.ConnectAsync(IPAddress.Loopback, ((IPEndPoint)_listener.LocalEndpoint).Port, Ct);
-            return client.GetStream();
+            _connected = new TcpClient { NoDelay = true };
+            await _connected.ConnectAsync(IPAddress.Loopback, ((IPEndPoint)_listener.LocalEndpoint).Port, Ct);
+            return _connected.GetStream();
         }
 
         private async Task ReadLoopAsync()
@@ -713,12 +836,11 @@ internal static class Http2ClientHardeningTests
             await Http2FrameWriter.WriteAsync(await _wire.Task.ConfigureAwait(false), type, flags, streamId, payload, Ct).ConfigureAwait(false);
 
         /// <summary>HEADERS then CONTINUATION frames of at most 16 KiB, END_HEADERS on the last.</summary>
-        public async Task SendHeaderBlockAsync(byte[] block, Http2FrameFlags headersFlags)
+        public async Task SendHeaderBlockAsync(byte[] block, Http2FrameFlags headersFlags, int chunkSize = 16_384)
         {
-            const int Chunk = 16_384;
-            for (var offset = 0; offset == 0 || offset < block.Length; offset += Chunk)
+            for (var offset = 0; offset == 0 || offset < block.Length; offset += chunkSize)
             {
-                var length = Math.Min(Chunk, block.Length - offset);
+                var length = Math.Min(chunkSize, block.Length - offset);
                 var last = offset + length >= block.Length;
                 var flags = (offset == 0 ? headersFlags : Http2FrameFlags.None) | (last ? Http2FrameFlags.EndHeaders : Http2FrameFlags.None);
                 await SendAsync(offset == 0 ? Http2FrameType.Headers : Http2FrameType.Continuation, flags, 1,
@@ -764,7 +886,7 @@ internal static class Http2ClientHardeningTests
 
         public long DataBytes(int streamId)
         {
-            lock (_gate) return _received.Where(f => f.Type == Http2FrameType.Data && f.StreamId == streamId).Sum(f => (long)f.Payload.Length);
+            lock (_gate) return _received.Where(f => f.Type == Http2FrameType.Data && f.StreamId == streamId).Sum(f => (long)f.DataPayload.Length);
         }
 
         public Task WaitForDataAsync(long bytes) => Poll.UntilAsync(() => DataBytes(1) >= bytes);
@@ -785,6 +907,21 @@ internal static class Http2ClientHardeningTests
             }
         }
 
+        public int GoAwaysReceived() => Count(f => f.Type == Http2FrameType.GoAway);
+
+        /// <summary>The error code of the RST_STREAM the client sent for a stream, or NoError if none arrived.</summary>
+        public async Task<Http2ErrorCode> RstStreamCodeAsync(int streamId)
+        {
+            await Poll.UntilAsync(() => Count(f => f.Type == Http2FrameType.RstStream && f.StreamId == streamId) > 0, 3_000).ConfigureAwait(false);
+            lock (_gate)
+            {
+                var rst = _received.FirstOrDefault(f => f.Type == Http2FrameType.RstStream && f.StreamId == streamId);
+                if (rst.Payload.Length < 4) return Http2ErrorCode.NoError;
+                var s = rst.Payload.Span;
+                return (Http2ErrorCode)(((uint)s[0] << 24) | ((uint)s[1] << 16) | ((uint)s[2] << 8) | s[3]);
+            }
+        }
+
         private int Count(Func<Http2Frame, bool> match)
         {
             lock (_gate) return _received.Count(match);
@@ -795,6 +932,7 @@ internal static class Http2ClientHardeningTests
             await _cts.CancelAsync().ConfigureAwait(false);
             _listener.Stop();
             _accepted?.Dispose();
+            _connected?.Dispose();
             try { await _run.WaitAsync(TimeSpan.FromSeconds(5)).ConfigureAwait(false); }
             catch (TimeoutException) { /* a script stuck in a write; the socket is gone with the process */ }
             _cts.Dispose();

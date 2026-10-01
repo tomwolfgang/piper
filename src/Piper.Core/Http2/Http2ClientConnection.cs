@@ -40,6 +40,10 @@ public sealed class Http2ClientConnection(Stream stream, TimeSpan? idleTimeout =
     // Hints); an endless run only keeps the request open.
     private const int MaxInterimResponses = 32;
 
+    // HEADERS plus CONTINUATION frames in one header block. The byte cap alone cannot bound a block
+    // sent as empty or tiny fragments; a real block of at most 64 KiB needs only a handful.
+    private const int MaxHeaderBlockFragments = 64;
+
     private readonly Http2Settings _localSettings = Http2Settings.Advertised();
     private readonly Http2Settings _peerSettings = new();
     private readonly HpackDecoder _hpackDecoder = new(Http2Settings.Advertised().HeaderTableSize);
@@ -79,6 +83,7 @@ public sealed class Http2ClientConnection(Stream stream, TimeSpan? idleTimeout =
     // The header block being assembled, from a HEADERS frame to the CONTINUATION that ends it.
     private readonly ArrayBufferWriter<byte> _headerBlockFragment = new();
     private bool _inHeaderBlock;
+    private int _headerBlockFragments;
     private int _interimResponses;
     private int? _goAwayLastStreamId;
     private List<(string Name, string Value)>? _responseFields;
@@ -96,8 +101,8 @@ public sealed class Http2ClientConnection(Stream stream, TimeSpan? idleTimeout =
     public async Task<HttpResponseData> SendRequestHeadAsync(HttpRequestData request, CancellationToken ct)
     {
         MarkProgress();
-        await stream.WriteAsync(PrefaceBytes, ct).ConfigureAwait(false);
-        await Http2FrameWriter.WriteAsync(stream, Http2FrameType.Settings, Http2FrameFlags.None, 0, _localSettings.ToPayload(), ct).ConfigureAwait(false);
+        await BoundedWriteAsync(t => stream.WriteAsync(PrefaceBytes, t).AsTask(), ct).ConfigureAwait(false);
+        await WriteFrameAsync(Http2FrameType.Settings, Http2FrameFlags.None, 0, _localSettings.ToPayload(), ct).ConfigureAwait(false);
 
         var fields = Http2MessageAdapter.ToHeaderFields(request);
         var block = HpackEncoder.Encode(fields);
@@ -105,7 +110,7 @@ public sealed class Http2ClientConnection(Stream stream, TimeSpan? idleTimeout =
 
         // The peer's real MAX_FRAME_SIZE isn't known yet (their SETTINGS hasn't necessarily
         // arrived) -- the RFC default our Http2Settings starts with is always safe to assume.
-        await Http2FrameWriter.WriteHeadersAsync(stream, StreamId, block, endStream: !hasBody, _peerSettings.MaxFrameSize, ct).ConfigureAwait(false);
+        await BoundedWriteAsync(t => Http2FrameWriter.WriteHeadersAsync(stream, StreamId, block, endStream: !hasBody, _peerSettings.MaxFrameSize, t), ct).ConfigureAwait(false);
 
         if (hasBody && !_responseComplete)
             await SendBodyAsync(request.Body, ct).ConfigureAwait(false);
@@ -190,7 +195,7 @@ public sealed class Http2ClientConnection(Stream stream, TimeSpan? idleTimeout =
             _peerStreamWindow -= available;
             _peerConnectionWindow -= available;
             var isLast = offset + available >= body.Length;
-            await Http2FrameWriter.WriteAsync(stream, Http2FrameType.Data,
+            await WriteFrameAsync(Http2FrameType.Data,
                 isLast ? Http2FrameFlags.EndStream : Http2FrameFlags.None, StreamId,
                 body.AsMemory(offset, available), ct).ConfigureAwait(false);
             offset += available;
@@ -206,7 +211,9 @@ public sealed class Http2ClientConnection(Stream stream, TimeSpan? idleTimeout =
         }
         catch (Http2ProtocolException ex)
         {
-            await TrySendGoAwayAsync(ex.ErrorCode).ConfigureAwait(false);
+            // A stream error (RFC 9113 §5.4.2) resets the stream; anything else ends the connection.
+            if (ex.StreamId is { } failedStream) await TrySendAsync(Http2FrameType.RstStream, failedStream, ex.ErrorCode).ConfigureAwait(false);
+            else await TrySendAsync(Http2FrameType.GoAway, 0, ex.ErrorCode).ConfigureAwait(false);
             throw;
         }
     }
@@ -226,13 +233,13 @@ public sealed class Http2ClientConnection(Stream stream, TimeSpan? idleTimeout =
                 if (!frame.HasFlag(Http2FrameFlags.Ack))
                 {
                     if (frame.Payload.Length > 0) ApplyPeerSettings(frame.Payload.Span);
-                    await Http2FrameWriter.WriteAsync(stream, Http2FrameType.Settings, Http2FrameFlags.Ack, 0, ReadOnlyMemory<byte>.Empty, ct).ConfigureAwait(false);
+                    await WriteFrameAsync(Http2FrameType.Settings, Http2FrameFlags.Ack, 0, ReadOnlyMemory<byte>.Empty, ct).ConfigureAwait(false);
                 }
                 break;
 
             case Http2FrameType.Ping:
                 if (!frame.HasFlag(Http2FrameFlags.Ack))
-                    await Http2FrameWriter.WriteAsync(stream, Http2FrameType.Ping, Http2FrameFlags.Ack, 0, frame.Payload.ToArray(), ct).ConfigureAwait(false);
+                    await WriteFrameAsync(Http2FrameType.Ping, Http2FrameFlags.Ack, 0, frame.Payload.ToArray(), ct).ConfigureAwait(false);
                 break;
 
             case Http2FrameType.WindowUpdate:
@@ -295,6 +302,36 @@ public sealed class Http2ClientConnection(Stream stream, TimeSpan? idleTimeout =
         }
     }
 
+    private Task WriteFrameAsync(Http2FrameType type, Http2FrameFlags flags, int streamId, ReadOnlyMemory<byte> payload, CancellationToken ct) =>
+        BoundedWriteAsync(t => Http2FrameWriter.WriteAsync(stream, type, flags, streamId, payload, t), ct);
+
+    /// <summary>Runs one write to the origin, failing if it does not complete within the idle
+    /// timeout. An origin that stops reading its socket (a full TCP window) stalls the write itself,
+    /// where <see cref="ReadFrameAsync"/> never gets to run, so reads alone do not bound an upload.
+    /// Each write gets the full timeout rather than what is left of the read-side one: the origin
+    /// has just granted the window being written, and a write is no larger than one frame, so the
+    /// worst case from the last progress is two timeouts, not an open-ended wait.</summary>
+    private async Task BoundedWriteAsync(Func<CancellationToken, Task> write, CancellationToken ct)
+    {
+        if (_idleTimeout is not { } idle)
+        {
+            await write(ct).ConfigureAwait(false);
+            return;
+        }
+
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        linked.CancelAfter(idle);
+        try
+        {
+            await write(linked.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            throw new HttpParseException(
+                $"The origin did not accept HTTP/2 data for {idle.TotalSeconds:0.#}s; treating the connection as stalled.");
+        }
+    }
+
     // Reported as a parse failure, as HttpStreamReader reports its idle timeout, so it reaches the
     // caller as a named reason rather than a cancellation nobody asked for.
     private static HttpParseException Stalled(TimeSpan idle) =>
@@ -304,22 +341,24 @@ public sealed class Http2ClientConnection(Stream stream, TimeSpan? idleTimeout =
     /// bytes, and each request DATA frame the origin's window allowed; not for control frames.</summary>
     private void MarkProgress() => _lastProgress = Stopwatch.GetTimestamp();
 
-    /// <summary>Tells the origin why the connection is being abandoned (RFC 9113 §5.4.1: an endpoint
-    /// SHOULD send GOAWAY before closing on a connection error). Best effort and bounded: the
-    /// caller rethrows the original error, and the connection is dropped right after, so a write
-    /// that fails or stalls leaves nothing to recover.</summary>
-    private async Task TrySendGoAwayAsync(Http2ErrorCode code)
+    /// <summary>Tells the origin why the exchange is being abandoned: GOAWAY for a connection error
+    /// (RFC 9113 §5.4.1: an endpoint SHOULD send it before closing), RST_STREAM for a stream error.
+    /// Best effort and bounded: the caller rethrows the original error, and the connection is
+    /// dropped right after, so a write that fails or stalls leaves nothing to recover.</summary>
+    private async Task TrySendAsync(Http2FrameType type, int streamId, Http2ErrorCode code)
     {
-        var payload = new byte[8]; // last-stream-id 0: no stream of the origin's was accepted
-        payload[4] = (byte)((uint)code >> 24);
-        payload[5] = (byte)((uint)code >> 16);
-        payload[6] = (byte)((uint)code >> 8);
-        payload[7] = (byte)(uint)code;
+        // GOAWAY: last-stream-id 0 (no stream of the origin's was accepted) then the code.
+        var payload = new byte[type == Http2FrameType.GoAway ? 8 : 4];
+        var codeAt = payload.Length - 4;
+        payload[codeAt] = (byte)((uint)code >> 24);
+        payload[codeAt + 1] = (byte)((uint)code >> 16);
+        payload[codeAt + 2] = (byte)((uint)code >> 8);
+        payload[codeAt + 3] = (byte)(uint)code;
 
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(2));
         try
         {
-            await Http2FrameWriter.WriteAsync(stream, Http2FrameType.GoAway, Http2FrameFlags.None, 0, payload, timeout.Token).ConfigureAwait(false);
+            await Http2FrameWriter.WriteAsync(stream, type, Http2FrameFlags.None, streamId, payload, timeout.Token).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is IOException or OperationCanceledException or ObjectDisposedException)
         {
@@ -362,7 +401,16 @@ public sealed class Http2ClientConnection(Stream stream, TimeSpan? idleTimeout =
         _goAwayLastStreamId = lastStreamId;
 
         if (lastStreamId < StreamId)
+        {
+            // "Never processed" is only believable while nothing of a response has been seen. After
+            // that it contradicts the origin's own answer, and a caller that replays on this signal
+            // (a pool, with a POST) would send a request twice that the origin did process.
+            if (_responseFields is not null || !_pendingData.IsEmpty || _responseComplete || _interimResponses > 0)
+                throw new Http2ProtocolException(Http2ErrorCode.ProtocolError,
+                    $"GOAWAY names last-stream-id {lastStreamId} after stream {StreamId} was already answered.");
+
             throw new Http2GoAwayException(code, lastStreamId, $"Origin sent GOAWAY ({code}) before it began processing the request.");
+        }
     }
 
     private void ApplyWindowUpdate(Http2Frame frame)
@@ -372,8 +420,14 @@ public sealed class Http2ClientConnection(Stream stream, TimeSpan? idleTimeout =
 
         var span = frame.Payload.Span;
         var increment = ((span[0] & 0x7f) << 24) | (span[1] << 16) | (span[2] << 8) | span[3];
+        // RFC 9113 §6.9: zero is a connection error on the connection window, a stream error on a
+        // stream's (the stream is then reset instead of the connection being closed).
         if (increment == 0)
-            throw new Http2ProtocolException(Http2ErrorCode.ProtocolError, "WINDOW_UPDATE increment of 0.");
+            throw new Http2ProtocolException(Http2ErrorCode.ProtocolError, "WINDOW_UPDATE increment of 0.")
+            {
+                // Only our own stream can be reset; any other id names a stream that is idle here.
+                StreamId = frame.StreamId == StreamId ? StreamId : null,
+            };
 
         if (frame.StreamId == 0)
         {
@@ -385,7 +439,10 @@ public sealed class Http2ClientConnection(Stream stream, TimeSpan? idleTimeout =
         {
             _peerStreamWindow += increment;
             if (_peerStreamWindow > MaxWindow)
-                throw new Http2ProtocolException(Http2ErrorCode.FlowControlError, "WINDOW_UPDATE pushes the stream window past 2^31-1.");
+                throw new Http2ProtocolException(Http2ErrorCode.FlowControlError, "WINDOW_UPDATE pushes the stream window past 2^31-1.")
+                {
+                    StreamId = StreamId,
+                };
         }
     }
 
@@ -422,7 +479,7 @@ public sealed class Http2ClientConnection(Stream stream, TimeSpan? idleTimeout =
         payload[1] = (byte)(value >> 16);
         payload[2] = (byte)(value >> 8);
         payload[3] = (byte)value;
-        return Http2FrameWriter.WriteAsync(stream, Http2FrameType.WindowUpdate, Http2FrameFlags.None, streamId, payload, ct);
+        return WriteFrameAsync(Http2FrameType.WindowUpdate, Http2FrameFlags.None, streamId, payload, ct);
     }
 
     private void HandleResponseHeaders(Http2Frame frame)
@@ -445,8 +502,10 @@ public sealed class Http2ClientConnection(Stream stream, TimeSpan? idleTimeout =
         var fragment = frame.HeaderBlockPayload;
         if ((long)_headerBlockFragment.WrittenCount + fragment.Length > MaxHeaderBlockSize)
             throw new Http2ProtocolException(Http2ErrorCode.EnhanceYourCalm, "Header block exceeds the advertised header list size.");
+        if (++_headerBlockFragments > MaxHeaderBlockFragments)
+            throw new Http2ProtocolException(Http2ErrorCode.EnhanceYourCalm, "Header block is split into too many frames.");
         _headerBlockFragment.Write(fragment.Span);
-        MarkProgress();
+        if (!fragment.IsEmpty) MarkProgress(); // an empty fragment costs the origin nothing, so it proves nothing
 
         if (!frame.HasFlag(Http2FrameFlags.EndHeaders)) return;
 
@@ -464,6 +523,7 @@ public sealed class Http2ClientConnection(Stream stream, TimeSpan? idleTimeout =
         {
             _headerBlockFragment.ResetWrittenCount();
             _inHeaderBlock = false;
+            _headerBlockFragments = 0;
         }
 
         // The decoded list is capped too: one-byte references to a large dynamic-table entry turn a
@@ -500,7 +560,7 @@ public sealed class Http2ClientConnection(Stream stream, TimeSpan? idleTimeout =
     private void HandleResponseData(Http2Frame frame)
     {
         if (_responseFields is null)
-            throw new HttpParseException("HTTP/2 DATA arrived before the response headers.");
+            throw new Http2ProtocolException(Http2ErrorCode.ProtocolError, "HTTP/2 DATA arrived before the response headers.");
 
         // Each frame's payload is its own freshly allocated array, so it can be held as it is.
         _pendingData = frame.DataPayload;
