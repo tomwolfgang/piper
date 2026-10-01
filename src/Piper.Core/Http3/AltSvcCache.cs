@@ -4,19 +4,25 @@ namespace Piper.Core.Http3;
 
 /// <summary>
 /// Decides which origins are worth attempting over HTTP/3, driven by the <c>Alt-Svc</c> header
-/// those origins send on their ordinary TCP responses (RFC 7838).
+/// those origins send on their ordinary TLS responses (RFC 7838).
 /// </summary>
 /// <remarks>
-/// The strategy is deliberately conservative about latency. A host is never attempted over QUIC
+/// The strategy is deliberately conservative about latency. An origin is never attempted over QUIC
 /// on the first, cold request -- that is the one a user is actively waiting on, and paying a
 /// speculative UDP handshake there is the worst possible place to spend time. Only once an origin
 /// has told us, on a response we already have, that it speaks h3 does it become eligible. Failures
 /// are remembered too: on a network that blocks UDP/443 (common, and true of the network this was
-/// developed on) the first failure disables h3 for that host for a cool-down period instead of
+/// developed on) the first failure disables h3 for that origin for a cool-down period instead of
 /// re-paying the timeout on every request.
 /// <para>
-/// The header is hostile input, and so is the number of hosts a page can make a client talk to, so
-/// the cache is bounded in entries and in the header it will parse. It honours the freshness
+/// An origin is a host AND a port: an advertisement made by <c>host:8443</c> says nothing about
+/// <c>host:443</c>, which is a different server. The caller must say which origin the header came
+/// from, and must only offer headers that arrived over TLS -- a plain-HTTP response can be forged
+/// by anything on the path.
+/// </para>
+/// <para>
+/// The header is hostile input, and so is the number of origins a page can make a client talk to,
+/// so the cache is bounded in entries and in the header it will parse. It honours the freshness
 /// lifetime (<c>ma</c>, default 24 hours) and the alternative's port. It does NOT follow an
 /// alternative on another host: the origin would be choosing where Piper sends UDP, and a
 /// misconfigured or malicious one could aim it at an internal address. Such an alternative is
@@ -25,14 +31,13 @@ namespace Piper.Core.Http3;
 /// </remarks>
 public sealed class AltSvcCache(TimeProvider? timeProvider = null)
 {
-    /// <summary>Hosts remembered at once. Past it the expired entries go first, then the least
+    /// <summary>Origins remembered at once. Past it the spent entries go first, then the least
     /// recently used.</summary>
     public const int MaxEntries = 2048;
 
     /// <summary>The longest Alt-Svc header value parsed. A longer one is ignored outright.</summary>
     public const int MaxHeaderLength = 8 * 1024;
 
-    private const int DefaultHttpsPort = 443;
     private const int MaxAlternatives = 16;
     private const int MaxHostLength = 255;
     private static readonly TimeSpan DefaultMaxAge = TimeSpan.FromHours(24);
@@ -42,9 +47,9 @@ public sealed class AltSvcCache(TimeProvider? timeProvider = null)
     {
         public bool Advertised;
         public int AltPort;
-        public int? OriginPort;
         public DateTimeOffset ExpiresAt;
         public DateTimeOffset? FailedUntil;
+        public DateTimeOffset? SoftUntil;
         public long LastUsed;
     }
 
@@ -52,81 +57,84 @@ public sealed class AltSvcCache(TimeProvider? timeProvider = null)
     internal readonly record struct Alternative(int Port, TimeSpan MaxAge);
 
     private readonly TimeProvider _time = timeProvider ?? TimeProvider.System;
-    private readonly Dictionary<string, Entry> _hosts = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, Entry> _origins = new(StringComparer.OrdinalIgnoreCase);
     private readonly Lock _gate = new();
     private long _tick;
 
-    /// <summary>How long a failed QUIC attempt suppresses further attempts to that host.</summary>
+    /// <summary>How long a failed QUIC attempt suppresses further attempts to that origin.</summary>
     public TimeSpan FailureCooldown { get; set; } = TimeSpan.FromMinutes(30);
 
-    /// <summary>How many hosts are remembered right now.</summary>
+    /// <summary>How long an origin that merely cannot serve this kind of request over h3 (it sent
+    /// GOAWAY, or the response does not fit the buffered path) is left on TCP. Short, because
+    /// nothing is wrong with h3 itself -- but not zero, or such an origin would cost a QUIC handshake
+    /// and a wasted response on every request.</summary>
+    public TimeSpan SoftCooldown { get; set; } = TimeSpan.FromMinutes(1);
+
+    /// <summary>How many origins are remembered right now.</summary>
     internal int Count
     {
-        get { lock (_gate) return _hosts.Count; }
+        get { lock (_gate) return _origins.Count; }
     }
 
-    /// <summary>Records an origin's <c>Alt-Svc</c> header. Only an <c>h3</c> alternative on the
-    /// origin's own host counts; "h3-29" and friends are drafts msquic will not negotiate.</summary>
-    public void RecordAltSvc(string host, string? altSvcHeader) => RecordAltSvc(host, null, altSvcHeader);
+    private static string Key(string host, int port) => string.Create(CultureInfo.InvariantCulture, $"{host}:{port}");
 
-    /// <summary>As above, for a caller that knows the port the header arrived on. The alternative is
-    /// then used for that origin port and no other; without it, it is used for the default https
-    /// port and for the alternative's own port (see <see cref="TryGetEndpoint"/>).</summary>
-    public void RecordAltSvc(string host, int? originPort, string? altSvcHeader)
+    /// <summary>Records the <c>Alt-Svc</c> header of a response that arrived over TLS from
+    /// <paramref name="host"/>:<paramref name="originPort"/>. Only an <c>h3</c> alternative on that
+    /// host counts; "h3-29" and friends are drafts msquic will not negotiate.</summary>
+    public void RecordAltSvc(string host, int originPort, string? altSvcHeader)
     {
-        if (string.IsNullOrWhiteSpace(host) || host.Length > MaxHostLength) return;
+        if (string.IsNullOrWhiteSpace(host) || host.Length > MaxHostLength || originPort is < 1 or > 65535) return;
         if (string.IsNullOrWhiteSpace(altSvcHeader) || altSvcHeader.Length > MaxHeaderLength) return;
 
+        var key = Key(host, originPort);
+
         // "clear" and ma=0 both withdraw the alternative; neither may erase a failure cool-down, or an
-        // origin could end its own bar from a TCP response.
+        // origin could end its own bar from a TLS response.
         if (altSvcHeader.Trim().Equals("clear", StringComparison.OrdinalIgnoreCase))
         {
-            Withdraw(host);
+            lock (_gate) WithdrawLocked(key);
             return;
         }
 
-        if (!TryParse(altSvcHeader, host, out var alternative)) return;
+        var found = TryParse(altSvcHeader, host, out var alternative, out var withdrawn);
 
         lock (_gate)
         {
-            // ma=0 withdraws the alternative (RFC 7838 §3.1).
-            if (alternative.MaxAge <= TimeSpan.Zero)
+            if (found)
             {
-                WithdrawLocked(host);
-                return;
+                var entry = Touch(key);
+                entry.Advertised = true;
+                entry.AltPort = alternative.Port;
+                entry.ExpiresAt = _time.GetUtcNow() + alternative.MaxAge;
             }
-
-            var entry = Touch(host);
-            entry.Advertised = true;
-            entry.AltPort = alternative.Port;
-            entry.OriginPort = originPort;
-            entry.ExpiresAt = _time.GetUtcNow() + alternative.MaxAge;
+            else if (withdrawn)
+            {
+                WithdrawLocked(key); // ma=0 (RFC 7838 §3.1) and nothing else usable
+            }
         }
     }
 
-    private void Withdraw(string host)
+    // Callers hold _gate. Keeps the entry for its cool-downs, if any are running.
+    private void WithdrawLocked(string key)
     {
-        lock (_gate) WithdrawLocked(host);
-    }
-
-    // Callers hold _gate. Keeps the entry for its failure cool-down, if one is running.
-    private void WithdrawLocked(string host)
-    {
-        if (_hosts.TryGetValue(host, out var entry)) entry.Advertised = false;
+        if (_origins.TryGetValue(key, out var entry)) entry.Advertised = false;
     }
 
     /// <summary>True when <paramref name="altSvcHeader"/> offers final-standard HTTP/3 (an
     /// <c>h3</c> alternative with a usable authority, on any host).</summary>
     public static bool AdvertisesHttp3(string altSvcHeader) =>
-        altSvcHeader.Length <= MaxHeaderLength && TryParse(altSvcHeader, originHost: null, out _);
+        altSvcHeader.Length <= MaxHeaderLength && TryParse(altSvcHeader, originHost: null, out _, out _);
 
     /// <summary>
     /// Parses the first <c>h3</c> alternative that may be used: <c>h3="[host]:port"[; ma=seconds]</c>.
     /// With <paramref name="originHost"/> given, an alternative naming a different host is skipped.
+    /// An alternative with <c>ma=0</c> is not usable but is not the end of the header either: the
+    /// scan goes on, and <paramref name="withdrawn"/> says one was seen.
     /// </summary>
-    internal static bool TryParse(string header, string? originHost, out Alternative alternative)
+    internal static bool TryParse(string header, string? originHost, out Alternative alternative, out bool withdrawn)
     {
         alternative = default;
+        withdrawn = false;
 
         var examined = 0;
         foreach (var raw in header.Split(','))
@@ -142,8 +150,13 @@ public sealed class AltSvcCache(TimeProvider? timeProvider = null)
             if (!head[..equals].Trim().Trim('"').Equals("h3", StringComparison.OrdinalIgnoreCase)) continue;
 
             if (!TryParseAuthority(head[(equals + 1)..], originHost, out var port)) continue;
-
             if (!TryParseMaxAge(parts, out var maxAge)) continue;
+
+            if (maxAge <= TimeSpan.Zero)
+            {
+                withdrawn = true;
+                continue;
+            }
 
             alternative = new Alternative(port, maxAge);
             return true;
@@ -200,17 +213,22 @@ public sealed class AltSvcCache(TimeProvider? timeProvider = null)
 
     /// <summary>
     /// Whether to attempt QUIC for this origin right now, and on which UDP port. False when QUIC is
-    /// unavailable, nothing fresh was advertised, a recent attempt failed, or the advertised port
-    /// would be used for an origin it was not advertised for.
+    /// unavailable or <see cref="TryGetRecorded"/> says no.
     /// </summary>
     public bool TryGetEndpoint(string host, int originPort, out int port)
     {
         port = 0;
-        if (!Http3ClientConnection.IsSupported) return false;
+        return Http3ClientConnection.IsSupported && TryGetRecorded(host, originPort, out port);
+    }
 
+    /// <summary>What the cache itself holds for this origin, whether or not QUIC can run on this
+    /// machine: a fresh advertisement made by this very origin and no cool-down running.</summary>
+    internal bool TryGetRecorded(string host, int originPort, out int port)
+    {
+        port = 0;
         lock (_gate)
         {
-            if (!_hosts.TryGetValue(host, out var entry) || !entry.Advertised) return false;
+            if (!_origins.TryGetValue(Key(host, originPort), out var entry) || !entry.Advertised) return false;
 
             var now = _time.GetUtcNow();
             if (now >= entry.ExpiresAt)
@@ -218,17 +236,8 @@ public sealed class AltSvcCache(TimeProvider? timeProvider = null)
                 entry.Advertised = false;
                 return false;
             }
-            if (entry.FailedUntil is { } until && now < until) return false;
-
-            // Advertised for one origin port, asked about another: not applicable, because an h3
-            // server on host:443 answers for host:443, not host:8444. A caller that did not say which
-            // port the header arrived on (the proxy's two call sites) gets the two cases that can be
-            // trusted: the default https port, where nearly every advertisement comes from, and an
-            // alternative on the very port asked about, which is what was always assumed.
-            var applies = entry.OriginPort is { } advertisedFor
-                ? advertisedFor == originPort
-                : originPort == DefaultHttpsPort || entry.AltPort == originPort;
-            if (!applies) return false;
+            if (entry.FailedUntil is { } failed && now < failed) return false;
+            if (entry.SoftUntil is { } soft && now < soft) return false;
 
             entry.LastUsed = ++_tick;
             port = entry.AltPort;
@@ -236,34 +245,46 @@ public sealed class AltSvcCache(TimeProvider? timeProvider = null)
         }
     }
 
-    /// <summary>Suppresses further attempts to this host until the cool-down expires.</summary>
-    public void RecordFailure(string host)
+    /// <summary>Suppresses further attempts to this origin until the cool-down expires.</summary>
+    public void RecordFailure(string host, int originPort) => Cool(host, originPort, FailureCooldown, soft: false);
+
+    /// <summary>Leaves this origin on TCP for the short <see cref="SoftCooldown"/>: h3 is not at
+    /// fault, but this origin cannot take requests over it right now.</summary>
+    public void RecordSoftFailure(string host, int originPort) => Cool(host, originPort, SoftCooldown, soft: true);
+
+    private void Cool(string host, int originPort, TimeSpan duration, bool soft)
     {
-        if (string.IsNullOrWhiteSpace(host) || host.Length > MaxHostLength) return;
+        if (string.IsNullOrWhiteSpace(host) || host.Length > MaxHostLength || originPort is < 1 or > 65535) return;
         lock (_gate)
         {
-            var entry = Touch(host);
-            entry.FailedUntil = _time.GetUtcNow() + FailureCooldown;
+            var entry = Touch(Key(host, originPort));
+            var until = _time.GetUtcNow() + duration;
+            if (soft) entry.SoftUntil = until;
+            else entry.FailedUntil = until;
         }
     }
 
-    /// <summary>Clears a previous failure after a successful attempt.</summary>
-    public void RecordSuccess(string host)
+    /// <summary>Clears previous failures after a successful attempt.</summary>
+    public void RecordSuccess(string host, int originPort)
     {
         lock (_gate)
         {
-            if (_hosts.TryGetValue(host, out var entry)) entry.FailedUntil = null;
+            if (_origins.TryGetValue(Key(host, originPort), out var entry))
+            {
+                entry.FailedUntil = null;
+                entry.SoftUntil = null;
+            }
         }
     }
 
     // Callers hold _gate. Finds or adds the entry and keeps the table within MaxEntries.
-    private Entry Touch(string host)
+    private Entry Touch(string key)
     {
-        if (!_hosts.TryGetValue(host, out var entry))
+        if (!_origins.TryGetValue(key, out var entry))
         {
-            if (_hosts.Count >= MaxEntries) Trim();
+            if (_origins.Count >= MaxEntries) Trim();
             entry = new Entry();
-            _hosts[host] = entry;
+            _origins[key] = entry;
         }
         entry.LastUsed = ++_tick;
         return entry;
@@ -271,20 +292,22 @@ public sealed class AltSvcCache(TimeProvider? timeProvider = null)
 
     // Nothing advertised that is still fresh and no cool-down running: remembering it is pointless.
     private static bool IsSpent(Entry entry, DateTimeOffset now) =>
-        (!entry.Advertised || now >= entry.ExpiresAt) && (entry.FailedUntil is not { } until || now >= until);
+        (!entry.Advertised || now >= entry.ExpiresAt)
+        && (entry.FailedUntil is not { } failed || now >= failed)
+        && (entry.SoftUntil is not { } soft || now >= soft);
 
     // Frees a quarter of the table so the cost of choosing is paid once per MaxEntries / 4 inserts,
-    // not on every one: expired and idle entries first, then the least recently used.
+    // not on every one: spent entries first, then the least recently used.
     private void Trim()
     {
         var now = _time.GetUtcNow();
-        foreach (var stale in _hosts.Where(pair => IsSpent(pair.Value, now)).Select(pair => pair.Key).ToList())
-            _hosts.Remove(stale);
+        foreach (var stale in _origins.Where(pair => IsSpent(pair.Value, now)).Select(pair => pair.Key).ToList())
+            _origins.Remove(stale);
 
         var target = MaxEntries - MaxEntries / 4;
-        if (_hosts.Count <= target) return;
+        if (_origins.Count <= target) return;
 
-        foreach (var oldest in _hosts.OrderBy(pair => pair.Value.LastUsed).Take(_hosts.Count - target).Select(pair => pair.Key).ToList())
-            _hosts.Remove(oldest);
+        foreach (var oldest in _origins.OrderBy(pair => pair.Value.LastUsed).Take(_origins.Count - target).Select(pair => pair.Key).ToList())
+            _origins.Remove(oldest);
     }
 }

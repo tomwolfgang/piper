@@ -103,7 +103,13 @@ internal sealed class TestHttp3Origin : IAsyncDisposable
             var control = await connection.OpenOutboundStreamAsync(QuicStreamType.Unidirectional, _cts.Token);
             if (_behavior?.WriteControlStream is { } writeControl)
             {
-                await writeControl(control, _cts.Token);
+                // Not awaited: a script may hold part of its control stream back until a request has
+                // arrived, and requests are only accepted below.
+                _ = Task.Run(async () =>
+                {
+                    try { await writeControl(control, _cts.Token); }
+                    catch { /* the test asserts on the client side */ }
+                });
             }
             else
             {

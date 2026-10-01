@@ -95,6 +95,12 @@ public sealed class ProxyOptions
     /// handshake but drops later UDP is, so the request falls back to TCP instead of hanging.</summary>
     public TimeSpan Http3ResponseTimeout { get; set; } = TimeSpan.FromSeconds(15);
 
+    /// <summary>The longest one HTTP/3 request may take from the end of the handshake to the last
+    /// byte of the response, however steadily it progresses. A ceiling over the idle timeout, which
+    /// alone would let an origin trickle a response for as long as it likes. A response that needs
+    /// longer falls back to TCP, which streams it.</summary>
+    public TimeSpan Http3MaxResponseTime { get; set; } = TimeSpan.FromMinutes(15);
+
     public bool ShouldDecrypt(string host)
     {
         if (!DecryptHttps) return false;

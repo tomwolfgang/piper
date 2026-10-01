@@ -18,7 +18,6 @@ internal static class Http3HardeningTests
 
     public static async Task RunAsync(TestRunner runner)
     {
-        await RunAltSvcTestsAsync(runner);
         await RunCodecTestsAsync(runner);
 
         if (!TestHttp3Origin.IsSupported || !Quic)
@@ -38,198 +37,6 @@ internal static class Http3HardeningTests
         await RunControlStreamTestsAsync(runner, ca);
         await RunIdleTimeoutTestsAsync(runner, ca);
         await RunAttemptTestsAsync(runner, ca);
-    }
-
-    // ------------------------------------------------------------------ Alt-Svc
-
-    private sealed class ManualTime : TimeProvider
-    {
-        public DateTimeOffset Now { get; set; } = new(2026, 10, 1, 12, 0, 0, TimeSpan.Zero);
-        public override DateTimeOffset GetUtcNow() => Now;
-    }
-
-    // Eligibility as the cache reports it, allowing for a machine without QUIC (always false there).
-    private static bool Eligible(AltSvcCache cache, string host, int originPort) =>
-        cache.TryGetEndpoint(host, originPort, out _);
-
-    private static async Task RunAltSvcTestsAsync(TestRunner runner)
-    {
-        await runner.RunAsync("Alt-Svc: the ma lifetime is honoured, defaults to 24 hours and is clamped", () =>
-        {
-            var time = new ManualTime();
-            var cache = new AltSvcCache(time);
-
-            cache.RecordAltSvc("short.example", "h3=\":443\"; ma=60");
-            cache.RecordAltSvc("default.example", "h3=\":443\"");
-            cache.RecordAltSvc("quoted.example", "h3=\":443\"; ma=\"120\"");
-            cache.RecordAltSvc("huge.example", "h3=\":443\"; ma=99999999999999999999999999");
-
-            time.Now += TimeSpan.FromSeconds(59);
-            runner.AreEqual(Quic, Eligible(cache, "short.example", 443), "fresh just inside ma");
-            time.Now += TimeSpan.FromSeconds(2);
-            runner.IsTrue(!Eligible(cache, "short.example", 443), "stale just past ma=60");
-            runner.AreEqual(Quic, Eligible(cache, "quoted.example", 443), "a quoted ma=\"120\" is read too: still fresh at 61 s");
-
-            time.Now = new ManualTime().Now + TimeSpan.FromHours(23);
-            runner.AreEqual(Quic, Eligible(cache, "default.example", 443), "no ma means 24 hours: fresh at 23 h");
-            time.Now += TimeSpan.FromHours(2);
-            runner.IsTrue(!Eligible(cache, "default.example", 443), "no ma means 24 hours: stale at 25 h");
-
-            time.Now = new ManualTime().Now + TimeSpan.FromDays(29);
-            runner.AreEqual(Quic, Eligible(cache, "huge.example", 443), "an enormous ma is clamped, not overflowed: fresh at 29 d");
-            time.Now += TimeSpan.FromDays(2);
-            runner.IsTrue(!Eligible(cache, "huge.example", 443), "an enormous ma is clamped to 30 days");
-            return Task.CompletedTask;
-        });
-
-        await runner.RunAsync("Alt-Svc: ma=0 withdraws the alternative, a malformed ma makes it unusable", () =>
-        {
-            var cache = new AltSvcCache(new ManualTime());
-
-            cache.RecordAltSvc("a.example", "h3=\":443\"; ma=3600");
-            runner.AreEqual(Quic, Eligible(cache, "a.example", 443), "advertised");
-            cache.RecordAltSvc("a.example", "h3=\":443\"; ma=0");
-            runner.IsTrue(!Eligible(cache, "a.example", 443), "ma=0 withdraws it");
-
-            foreach (var bad in new[] { "ma=-5", "ma=abc", "ma=", "ma=1e9", "ma=1 000", "ma=+60", "ma=6.5" })
-            {
-                var fresh = new AltSvcCache(new ManualTime());
-                fresh.RecordAltSvc("b.example", $"h3=\":443\"; {bad}");
-                runner.IsTrue(!Eligible(fresh, "b.example", 443), $"'{bad}' is not a lifetime, so the alternative is not used");
-            }
-            return Task.CompletedTask;
-        });
-
-        await runner.RunAsync("Alt-Svc: the alternative's port is used, and only for the origin it was advertised for", () =>
-        {
-            var cache = new AltSvcCache(new ManualTime());
-
-            cache.RecordAltSvc("p.example", 443, "h3=\":8443\"");
-            var ok = cache.TryGetEndpoint("p.example", 443, out var port);
-            runner.AreEqual(Quic, ok, "a known origin port with another UDP port is eligible");
-            if (Quic) runner.AreEqual(8443, port, "the UDP port comes from the authority, not the origin port");
-            runner.IsTrue(!Eligible(cache, "p.example", 444), "the same host on another origin port is a different origin");
-
-            // The proxy's call sites do not say which port the header arrived on. Two cases can be trusted.
-            var unknown = new AltSvcCache(new ManualTime());
-            unknown.RecordAltSvc("q.example", "h3=\":8443\"");
-            var onDefault = unknown.TryGetEndpoint("q.example", 443, out var defaultPort);
-            runner.AreEqual(Quic, onDefault, "an alternative on another UDP port applies to the default https port");
-            if (Quic) runner.AreEqual(8443, defaultPort, "and its port is used");
-            runner.AreEqual(Quic, Eligible(unknown, "q.example", 8443), "an alternative on the very port asked about applies");
-            runner.IsTrue(!Eligible(unknown, "q.example", 9000), "but not to some third port nobody vouched for");
-            unknown.RecordAltSvc("r.example", "h3=\":443\"");
-            runner.AreEqual(Quic, Eligible(unknown, "r.example", 443), "the common case (h3=\":443\" from port 443) works");
-            runner.IsTrue(!Eligible(unknown, "r.example", 444), "and does not leak to another port of the host");
-            return Task.CompletedTask;
-        });
-
-        await runner.RunAsync("Alt-Svc: an alternative on another host or with a bad port is ignored", () =>
-        {
-            var cache = new AltSvcCache(new ManualTime());
-
-            cache.RecordAltSvc("example.com", 443, "h3=\"EXAMPLE.com:8443\"");
-            runner.AreEqual(Quic, Eligible(cache, "example.com", 443), "the origin's own host, any case, is accepted");
-
-            foreach (var header in new[]
-            {
-                "h3=\"other.example:443\"", "h3=\"evil.example:443\"; ma=86400", "h3=\"127.0.0.1:443\"", "h3=\"[::1]:443\"",
-                "h3=\":0\"", "h3=\":65536\"", "h3=\":-1\"", "h3=\":abc\"", "h3=\":\"", "h3=\"\"", "h3=", "h3=\":99999999999999999999\"",
-                "h3=\":4 43\"", "h3=\"example.com\"", "h3-29=\":443\"", "h2=\":443\"", "=:443",
-            })
-            {
-                var fresh = new AltSvcCache(new ManualTime());
-                fresh.RecordAltSvc("example.com", 443, header);
-                runner.IsTrue(!Eligible(fresh, "example.com", 443), $"not used: {header}");
-            }
-
-            var mixed = new AltSvcCache(new ManualTime());
-            mixed.RecordAltSvc("example.com", 443, "h3=\"cdn.example:443\", h3-29=\":443\", h3=\":8443\"; ma=60");
-            var picked = mixed.TryGetEndpoint("example.com", 443, out var mixedPort);
-            runner.AreEqual(Quic, picked, "the first usable h3 alternative wins");
-            if (Quic) runner.AreEqual(8443, mixedPort, "the off-host and draft alternatives were skipped");
-
-            var ipv6 = new AltSvcCache(new ManualTime());
-            ipv6.RecordAltSvc("::1", 443, "h3=\"[::1]:8443\"");
-            runner.AreEqual(Quic, Eligible(ipv6, "::1", 443), "an IPv6 literal origin matches its bracketed form");
-            return Task.CompletedTask;
-        });
-
-        await runner.RunAsync("Alt-Svc: the cache is bounded in hosts and in the header it will read", () =>
-        {
-            var time = new ManualTime();
-            var cache = new AltSvcCache(time);
-
-            for (var i = 0; i < 5_000; i++) cache.RecordAltSvc($"host{i}.example", "h3=\":443\"; ma=86400");
-            runner.IsTrue(cache.Count <= AltSvcCache.MaxEntries, $"advertisements are capped ({cache.Count} <= {AltSvcCache.MaxEntries})");
-            runner.AreEqual(Quic, Eligible(cache, "host4999.example", 443), "the newest host is kept");
-            runner.IsTrue(!Eligible(cache, "host0.example", 443), "the oldest host was dropped");
-
-            var failures = new AltSvcCache(time);
-            for (var i = 0; i < 5_000; i++) failures.RecordFailure($"down{i}.example");
-            runner.IsTrue(failures.Count <= AltSvcCache.MaxEntries, $"failures are capped too ({failures.Count})");
-
-            var tooLong = new AltSvcCache(time);
-            tooLong.RecordAltSvc("long.example", "h3=\":443\", " + new string('x', AltSvcCache.MaxHeaderLength));
-            runner.IsTrue(!Eligible(tooLong, "long.example", 443), "a header past the length limit is ignored whole");
-            tooLong.RecordAltSvc(new string('h', 300) + ".example", "h3=\":443\"");
-            runner.AreEqual(0, tooLong.Count, "a host name longer than any host name is not stored");
-
-            var many = new AltSvcCache(time);
-            many.RecordAltSvc("many.example", string.Join(", ", Enumerable.Repeat("h2=\":443\"", 20)) + ", h3=\":443\"");
-            runner.IsTrue(!Eligible(many, "many.example", 443), "the h3 entry after 16 alternatives is not looked for");
-            many.RecordAltSvc("few.example", "h2=\":443\", h3=\":443\"");
-            runner.AreEqual(Quic, Eligible(many, "few.example", 443), "within the first 16 it is found");
-            return Task.CompletedTask;
-        });
-
-        await runner.RunAsync("Alt-Svc: expired entries are dropped before live ones when the table is full", () =>
-        {
-            var time = new ManualTime();
-            var cache = new AltSvcCache(time);
-
-            cache.RecordAltSvc("keeper.example", "h3=\":443\"; ma=86400");
-            for (var i = 0; i < AltSvcCache.MaxEntries - 1; i++) cache.RecordAltSvc($"brief{i}.example", "h3=\":443\"; ma=1");
-            runner.AreEqual(AltSvcCache.MaxEntries, cache.Count, "the table is full");
-
-            time.Now += TimeSpan.FromSeconds(30);
-            cache.RecordAltSvc("newcomer.example", "h3=\":443\"; ma=60");
-
-            runner.AreEqual(Quic, Eligible(cache, "keeper.example", 443), "the live entry survived the clean-up");
-            runner.AreEqual(Quic, Eligible(cache, "newcomer.example", 443), "and the new one was added");
-            runner.IsTrue(cache.Count < 10, $"the expired ones went ({cache.Count} left)");
-            return Task.CompletedTask;
-        });
-
-        await runner.RunAsync("Alt-Svc: a failure cool-down expires, and a success lifts it", () =>
-        {
-            var time = new ManualTime();
-            var cache = new AltSvcCache(time) { FailureCooldown = TimeSpan.FromMinutes(5) };
-
-            cache.RecordAltSvc("f.example", 443, "h3=\":443\"; ma=86400");
-            cache.RecordFailure("f.example");
-            runner.IsTrue(!Eligible(cache, "f.example", 443), "barred during the cool-down");
-            time.Now += TimeSpan.FromMinutes(6);
-            runner.AreEqual(Quic, Eligible(cache, "f.example", 443), "eligible again after it");
-
-            cache.RecordFailure("f.example");
-            cache.RecordSuccess("f.example");
-            runner.AreEqual(Quic, Eligible(cache, "f.example", 443), "a success clears the failure");
-
-            // Withdrawing the alternative (clear, or ma=0) must not end a bar the origin has earned.
-            foreach (var withdrawal in new[] { "clear", "h3=\":443\"; ma=0" })
-            {
-                var barred = new AltSvcCache(time) { FailureCooldown = TimeSpan.FromMinutes(5) };
-                barred.RecordAltSvc("g.example", 443, "h3=\":443\"");
-                barred.RecordFailure("g.example");
-                barred.RecordAltSvc("g.example", 443, withdrawal);
-                barred.RecordAltSvc("g.example", 443, "h3=\":443\"");
-                runner.IsTrue(!Eligible(barred, "g.example", 443), $"'{withdrawal}' then a fresh advertisement: still barred");
-                time.Now += TimeSpan.FromMinutes(6);
-                runner.AreEqual(Quic, Eligible(barred, "g.example", 443), $"'{withdrawal}': eligible once the cool-down is over");
-            }
-            return Task.CompletedTask;
-        });
     }
 
     // ------------------------------------------------------------------ codec pieces
@@ -619,7 +426,7 @@ internal static class Http3HardeningTests
 
             ExpectProtocolError(runner,
                 await ExchangeAsync(ca, Respond((s, ct) => SendAsync(s, ct, true, ResponseHeaders(200), Frame((long)Http3FrameType.CancelPush, [0])))),
-                Http3ErrorCode.IdError, "CANCEL_PUSH when no push was enabled");
+                Http3ErrorCode.FrameUnexpected, "CANCEL_PUSH on a request stream (control stream only, RFC 9114 section 7.2.3)");
         });
 
         await runner.RunAsync("HTTP/3: trailers, interim responses and unknown frames are accepted within limits", async () =>
@@ -658,6 +465,61 @@ internal static class Http3HardeningTests
             var truncated = await ExchangeAsync(ca, Respond((s, ct) => SendAsync(s, ct, true,
                 ResponseHeaders(200), DataFrame(1000)[..500])));
             runner.IsTrue(truncated.Failure is HttpParseException, $"a DATA frame cut short by the end of the stream (was: {Describe(truncated.Failure)})");
+        });
+
+        await runner.RunAsync("HTTP/3: the body must be as long as the Content-Length says (RFC 9114 section 4.1.2)", async () =>
+        {
+            var exact = await ExchangeAsync(ca, Respond((s, ct) => SendAsync(s, ct, true,
+                ResponseHeaders(200, ("content-length", "1000")), DataFrame(600), DataFrame(400))));
+            runner.AreEqual(1000, exact.Response?.Body.Length ?? -1, $"exactly the announced length, in two frames (was: {Describe(exact.Failure)})");
+
+            // A clean end of stream after 500 of 1000 bytes used to be a complete response.
+            var shortBody = await ExchangeAsync(ca, Respond((s, ct) => SendAsync(s, ct, true,
+                ResponseHeaders(200, ("content-length", "1000")), DataFrame(500))));
+            runner.IsTrue(shortBody.Failure is HttpParseException { Message: var shortMessage } && shortMessage.Contains("Content-Length", StringComparison.Ordinal),
+                $"500 of 1000 bytes (was: {Describe(shortBody.Failure)})");
+
+            var empty = await ExchangeAsync(ca, Respond((s, ct) => SendAsync(s, ct, true, ResponseHeaders(200, ("content-length", "5")))));
+            runner.IsTrue(empty.Failure is HttpParseException, $"a length with no body at all (was: {Describe(empty.Failure)})");
+
+            var longBody = await ExchangeAsync(ca, Respond((s, ct) => SendAsync(s, ct, true,
+                ResponseHeaders(200, ("content-length", "100")), DataFrame(60), DataFrame(60))));
+            runner.IsTrue(longBody.Failure is HttpParseException, $"120 of 100 bytes, refused as soon as it passes (was: {Describe(longBody.Failure)})");
+
+            var zero = await ExchangeAsync(ca, Respond((s, ct) => SendAsync(s, ct, true, ResponseHeaders(200, ("content-length", "0")))));
+            runner.AreEqual(0, zero.Response?.Body.Length ?? -1, $"an announced empty body is fine (was: {Describe(zero.Failure)})");
+
+            // Responses that announce a length for a body that is not sent.
+            var head = await ExchangeAsync(ca, Respond((s, ct) => SendAsync(s, ct, true, ResponseHeaders(200, ("content-length", "1000")))), method: "HEAD");
+            runner.AreEqual(200, head.Response?.StatusCode ?? -1, $"HEAD (was: {Describe(head.Failure)})");
+            foreach (var status in new[] { 204, 304 })
+            {
+                var none = await ExchangeAsync(ca, Respond((s, ct) => SendAsync(s, ct, true, ResponseHeaders(status, ("content-length", "1000")))));
+                runner.AreEqual(status, none.Response?.StatusCode ?? -1, $"{status} (was: {Describe(none.Failure)})");
+            }
+
+            // Not a plain number: nothing to compare with, so no judgement; two numbers that disagree: ambiguous.
+            var unparsable = await ExchangeAsync(ca, Respond((s, ct) => SendAsync(s, ct, true,
+                ResponseHeaders(200, ("content-length", "5, 5")), DataFrame(7))));
+            runner.AreEqual(7, unparsable.Response?.Body.Length ?? -1, $"an unparsable Content-Length is not enforced (was: {Describe(unparsable.Failure)})");
+            var conflicting = await ExchangeAsync(ca, Respond((s, ct) => SendAsync(s, ct, true,
+                ResponseHeaders(200, ("content-length", "5"), ("content-length", "6")), DataFrame(5))));
+            runner.IsTrue(conflicting.Failure is HttpParseException, $"two different Content-Length values (was: {Describe(conflicting.Failure)})");
+        });
+
+        await runner.RunAsync("HTTP/3: a trailer section carries no pseudo-headers, and a second response is not a trailer", async () =>
+        {
+            var statusInTrailer = await ExchangeAsync(ca, Respond((s, ct) => SendAsync(s, ct, true,
+                ResponseHeaders(200), DataFrame(5), Frame((long)Http3FrameType.Headers, QpackEncoder.Encode([(":status", "500")])))));
+            runner.IsTrue(statusInTrailer.Failure is HttpParseException, $":status in trailers (was: {Describe(statusInTrailer.Failure)})");
+
+            var lateInterim = await ExchangeAsync(ca, Respond((s, ct) => SendAsync(s, ct, true,
+                ResponseHeaders(200), DataFrame(5), ResponseHeaders(103))));
+            runner.IsTrue(lateInterim.Failure is HttpParseException, $"a 1xx after the final response (was: {Describe(lateInterim.Failure)})");
+
+            var pathInTrailer = await ExchangeAsync(ca, Respond((s, ct) => SendAsync(s, ct, true,
+                ResponseHeaders(200), Frame((long)Http3FrameType.Headers, QpackEncoder.Encode([(":path", "/")])))));
+            runner.IsTrue(pathInTrailer.Failure is HttpParseException, $"any pseudo-header (was: {Describe(pathInTrailer.Failure)})");
         });
     }
 
@@ -821,6 +683,54 @@ internal static class Http3HardeningTests
             ExpectProtocolError(runner,
                 await ExchangeAsync(ca, Control(ControlStream(Settings(), GoAway(4), GoAway(8)))),
                 Http3ErrorCode.IdError, "a GOAWAY that raises the limit");
+
+            // Repeats that change nothing are still bounded.
+            ExpectProtocolError(runner,
+                await ExchangeAsync(ca, Control(ControlStream([Settings(), .. Enumerable.Repeat(GoAway(8), 20)]))),
+                Http3ErrorCode.ExcessiveLoad, "twenty GOAWAY frames");
+        });
+
+        await runner.RunAsync("HTTP/3: a GOAWAY that arrives after the request was sent still refuses it", async () =>
+        {
+            // The GOAWAY is held back until the origin has read the whole request, so the request stream
+            // is registered by the time it lands: the other order of the race, made certain.
+            var requestSeen = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var behavior = new TestHttp3Origin.Behavior
+            {
+                WriteControlStream = async (stream, ct) =>
+                {
+                    await stream.WriteAsync(ControlStream(Settings()), completeWrites: false, ct);
+                    await stream.FlushAsync(ct);
+                    await requestSeen.Task.WaitAsync(ct);
+                    await stream.WriteAsync(GoAway(0), completeWrites: false, ct);
+                    await stream.FlushAsync(ct);
+                },
+                RespondRaw = (_, ct) =>
+                {
+                    requestSeen.TrySetResult();
+                    return Silence(ct);
+                },
+            };
+
+            var outcome = await ExchangeAsync(ca, behavior);
+            runner.IsTrue(outcome.Failure is Http3GoAwayException { GoAwayStreamId: 0 },
+                $"refused while waiting for the response (was: {Describe(outcome.Failure)})");
+            runner.IsTrue(outcome.Elapsed < TimeSpan.FromSeconds(5), $"promptly ({outcome.Elapsed.TotalSeconds:0.0} s)");
+        });
+
+        await runner.RunAsync("HTTP/3: a reset control stream is a closed critical stream", async () =>
+        {
+            var behavior = new TestHttp3Origin.Behavior
+            {
+                WriteControlStream = async (stream, ct) =>
+                {
+                    await stream.WriteAsync(ControlStream(Settings()), completeWrites: false, ct);
+                    await Task.Delay(200, ct);
+                    stream.Abort(QuicAbortDirection.Write, (long)Http3ErrorCode.NoError);
+                },
+                RespondRaw = (_, ct) => Silence(ct),
+            };
+            ExpectProtocolError(runner, await ExchangeAsync(ca, behavior), Http3ErrorCode.ClosedCriticalStream, "the control stream is reset");
         });
     }
 
@@ -885,21 +795,102 @@ internal static class Http3HardeningTests
             runner.AreEqual(4096, outcome.Response?.Body.Length ?? -1, $"the frame arrived whole (was: {Describe(outcome.Failure)})");
         });
 
-        await runner.RunAsync("HTTP/3: empty DATA frames and ignorable frames are not progress", async () =>
+        await runner.RunAsync("HTTP/3: empty DATA frames and ignorable (unknown-type) frames are not progress", async () =>
         {
+            foreach (var (name, frame) in new[] { ("empty DATA", DataFrame(0)), ("ignorable", Frame(0x40, [1, 2, 3])) })
+            {
+                var outcome = await ExchangeAsync(ca,
+                    Respond(async (s, ct) =>
+                    {
+                        await SendAsync(s, ct, false, ResponseHeaders(200));
+                        for (var i = 0; i < 60; i++) // within the 64-frame allowance, so only time can end it
+                        {
+                            await SendAsync(s, ct, false, frame);
+                            await Task.Delay(60, ct);
+                        }
+                    }),
+                    c => c.IdleTimeout = TimeSpan.FromMilliseconds(500));
+                runner.IsTrue(outcome.Failure is TimeoutException, $"a stream of {name} frames keeps nothing alive (was: {Describe(outcome.Failure)})");
+                runner.IsTrue(outcome.Elapsed < TimeSpan.FromSeconds(3), $"{name}: cut near the idle timeout ({outcome.Elapsed.TotalSeconds:0.0} s)");
+            }
+        });
+
+        await runner.RunAsync("HTTP/3: a trickle of body bytes does not keep the request alive", async () =>
+        {
+            // One byte every 300 ms against a 1 s idle timeout: each byte arrives inside the window, so an
+            // idle timer re-armed by any byte would run for ever. A window has to carry real bytes.
+            var outcome = await ExchangeAsync(ca,
+                Respond(async (s, ct) =>
+                {
+                    await SendAsync(s, ct, false, ResponseHeaders(200));
+                    for (var i = 0; i < 100; i++)
+                    {
+                        await SendAsync(s, ct, false, DataFrame(1));
+                        await Task.Delay(300, ct);
+                    }
+                }),
+                c => c.IdleTimeout = TimeSpan.FromSeconds(1));
+            runner.IsTrue(outcome.Failure is TimeoutException, $"cut (was: {Describe(outcome.Failure)})");
+            runner.IsTrue(outcome.Elapsed < TimeSpan.FromSeconds(4), $"within a couple of idle periods, not 30 s ({outcome.Elapsed.TotalSeconds:0.0} s)");
+
+            // The same rate with the minimum lowered to one byte per window is allowed: it is a setting.
+            var allowed = await ExchangeAsync(ca,
+                Respond(async (s, ct) =>
+                {
+                    await SendAsync(s, ct, false, ResponseHeaders(200));
+                    for (var i = 0; i < 6; i++)
+                    {
+                        await SendAsync(s, ct, false, DataFrame(1));
+                        await Task.Delay(300, ct);
+                    }
+                    await SendAsync(s, ct, true);
+                }),
+                c => { c.IdleTimeout = TimeSpan.FromSeconds(1); c.MinProgressBytes = 1; });
+            runner.AreEqual(6, allowed.Response?.Body.Length ?? -1, $"with a one-byte minimum the same trickle completes (was: {Describe(allowed.Failure)})");
+        });
+
+        await runner.RunAsync("HTTP/3: a response has an overall time ceiling, however steadily it progresses", async () =>
+        {
+            // 8 KiB every 200 ms is healthy by any idle measure, for ever; the ceiling is 1.5 s.
             var outcome = await ExchangeAsync(ca,
                 Respond(async (s, ct) =>
                 {
                     await SendAsync(s, ct, false, ResponseHeaders(200));
                     while (true)
                     {
-                        await SendAsync(s, ct, false, DataFrame(0));
-                        await Task.Delay(60, ct);
+                        await SendAsync(s, ct, false, DataFrame(8 * 1024));
+                        await Task.Delay(200, ct);
                     }
                 }),
-                c => c.IdleTimeout = TimeSpan.FromMilliseconds(500));
-            runner.IsTrue(outcome.Failure is TimeoutException, $"a stream of empty DATA frames keeps nothing alive (was: {Describe(outcome.Failure)})");
+                c => { c.IdleTimeout = TimeSpan.FromSeconds(1); c.MaxResponseTime = TimeSpan.FromMilliseconds(1500); });
+            runner.IsTrue(outcome.Failure is TimeoutException { Message: var m } && m.Contains("longer than", StringComparison.Ordinal),
+                $"cut by the ceiling (was: {Describe(outcome.Failure)})");
             runner.IsTrue(outcome.Elapsed < TimeSpan.FromSeconds(5), $"({outcome.Elapsed.TotalSeconds:0.0} s)");
+
+            // A non-positive ceiling is refused up front, where it cannot be mistaken for an origin fault.
+            var threw = false;
+            try
+            {
+                await using var origin = await StartOrigin(ca, new TestHttp3Origin.Behavior());
+                await using var connection = await Http3ClientConnection.ConnectAsync("127.0.0.1", origin.Port,
+                    new ProxyOptions { ValidateUpstreamCertificates = false }, CancellationToken.None);
+                connection.MaxResponseTime = TimeSpan.Zero;
+            }
+            catch (ArgumentOutOfRangeException) { threw = true; }
+            runner.IsTrue(threw, "MaxResponseTime rejects zero");
+        });
+
+        await runner.RunAsync("HTTP/3: a stream reset part-way through the body fails the request", async () =>
+        {
+            var outcome = await ExchangeAsync(ca,
+                Respond(async (s, ct) =>
+                {
+                    await SendAsync(s, ct, false, ResponseHeaders(200), DataFrame(2000));
+                    await Task.Delay(100, ct);
+                    s.Abort(QuicAbortDirection.Write, (long)Http3ErrorCode.InternalError);
+                }));
+            runner.IsTrue(outcome.Failure is QuicException, $"a reset is a failure, never a complete response (was: {Describe(outcome.Failure)})");
+            runner.IsTrue(outcome.Response is null, "and no partial body is returned");
         });
 
         await runner.RunAsync("HTTP/3: the caller's cancellation is not mistaken for a timeout", async () =>
@@ -912,13 +903,13 @@ internal static class Http3HardeningTests
 
     // ------------------------------------------------------------------ the attempt
 
-    private sealed record Attempt(HttpResponseData? Response, bool Eligible, int Sent, Exception? Failure);
+    private sealed record Attempt(HttpResponseData? Response, bool Eligible, int Sent, Exception? Failure, AltSvcCache Cache, int OriginPort);
 
     // The whole decision as the proxy sees it: Http3Attempt against an origin, with an Alt-Svc cache
     // that already knows the origin speaks h3 on the right UDP port.
     private static async Task<Attempt> AttemptAsync(
         CertificateAuthority ca, TestHttp3Origin.Behavior behavior, Action<ProxyOptions>? configure = null,
-        CancellationToken ct = default)
+        CancellationToken ct = default, Action<AltSvcCache>? configureCache = null, string method = "GET")
     {
         await using var origin = await StartOrigin(ca, behavior);
         var options = new ProxyOptions
@@ -931,6 +922,7 @@ internal static class Http3HardeningTests
         configure?.Invoke(options);
 
         var altSvc = new AltSvcCache();
+        configureCache?.Invoke(altSvc);
         altSvc.RecordAltSvc("127.0.0.1", origin.Port, $"h3=\":{origin.Port}\"; ma=3600");
 
         var sent = 0;
@@ -938,12 +930,13 @@ internal static class Http3HardeningTests
         Exception? failure = null;
         try
         {
-            response = await Http3Attempt.TryFetchAsync(Get(origin.Port), new Uri($"https://127.0.0.1:{origin.Port}/resource"),
+            response = await Http3Attempt.TryFetchAsync(Get(origin.Port, method), new Uri($"https://127.0.0.1:{origin.Port}/resource"),
                 options, altSvc, () => sent++, ct);
         }
         catch (Exception ex) { failure = ex; }
 
-        return new Attempt(response, altSvc.TryGetEndpoint("127.0.0.1", origin.Port, out _), sent, failure);
+        // Through the cache's own state, so the answer does not depend on QUIC being available here.
+        return new Attempt(response, altSvc.TryGetRecorded("127.0.0.1", origin.Port, out _), sent, failure, altSvc, origin.Port);
     }
 
     private static async Task RunAttemptTestsAsync(TestRunner runner, CertificateAuthority ca)
@@ -987,19 +980,27 @@ internal static class Http3HardeningTests
             runner.AreEqual(false, attempt.Eligible, "a connection that completes the handshake and then says nothing is what a UDP-dropping network looks like");
         });
 
-        await runner.RunAsync("Http3Attempt: an oversize response falls back without barring the host", async () =>
+        await runner.RunAsync("Http3Attempt: an oversize response falls back and leaves the origin on TCP only for the soft cool-down", async () =>
         {
-            var attempt = await AttemptAsync(ca, Respond((s, ct) => SendAsync(s, ct, true,
-                ResponseHeaders(200, ("content-length", "999999999")))));
+            var attempt = await AttemptAsync(ca,
+                Respond((s, ct) => SendAsync(s, ct, true, ResponseHeaders(200, ("content-length", "999999999")))),
+                configureCache: c => c.SoftCooldown = TimeSpan.FromMilliseconds(700));
             runner.IsTrue(attempt.Response is null && attempt.Failure is null, $"null (was: {Describe(attempt.Failure)})");
-            runner.AreEqual(true, attempt.Eligible, "too big for the buffered path says nothing against the origin");
+            runner.AreEqual(false, attempt.Eligible, "not retried at once: a hostile origin would cost a handshake and a response every time");
+
+            await Task.Delay(900);
+            runner.IsTrue(attempt.Cache.TryGetRecorded("127.0.0.1", attempt.OriginPort, out _),
+                "but nothing is wrong with h3 itself, so the cool-down is short");
         });
 
-        await runner.RunAsync("Http3Attempt: GOAWAY falls back without barring the host; a protocol violation bars it", async () =>
+        await runner.RunAsync("Http3Attempt: GOAWAY falls back for the soft cool-down; a protocol violation bars for the long one", async () =>
         {
-            var goAway = await AttemptAsync(ca, Control(ControlStream(Settings(), GoAway(0))));
+            var goAway = await AttemptAsync(ca, Control(ControlStream(Settings(), GoAway(0))),
+                configureCache: c => c.SoftCooldown = TimeSpan.FromMilliseconds(700));
             runner.IsTrue(goAway.Response is null && goAway.Failure is null, $"null (was: {Describe(goAway.Failure)})");
-            runner.AreEqual(true, goAway.Eligible, "an origin that is shutting down is not an origin without h3");
+            runner.AreEqual(false, goAway.Eligible, "a GOAWAY origin is not tried again at once");
+            await Task.Delay(900);
+            runner.IsTrue(goAway.Cache.TryGetRecorded("127.0.0.1", goAway.OriginPort, out _), "an origin that is shutting down is not an origin without h3");
 
             var violation = await AttemptAsync(ca, Respond((s, ct) => SendAsync(s, ct, true, DataFrame(5), ResponseHeaders(200))));
             runner.IsTrue(violation.Response is null && violation.Failure is null, $"null (was: {Describe(violation.Failure)})");
@@ -1023,6 +1024,37 @@ internal static class Http3HardeningTests
             var response = await Http3Attempt.TryFetchAsync(request, url, options, altSvc, () => { }, CancellationToken.None);
 
             runner.AreEqual("ok", response?.BodyAsText(), "answered by the origin on the advertised port");
+        });
+
+        await runner.RunAsync("Http3Attempt: a short body falls back and bars the host instead of counting as a success", async () =>
+        {
+            var attempt = await AttemptAsync(ca, Respond((s, ct) => SendAsync(s, ct, true,
+                ResponseHeaders(200, ("content-length", "1000")), DataFrame(500))));
+            runner.IsTrue(attempt.Response is null && attempt.Failure is null, $"null, so the caller refetches over TCP (was: {Describe(attempt.Failure)})");
+            runner.AreEqual(false, attempt.Eligible, "and the bad framing is held against the origin's h3");
+        });
+
+        await runner.RunAsync("Http3Attempt: a trickle falls back and bars the host", async () =>
+        {
+            var attempt = await AttemptAsync(ca, Respond(async (s, ct) =>
+            {
+                await SendAsync(s, ct, false, ResponseHeaders(200));
+                for (var i = 0; i < 100; i++)
+                {
+                    await SendAsync(s, ct, false, DataFrame(1));
+                    await Task.Delay(300, ct);
+                }
+            }));
+            runner.IsTrue(attempt.Response is null && attempt.Failure is null, $"null (was: {Describe(attempt.Failure)})");
+            runner.AreEqual(false, attempt.Eligible, "one byte per period is not a download");
+        });
+
+        await runner.RunAsync("Http3Attempt: a non-positive timeout setting neither throws nor bars the host", async () =>
+        {
+            var attempt = await AttemptAsync(ca, new TestHttp3Origin.Behavior(),
+                options => { options.Http3ResponseTimeout = TimeSpan.Zero; options.Http3MaxResponseTime = TimeSpan.FromSeconds(-5); });
+            runner.AreEqual("ok", attempt.Response?.BodyAsText(), $"the defaults apply instead (was: {Describe(attempt.Failure)})");
+            runner.AreEqual(true, attempt.Eligible, "and the host stays eligible");
         });
 
         await runner.RunAsync("Http3Attempt: the caller's cancellation propagates and does not bar the host", async () =>

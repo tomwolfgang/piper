@@ -54,6 +54,7 @@ public sealed class Http3ClientConnection : IAsyncDisposable
     private const int MaxIgnoredFrames = 64;
     private const long MaxIgnoredFramePayload = 64 * 1024;
     private const int MaxInboundStreams = 32;
+    private const int MaxGoAwayFrames = 16;
     private const long MaxControlFramePayload = 4096;
     private const long MaxAuxiliaryStreamBytes = 1024 * 1024;
     private const int RequestWriteChunk = 64 * 1024;
@@ -76,6 +77,7 @@ public sealed class Http3ClientConnection : IAsyncDisposable
     private bool _qpackEncoderStreamSeen;
     private bool _qpackDecoderStreamSeen;
     private TimeSpan _idleTimeout = TimeSpan.FromSeconds(15);
+    private TimeSpan _maxResponseTime = TimeSpan.FromMinutes(15);
 
     private Http3ClientConnection(QuicConnection connection) => _connection = connection;
 
@@ -100,6 +102,28 @@ public sealed class Http3ClientConnection : IAsyncDisposable
             _idleTimeout = value;
         }
     }
+
+    /// <summary>
+    /// The longest the request may take in all, however steadily it progresses -- a ceiling over
+    /// <see cref="IdleTimeout"/>, which alone lets an origin that sends a few bytes per period hold the
+    /// request for ever. Set to <see cref="Timeout.InfiniteTimeSpan"/> for no ceiling.
+    /// </summary>
+    public TimeSpan MaxResponseTime
+    {
+        get => _maxResponseTime;
+        set
+        {
+            if (value <= TimeSpan.Zero && value != Timeout.InfiniteTimeSpan)
+                throw new ArgumentOutOfRangeException(nameof(value), "The response time limit must be positive.");
+            _maxResponseTime = value;
+        }
+    }
+
+    /// <summary>Body bytes that must arrive within one idle period for the origin to count as making
+    /// progress. A few bytes now and then keep a connection alive without moving anything, so the
+    /// idle timeout is only re-armed once a window has carried this much (about 70 bytes a second at
+    /// the default). A complete header section re-arms it regardless.</summary>
+    internal long MinProgressBytes { get; set; } = 1024;
 
     internal long MaxResponseBodyBytes { get; set; } = DefaultMaxResponseBodyBytes;
 
@@ -194,9 +218,22 @@ public sealed class Http3ClientConnection : IAsyncDisposable
         // One token for everything after the handshake. It fires when the caller cancels, when the
         // connection can no longer carry the request (GOAWAY, a protocol violation), or when the
         // origin goes quiet for IdleTimeout; the catch below tells the three apart.
-        using var operation = CancellationTokenSource.CreateLinkedTokenSource(ct, _abort.Token);
+        using var deadline = new CancellationTokenSource();
+        deadline.CancelAfter(MaxResponseTime);
+        using var operation = CancellationTokenSource.CreateLinkedTokenSource(ct, _abort.Token, deadline.Token);
         var idle = IdleTimeout;
-        void Progress() => operation.CancelAfter(idle);
+        var minProgress = MinProgressBytes;
+        long windowBytes = 0;
+        void Progress()
+        {
+            windowBytes = 0;
+            operation.CancelAfter(idle);
+        }
+        void BodyProgress(int bytes)
+        {
+            windowBytes += bytes;
+            if (windowBytes >= minProgress) Progress();
+        }
         Progress();
 
         try
@@ -205,7 +242,7 @@ public sealed class Http3ClientConnection : IAsyncDisposable
             RegisterRequestStream(stream.Id);
 
             await WriteRequestAsync(stream, request, operation.Token, Progress).ConfigureAwait(false);
-            return await ReadResponseAsync(stream, request.Method, operation.Token, Progress).ConfigureAwait(false);
+            return await ReadResponseAsync(stream, request.Method, operation.Token, Progress, BodyProgress).ConfigureAwait(false);
         }
         catch (Exception) when (!ct.IsCancellationRequested && AbortReason is { } reason)
         {
@@ -215,8 +252,9 @@ public sealed class Http3ClientConnection : IAsyncDisposable
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {
-            throw new TimeoutException(string.Create(CultureInfo.InvariantCulture,
-                $"The HTTP/3 origin made no progress for {idle.TotalSeconds:0.##} s."));
+            throw new TimeoutException(deadline.IsCancellationRequested
+                ? string.Create(CultureInfo.InvariantCulture, $"The HTTP/3 response took longer than {MaxResponseTime.TotalSeconds:0.##} s.")
+                : string.Create(CultureInfo.InvariantCulture, $"The HTTP/3 origin made too little progress for {idle.TotalSeconds:0.##} s."));
         }
         catch (Http3ProtocolException ex)
         {
@@ -256,11 +294,12 @@ public sealed class Http3ClientConnection : IAsyncDisposable
     /// that order are connection errors; unknown frame types are skipped, within limits.
     /// </summary>
     private async Task<HttpResponseData> ReadResponseAsync(
-        QuicStream stream, string method, CancellationToken ct, Action progress)
+        QuicStream stream, string method, CancellationToken ct, Action progress, Action<int> bodyProgress)
     {
         var reader = new Http3StreamReader(stream);
         var body = new MemoryStream();
         List<(string Name, string Value)>? fields = null;
+        long? declared = null;
         var trailersSeen = false;
         var interim = 0;
         var ignored = 0;
@@ -291,7 +330,11 @@ public sealed class Http3ClientConnection : IAsyncDisposable
 
                     if (fields is not null)
                     {
-                        trailersSeen = true; // validated above; trailers carry nothing Piper records
+                        // A trailer section: fields only. A pseudo-header in it -- a :status, say, which
+                        // would be a second response, 1xx or not -- makes the message malformed (§4.1.2).
+                        if (decoded.Any(f => f.Name.StartsWith(':')))
+                            throw new HttpParseException("HTTP/3 trailer section carries a pseudo-header.");
+                        trailersSeen = true; // carries nothing Piper records
                         break;
                     }
 
@@ -307,7 +350,9 @@ public sealed class Http3ClientConnection : IAsyncDisposable
                         break;
                     }
 
-                    RejectIfDeclaredTooLarge(decoded, method, code);
+                    // A response that announces more than fits is refused on its headers, before a byte of it moves.
+                    declared = DeclaredLength(decoded, method, code);
+                    if (declared > MaxResponseBodyBytes) throw TooLarge();
                     fields = decoded;
                     break;
 
@@ -320,20 +365,22 @@ public sealed class Http3ClientConnection : IAsyncDisposable
                     // A frame that cannot fit is refused on its length, before any of it is read.
                     if (length > MaxResponseBodyBytes - body.Length)
                         throw TooLarge();
+                    if (declared is { } announced && length > announced - body.Length)
+                        throw new HttpParseException($"HTTP/3 body is longer than its Content-Length of {announced}.");
 
                     for (var remaining = length; remaining > 0;)
                     {
                         var copied = await reader.CopyPayloadAsync(body, remaining, ct).ConfigureAwait(false);
                         remaining -= copied;
-                        progress(); // bytes arrived: the origin is alive, however slowly
+                        bodyProgress(copied); // bytes arrived: counts once a window has carried enough
                     }
                     break;
 
                 case (long)Http3FrameType.PushPromise:
-                case (long)Http3FrameType.CancelPush:
                     // We never sent MAX_PUSH_ID, so there is no push ID this could be valid for.
                     throw new Http3ProtocolException(Http3ErrorCode.IdError, "The origin used server push, which was never enabled.");
 
+                case (long)Http3FrameType.CancelPush: // control stream only (§7.2.3)
                 case (long)Http3FrameType.Settings:
                 case (long)Http3FrameType.GoAway:
                 case (long)Http3FrameType.MaxPushId:
@@ -355,24 +402,33 @@ public sealed class Http3ClientConnection : IAsyncDisposable
 
         if (fields is null) throw new HttpParseException("HTTP/3 response ended before its headers arrived.");
 
+        // A clean end of stream short of the announced length is not a complete message (§4.1.2).
+        if (declared is { } expected && body.Length != expected)
+            throw new HttpParseException($"HTTP/3 body ended after {body.Length} of the {expected} bytes its Content-Length announced.");
+
         var response = Http2MessageAdapter.ToResponse(fields);
         response.HttpVersion = "HTTP/3";
         response.Body = body.ToArray();
         return response;
     }
 
-    // A response that announces more than fits is refused on its headers, before a byte of it moves.
-    // HEAD, 204 and 304 announce a length for a body that is not sent.
-    private void RejectIfDeclaredTooLarge(List<(string Name, string Value)> fields, string method, int status)
+    // The body length the response announces, or null when none applies: HEAD, 204 and 304 announce a
+    // length for a body that is not sent, and a Content-Length that is not a plain number is left
+    // alone. Two plain numbers that disagree are ambiguous framing and refused.
+    private static long? DeclaredLength(List<(string Name, string Value)> fields, string method, int status)
     {
-        if (method.Equals("HEAD", StringComparison.OrdinalIgnoreCase) || status is 204 or 304) return;
+        if (method.Equals("HEAD", StringComparison.OrdinalIgnoreCase) || status is 204 or 304) return null;
 
+        long? declared = null;
         foreach (var (name, value) in fields)
         {
             if (name != "content-length") continue;
-            if (long.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out var declared) && declared > MaxResponseBodyBytes)
-                throw TooLarge();
+            if (!long.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out var parsed)) continue;
+            if (declared is not null && declared != parsed)
+                throw new HttpParseException("HTTP/3 response carries conflicting Content-Length values.");
+            declared = parsed;
         }
+        return declared;
     }
 
     private Http3ResponseTooLargeException TooLarge() =>
@@ -452,7 +508,16 @@ public sealed class Http3ClientConnection : IAsyncDisposable
                 {
                     case Http3StreamType.Control:
                         ClaimStream(ref _controlStreamSeen, "control");
-                        await ReadControlStreamAsync(reader, ct).ConfigureAwait(false);
+                        try
+                        {
+                            await ReadControlStreamAsync(reader, ct).ConfigureAwait(false);
+                        }
+                        catch (QuicException) when (!ct.IsCancellationRequested)
+                        {
+                            // Reset or aborted by the origin while we are still using the connection:
+                            // as much a closed control stream (§6.2.1) as a clean end of it.
+                            throw new Http3ProtocolException(Http3ErrorCode.ClosedCriticalStream, "The origin reset its control stream.");
+                        }
                         break;
 
                     case Http3StreamType.QpackEncoder:
@@ -517,6 +582,7 @@ public sealed class Http3ClientConnection : IAsyncDisposable
     {
         var first = true;
         var ignored = 0;
+        var goAways = 0;
 
         while (true)
         {
@@ -538,6 +604,10 @@ public sealed class Http3ClientConnection : IAsyncDisposable
                     break;
 
                 case (long)Http3FrameType.GoAway:
+                    // The id may only fall, and it can fall only so many times: each is a lock and a
+                    // wake-up for nothing.
+                    if (++goAways > MaxGoAwayFrames)
+                        throw new Http3ProtocolException(Http3ErrorCode.ExcessiveLoad, "Too many GOAWAY frames.");
                     var payload = await ReadControlPayloadAsync(reader, length, ct).ConfigureAwait(false);
                     var position = 0;
                     long id;

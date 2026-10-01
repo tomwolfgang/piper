@@ -52,19 +52,22 @@ internal static class Http3Attempt
             // origin's progress. A total budget here killed every long download, restarted it over TCP
             // from its first byte and barred the host from h3 for half an hour; a network that passes
             // the handshake and then drops UDP is still caught, because then nothing arrives.
-            connection.IdleTimeout = options.Http3ResponseTimeout;
+            // A non-positive value (a setting gone wrong) must not throw in here and bar the host.
+            if (options.Http3ResponseTimeout > TimeSpan.Zero) connection.IdleTimeout = options.Http3ResponseTimeout;
+            if (options.Http3MaxResponseTime > TimeSpan.Zero) connection.MaxResponseTime = options.Http3MaxResponseTime;
             onRequestSent();
             var response = await connection.SendRequestAsync(outbound, ct).ConfigureAwait(false);
 
-            altSvc.RecordSuccess(url.Host);
+            altSvc.RecordSuccess(url.Host, url.Port);
             return response;
         }
         catch (Exception ex) when (!ct.IsCancellationRequested)
         {
             // Blocked UDP, an unreachable QUIC endpoint, a handshake or idle timeout, a protocol
             // disagreement -- the same decision for the request: proceed over TCP as though h3 had
-            // never been considered. Whether the HOST is blamed depends on what failed.
-            if (BlamesHost(ex)) altSvc.RecordFailure(url.Host);
+            // never been considered. How long the ORIGIN is left on TCP depends on what failed.
+            if (ex is Http3GoAwayException or Http3ResponseTooLargeException) altSvc.RecordSoftFailure(url.Host, url.Port);
+            else altSvc.RecordFailure(url.Host, url.Port);
             return null;
         }
         finally
@@ -73,14 +76,11 @@ internal static class Http3Attempt
         }
     }
 
-    /// <summary>
-    /// Whether a failed attempt says h3 does not work for this host. It does not when the origin
-    /// merely will not take this request on this connection (GOAWAY), or when the response is too big
-    /// for the buffered path (TCP streams it; the same host's other resources are fine). Everything
-    /// else counts: no handshake, no response, a protocol violation, and a stall or a dropped
-    /// connection part-way through -- that is also what a UDP path that passes small packets and
-    /// loses large ones (an MTU black hole) looks like, and without the bar every large response
-    /// would cost an idle period before falling back.
-    /// </summary>
-    private static bool BlamesHost(Exception failure) => failure is not (Http3GoAwayException or Http3ResponseTooLargeException);
+    // Two outcomes, by what the failure says about h3 for this origin. GOAWAY for the request and a
+    // response too big for the buffered path say nothing against h3 (TCP streams the big one; the
+    // origin's other resources are fine), so the origin is left on TCP for the short soft cool-down
+    // only -- not for none, or a hostile one would cost a handshake and a wasted response on every
+    // request. Everything else is barred for the long one: no handshake, no response, a protocol
+    // violation, a stall or a dropped connection part-way through (also what a UDP path that passes
+    // small packets and loses large ones looks like), a response over the time ceiling.
 }

@@ -18,14 +18,14 @@ internal static class Http3Tests
             var cache = new AltSvcCache();
             runner.IsTrue(!cache.TryGetEndpoint("example.com", 443, out _), "never attempted before the origin advertises it");
 
-            cache.RecordAltSvc("example.com", "h3=\":443\"; ma=86400");
+            cache.RecordAltSvc("example.com", 443, "h3=\":443\"; ma=86400");
             runner.AreEqual(Http3ClientConnection.IsSupported, cache.TryGetEndpoint("example.com", 443, out _),
                 "eligible once advertised (subject to QUIC being available at all)");
 
-            cache.RecordFailure("example.com");
+            cache.RecordFailure("example.com", 443);
             runner.IsTrue(!cache.TryGetEndpoint("example.com", 443, out _), "a failed attempt suppresses retries during the cool-down");
 
-            cache.RecordAltSvc("example.com", "clear");
+            cache.RecordAltSvc("example.com", 443, "clear");
             runner.IsTrue(!cache.TryGetEndpoint("example.com", 443, out _), "Alt-Svc: clear removes eligibility");
             return Task.CompletedTask;
         });
