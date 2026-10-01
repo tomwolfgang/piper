@@ -76,18 +76,17 @@ public abstract class HttpMessage
     /// <summary>Body with Content-Encoding removed. Falls back to the raw body if decoding fails.</summary>
     /// <remarks>
     /// A body that decodes to at most 8 MiB is remembered per message, so reading this again costs a copy
-    /// rather than a decompression; larger ones (up to the 64 MiB cap) are decoded afresh each time. The
-    /// copy is what lets a caller edit the result without corrupting what the next reader sees. A body
-    /// with no Content-Encoding is <see cref="Body"/> itself, with the same "read it, never write into
-    /// it" rule.
+    /// rather than a decompression; the copy is what lets a caller edit the result without corrupting
+    /// what the next reader sees. Larger ones (up to the 64 MiB cap) are never cached: they are decoded
+    /// afresh on each read and returned as the decoder's own array, with no copy on top. A body with no
+    /// Content-Encoding is <see cref="Body"/> itself, with the same "read it, never write into it" rule.
     /// </remarks>
     public byte[] DecodedBody
     {
         get
         {
-            var body = Body;
-            var decoded = ContentCodec.DecodeCached(body, ContentEncoding).Bytes;
-            return ReferenceEquals(decoded, body) ? body : (byte[])decoded.Clone();
+            var decoded = ContentCodec.DecodeCached(Body, ContentEncoding, out var shared).Bytes;
+            return shared ? (byte[])decoded.Clone() : decoded;
         }
     }
 

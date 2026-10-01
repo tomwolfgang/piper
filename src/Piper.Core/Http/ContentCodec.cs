@@ -191,27 +191,46 @@ public static class ContentCodec
     // Guards admission and eviction (not reads). EvictionOrder lists cached entries oldest first;
     // it holds them weakly, so an entry whose body was collected is simply skipped.
     private static readonly object CacheLock = new();
-    // A stale entry replaced after its Content-Encoding changed leaves a dead reference behind until an
-    // eviction walks past it; that takes an edit of a message's headers per leftover (~48 bytes), which
-    // captured traffic cannot cause.
     private static readonly Queue<WeakReference<CachedDecode>> EvictionOrder = new();
+    private const int MinimumSweepLength = 1024;
+    private static int _sweepAt = MinimumSweepLength;
 
     /// <summary>Bytes of decoded bodies the cache holds now; read by the tests that pin its budget.</summary>
     internal static long CachedDecodeBytes => Volatile.Read(ref _cachedBytes);
+
+    /// <summary>Entries (live or not yet swept) in the eviction order; read by the tests that pin its bound.</summary>
+    internal static int EvictionQueueLength
+    {
+        get { lock (CacheLock) return EvictionOrder.Count; }
+    }
 
     /// <summary>
     /// <see cref="DecodeBounded"/> for a message's body, remembered against that array so reading it
     /// again is free. Callers that sweep many bodies once (the search index) use
     /// <see cref="Decode"/>, which leaves the cache to the bodies somebody looks at.
     /// </summary>
-    public static DecodedContent DecodeCached(byte[] body, string? contentEncoding)
+    public static DecodedContent DecodeCached(byte[] body, string? contentEncoding) =>
+        DecodeCached(body, contentEncoding, out _);
+
+    /// <summary>
+    /// <see cref="DecodeCached(byte[], string?)"/>, also saying whether the returned array is the one the
+    /// cache holds. A shared array must be treated as read-only (copy it before handing it to a caller who
+    /// may write); an unshared one belongs to the caller alone, as does <paramref name="body"/> itself
+    /// when it decoded to itself.
+    /// </summary>
+    public static DecodedContent DecodeCached(byte[] body, string? contentEncoding, out bool shared)
     {
         ArgumentNullException.ThrowIfNull(body);
+        shared = false;
         if (body.Length == 0 || string.IsNullOrWhiteSpace(contentEncoding)) return new DecodedContent(body, false);
 
         if (DecodeCache.TryGetValue(body, out var hit))
         {
-            if (string.Equals(hit.ContentEncoding, contentEncoding, StringComparison.Ordinal)) return hit.Content;
+            if (string.Equals(hit.ContentEncoding, contentEncoding, StringComparison.Ordinal))
+            {
+                shared = !ReferenceEquals(hit.Content.Bytes, body);
+                return hit.Content;
+            }
 
             // The header changed since this was cached: drop the stale entry and give its budget back.
             Remove(body, hit);
@@ -219,7 +238,7 @@ public static class ContentCodec
 
         var content = DecodeBounded(body, contentEncoding);
         var size = ReferenceEquals(content.Bytes, body) ? 0 : content.Bytes.LongLength;
-        if (size <= MaxCachedEntryBytes) Admit(body, new CachedDecode(body, contentEncoding, content, size));
+        if (size <= MaxCachedEntryBytes) shared = Admit(body, new CachedDecode(body, contentEncoding, content, size)) && size > 0;
         return content;
     }
 
@@ -228,7 +247,7 @@ public static class ContentCodec
     /// the cache keeps serving what was decoded most recently however long the capture runs. Eviction
     /// is oldest-first (not least-recently-used), which keeps a hit lock-free.
     /// </summary>
-    private static void Admit(byte[] body, CachedDecode entry)
+    private static bool Admit(byte[] body, CachedDecode entry)
     {
         lock (CacheLock)
         {
@@ -236,20 +255,41 @@ public static class ContentCodec
             // the eviction order.
             if (entry.Size > 0)
             {
-                while (EvictionOrder.TryPeek(out var head) && !head.TryGetTarget(out _)) EvictionOrder.Dequeue();
+                // Entries whose body was collected (or that were evicted) leave dead references behind.
+                // Sweep them all once the queue outgrows twice what survived the last sweep, so its length
+                // follows the bodies cached now, not the bodies ever decoded.
+                if (EvictionOrder.Count > _sweepAt) SweepEvictionOrder();
 
                 while (Volatile.Read(ref _cachedBytes) + entry.Size > MaxCachedTotalBytes && EvictionOrder.TryDequeue(out var oldest))
                     if (oldest.TryGetTarget(out var victim)) Remove(victim.Key, victim);
 
-                if (Volatile.Read(ref _cachedBytes) + entry.Size > MaxCachedTotalBytes) return;
+                if (Volatile.Read(ref _cachedBytes) + entry.Size > MaxCachedTotalBytes) return false;
                 Interlocked.Add(ref _cachedBytes, entry.Size);
                 entry.Reserved = true;
             }
 
             // Two threads can decode the same body at once; the loser hands its budget straight back.
-            if (!DecodeCache.TryAdd(body, entry)) entry.Release();
-            else if (entry.Size > 0) EvictionOrder.Enqueue(new WeakReference<CachedDecode>(entry));
+            if (!DecodeCache.TryAdd(body, entry))
+            {
+                entry.Release();
+                return false;
+            }
+
+            if (entry.Size > 0) EvictionOrder.Enqueue(new WeakReference<CachedDecode>(entry));
+            return true;
         }
+    }
+
+    /// <summary>Drops every dead or released entry from the eviction order, keeping the rest in order.</summary>
+    private static void SweepEvictionOrder()
+    {
+        for (var remaining = EvictionOrder.Count; remaining > 0; remaining--)
+        {
+            var reference = EvictionOrder.Dequeue();
+            if (reference.TryGetTarget(out var entry) && !entry.IsReleased) EvictionOrder.Enqueue(reference);
+        }
+
+        _sweepAt = Math.Max(MinimumSweepLength, EvictionOrder.Count * 2);
     }
 
     /// <summary>Takes <paramref name="entry"/> out of the cache, if it is still the one held for its body.</summary>
@@ -269,6 +309,7 @@ public static class ContentCodec
     {
         private readonly WeakReference<byte[]> _body = new(body);
         private int _released;
+        private volatile bool _reserved;
 
         public string ContentEncoding { get; } = contentEncoding;
 
@@ -276,8 +317,18 @@ public static class ContentCodec
 
         public long Size { get; } = size;
 
-        /// <summary>Set, under the cache lock, once the entry has been charged to the budget.</summary>
-        public bool Reserved { get; set; }
+        /// <summary>
+        /// Set, under the cache lock, once the entry has been charged to the budget. Volatile because
+        /// the finalizer thread reads it, and a stale false would leak the entry's budget for good.
+        /// </summary>
+        public bool Reserved
+        {
+            get => _reserved;
+            set => _reserved = value;
+        }
+
+        /// <summary>True once the entry's budget has been returned, so it is no use to evict.</summary>
+        public bool IsReleased => Volatile.Read(ref _released) == 1;
 
         /// <summary>The body this was cached for, or null once it has been collected.</summary>
         public byte[]? Key => _body.TryGetTarget(out var key) ? key : null;

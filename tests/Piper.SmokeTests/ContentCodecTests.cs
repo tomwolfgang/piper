@@ -326,6 +326,56 @@ internal static class ContentCodecTests
             return Task.CompletedTask;
         });
 
+        await runner.RunAsync("a body too large to cache is handed back without a second copy", () =>
+        {
+            const int size = 12 * 1024 * 1024;
+            var large = new HttpResponseData { Body = Compress(new byte[size], "gzip") };
+            large.Headers.Set("Content-Encoding", "gzip");
+
+            // Decode is the uncached path and returns the decoder's own array; DecodedBody must cost no more
+            // than that, where a defensive copy of a never-shared array would add the body's size again.
+            _ = large.DecodedBody;
+            var before = GC.GetAllocatedBytesForCurrentThread();
+            _ = ContentCodec.Decode(large.Body, "gzip");
+            var plain = GC.GetAllocatedBytesForCurrentThread() - before;
+
+            before = GC.GetAllocatedBytesForCurrentThread();
+            var viaMessage = large.DecodedBody;
+            var message = GC.GetAllocatedBytesForCurrentThread() - before;
+
+            runner.AreEqual(size, viaMessage.Length, "the body decodes");
+            runner.IsTrue(message - plain < size / 2, $"no copy beyond the decode itself (decode {plain / 1024} KiB, via message {message / 1024} KiB)");
+
+            // A small body is cached and shared, so there the copy stays and protects the cache.
+            var small = new HttpResponseData { Body = Compress(Encoding.UTF8.GetBytes("small body"), "gzip") };
+            small.Headers.Set("Content-Encoding", "gzip");
+            small.DecodedBody[0] = (byte)'X';
+            runner.AreEqual("small body", Encoding.UTF8.GetString(small.DecodedBody), "a cached body is still protected from edits");
+            return Task.CompletedTask;
+        });
+
+        await runner.RunAsync("the eviction order does not grow with the bodies ever decoded", () =>
+        {
+            // One live entry sits at the head while thousands of short-lived bodies pass through under the
+            // budget, which is the case where nothing is ever evicted to sweep the dead ones out.
+            var anchor = new HttpResponseData { Body = Compress(Encoding.UTF8.GetBytes("anchor body"), "gzip") };
+            anchor.Headers.Set("Content-Encoding", "gzip");
+            _ = anchor.DecodedBody;
+
+            for (var i = 0; i < 6000; i++)
+            {
+                DecodeShortLived(i);
+                if (i % 500 == 499) GC.Collect();
+            }
+
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+            DecodeShortLived(-1);
+            runner.IsTrue(ContentCodec.EvictionQueueLength < 3000, $"6,000 short-lived bodies leave a bounded queue (length {ContentCodec.EvictionQueueLength})");
+            GC.KeepAlive(anchor);
+            return Task.CompletedTask;
+        });
+
         await runner.RunAsync("a full cache evicts its oldest bodies so recent ones are still served", () =>
         {
             var bodies = new List<byte[]>();
@@ -463,6 +513,15 @@ internal static class ContentCodecTests
             }
             return Task.CompletedTask;
         });
+    }
+
+    /// <summary>Caches the decoded form of a small distinct body and lets the message go.</summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void DecodeShortLived(int index)
+    {
+        var response = new HttpResponseData { Body = Compress(Encoding.UTF8.GetBytes($"short lived body {index}"), "gzip") };
+        response.Headers.Set("Content-Encoding", "gzip");
+        _ = response.DecodedBody;
     }
 
     /// <summary>Decodes a message's body and lets the message go, reporting what should now be collectable.</summary>
