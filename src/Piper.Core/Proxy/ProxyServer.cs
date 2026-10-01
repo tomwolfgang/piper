@@ -60,7 +60,14 @@ public sealed class ProxyServer : IAsyncDisposable
         _store = store;
     }
 
-    public bool IsRunning { get; private set; }
+    // Written by the accept loop when it fails, as well as by Start and StopAsync.
+    private volatile bool _isRunning;
+
+    public bool IsRunning
+    {
+        get => _isRunning;
+        private set => _isRunning = value;
+    }
 
     public int ActiveConnections => Volatile.Read(ref _activeConnections);
 
