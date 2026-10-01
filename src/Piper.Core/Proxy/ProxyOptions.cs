@@ -24,7 +24,13 @@ public sealed class ProxyOptions
     /// How long to wait for the TCP connection to an origin before giving up. Name resolution and
     /// every address tried (see <see cref="ConnectionAttemptDelay"/>) are inside this one budget.
     /// </summary>
-    public TimeSpan ConnectTimeout { get; set; } = TimeSpan.FromSeconds(15);
+    public TimeSpan ConnectTimeout
+    {
+        get => _connectTimeout;
+        set => _connectTimeout = ClampTimeout(value);
+    }
+
+    private TimeSpan _connectTimeout = TimeSpan.FromSeconds(15);
 
     /// <summary>
     /// How long a connection attempt to an origin gets before the next address of the same name is
@@ -40,10 +46,95 @@ public sealed class ProxyOptions
     /// the TCP connection is made) and for the one with a client of a decrypted tunnel. A peer that
     /// completes the TCP connection and then never speaks would otherwise hold the request, and its
     /// client connection, for ever. A handshake that outlasts it fails with an <see cref="IOException"/>.
+    /// Clamped to 1 ms..1 day, like <see cref="ConnectTimeout"/>.
     /// </summary>
-    public TimeSpan TlsHandshakeTimeout { get; set; } = TimeSpan.FromSeconds(15);
+    public TimeSpan TlsHandshakeTimeout
+    {
+        get => _tlsHandshakeTimeout;
+        set => _tlsHandshakeTimeout = ClampTimeout(value);
+    }
 
-    public TimeSpan IdleTimeout { get; set; } = TimeSpan.FromSeconds(120);
+    private TimeSpan _tlsHandshakeTimeout = TimeSpan.FromSeconds(15);
+
+    /// <summary>
+    /// How long a client may say nothing before its connection is closed. It applies to waiting for
+    /// the next request on a kept-alive connection (the first request of a connection waits only
+    /// <see cref="RequestHeadTimeout"/>), to each pause while a request body is being sent, and to
+    /// each write of a response to a client that has stopped reading. An idle connection is closed
+    /// quietly; a stalled request body is answered with <c>408</c> (best effort: a client that is
+    /// not reading, or a TLS stream broken by the cancelled read, may not receive it) and recorded as
+    /// a failed session. A body is also held to <see cref="MinRequestBodyBytesPerWindow"/>, so
+    /// trickling a byte per window does not keep a connection for ever. Clamped to 1 ms..1 day
+    /// (a non-positive or infinite value is not a way to switch it off).
+    /// </summary>
+    public TimeSpan IdleTimeout
+    {
+        get => _idleTimeout;
+        set => _idleTimeout = ClampTimeout(value);
+    }
+
+    private TimeSpan _idleTimeout = TimeSpan.FromSeconds(120);
+
+    /// <summary>
+    /// How long a client has to send the first byte of the first request on a connection, then,
+    /// from the first byte of any request, to finish its request line and headers. A budget rather
+    /// than an idle timeout on purpose: a peer that drips one byte every few seconds stays "active"
+    /// for ever and would otherwise hold a connection slot indefinitely. It does not cover the body
+    /// or the TLS handshake of a decrypted tunnel (<see cref="TlsHandshakeTimeout"/>). Clamped to
+    /// 1 ms..1 day.
+    /// </summary>
+    public TimeSpan RequestHeadTimeout
+    {
+        get => _requestHeadTimeout;
+        set => _requestHeadTimeout = ClampTimeout(value);
+    }
+
+    private TimeSpan _requestHeadTimeout = TimeSpan.FromSeconds(30);
+
+    /// <summary>
+    /// The least a request body must deliver in each <see cref="IdleTimeout"/>-long window for the
+    /// upload to be allowed to continue (default 1,024 bytes, about 9 bytes a second at the default
+    /// timeout). Silence is already cut by <see cref="IdleTimeout"/>; this is what stops a client
+    /// that sends one byte just inside every window, and so never looks silent. Zero (or less)
+    /// switches the floor off.
+    /// </summary>
+    public long MinRequestBodyBytesPerWindow
+    {
+        get => _minRequestBodyBytesPerWindow;
+        set => _minRequestBodyBytesPerWindow = Math.Max(0, value);
+    }
+
+    private long _minRequestBodyBytesPerWindow = 1024;
+
+    /// <summary>
+    /// How many client connections are served at once. A connection over the limit is not refused:
+    /// it waits, unserved, in the operating system's accept queue (at most 512 of them; beyond that
+    /// the system itself turns clients away) until a slot frees. When the limit is reached the
+    /// connection that has been idle longest (waiting for a first byte, or between kept-alive
+    /// requests) is closed to make room, so silent sockets cannot starve real clients. It bounds the
+    /// number of connections, not what each may hold: a request body is still read into memory up to
+    /// the declared length (at most 256 MB), so the worst case is this many such connections.
+    /// There is deliberately no per-address quota: every local process connects from 127.0.0.1.
+    /// Read when the proxy starts; clamped to 1..100,000.
+    /// </summary>
+    public int MaxConcurrentConnections
+    {
+        get => _maxConcurrentConnections;
+        set => _maxConcurrentConnections = Math.Clamp(value, 1, 100_000);
+    }
+
+    private int _maxConcurrentConnections = 1024;
+
+    private static readonly TimeSpan MinTimeout = TimeSpan.FromMilliseconds(1);
+    private static readonly TimeSpan MaxTimeout = TimeSpan.FromDays(1);
+
+    /// <summary>A timeout that <c>CancelAfter</c> and <c>Task.Delay</c> accept: negative, zero and
+    /// infinite values (and anything past a day) would otherwise throw where it is used, or hold a
+    /// connection for ever.</summary>
+    private static TimeSpan ClampTimeout(TimeSpan value) =>
+        value < MinTimeout ? (value == Timeout.InfiniteTimeSpan ? MaxTimeout : MinTimeout)
+        : value > MaxTimeout ? MaxTimeout
+        : value;
 
     /// <summary>
     /// How long to wait for an origin to send anything at all before giving up on a response.
