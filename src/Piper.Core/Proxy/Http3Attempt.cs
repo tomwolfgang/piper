@@ -64,7 +64,7 @@ internal static class Http3Attempt
             // Blocked UDP, an unreachable QUIC endpoint, a handshake or idle timeout, a protocol
             // disagreement -- the same decision for the request: proceed over TCP as though h3 had
             // never been considered. Whether the HOST is blamed depends on what failed.
-            if (BlamesHost(ex, connection)) altSvc.RecordFailure(url.Host);
+            if (BlamesHost(ex)) altSvc.RecordFailure(url.Host);
             return null;
         }
         finally
@@ -75,17 +75,12 @@ internal static class Http3Attempt
 
     /// <summary>
     /// Whether a failed attempt says h3 does not work for this host. It does not when the origin
-    /// merely will not take this request on this connection (GOAWAY), when the response is too big for
-    /// the buffered path (TCP streams it; the same host's other resources are fine), or when it was
-    /// answering and then went quiet or dropped the connection: that is the network or the one
-    /// resource, not the protocol, and barring the host would cost every later request its h3.
-    /// Everything else -- no handshake, no response at all, a protocol violation -- counts.
+    /// merely will not take this request on this connection (GOAWAY), or when the response is too big
+    /// for the buffered path (TCP streams it; the same host's other resources are fine). Everything
+    /// else counts: no handshake, no response, a protocol violation, and a stall or a dropped
+    /// connection part-way through -- that is also what a UDP path that passes small packets and
+    /// loses large ones (an MTU black hole) looks like, and without the bar every large response
+    /// would cost an idle period before falling back.
     /// </summary>
-    private static bool BlamesHost(Exception failure, Http3ClientConnection? connection) => failure switch
-    {
-        Http3GoAwayException or Http3ResponseTooLargeException => false,
-        HttpParseException or Http3ProtocolException => true,
-        _ when connection is { ResponseStarted: true } => false, // an idle timeout, or a connection dropped mid-response
-        _ => true,
-    };
+    private static bool BlamesHost(Exception failure) => failure is not (Http3GoAwayException or Http3ResponseTooLargeException);
 }

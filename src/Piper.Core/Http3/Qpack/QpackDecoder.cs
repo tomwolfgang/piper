@@ -25,9 +25,10 @@ public static class QpackDecoder
     /// <summary>
     /// Decodes a field section and refuses one whose decoded size passes
     /// <paramref name="maxFieldSectionSize"/> -- the figure SETTINGS_MAX_FIELD_SECTION_SIZE is
-    /// defined in. The encoded size is no bound on it: one byte can stand for a static-table entry
-    /// of dozens, so a small block can decode to a very large list, and the list is cut off here,
-    /// while it is being built, instead of after it has been.
+    /// defined in -- with an <see cref="Http3ProtocolException"/> (H3_EXCESSIVE_LOAD), so the
+    /// connection is closed with that code. The encoded size is no bound on it: one byte can stand
+    /// for a static-table entry of dozens, so a small block can decode to a very large list, and the
+    /// list is cut off here, while it is being built, instead of after it has been.
     /// </summary>
     public static List<(string Name, string Value)> Decode(ReadOnlySpan<byte> block, long maxFieldSectionSize)
     {
@@ -94,7 +95,8 @@ public static class QpackDecoder
     {
         sectionSize += field.Name.Length + field.Value.Length + FieldOverhead;
         if (sectionSize > limit)
-            throw new HttpParseException($"HTTP/3 field section exceeds the {limit}-byte limit once decoded.");
+            throw new Http3ProtocolException(Http3ErrorCode.ExcessiveLoad,
+                $"HTTP/3 field section exceeds the {limit}-byte limit once decoded.");
     }
 
     /// <summary>A prefix integer used as an index or a length. A value that does not fit an

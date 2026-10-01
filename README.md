@@ -354,10 +354,10 @@ bounded, and so is the header it will read.
 Failures are remembered per host with a cool-down, so a network that blocks outbound UDP/443
 (many do) costs one timeout rather than one per request. Any failure falls back to TCP, and only
 safe methods (`GET`, `HEAD`, `OPTIONS`) are attempted, so a fallback can never re-submit a request
-with side effects. The host is only barred when the failure says something about h3 itself: no
-handshake, no response at all, or a protocol violation. An origin that sends `GOAWAY` for the
-request, a response too big for the buffered path, or a download that was arriving and then
-stalled is retried over TCP without barring the host.
+with side effects. A host is barred for the cool-down when h3 itself failed for it: no handshake, a
+stall or a dropped connection, or a protocol violation. A host whose origin merely sends `GOAWAY`
+for this request, or whose response is too big for the buffered path, is retried over TCP without
+being barred.
 
 The response is read in full before it is relayed, so it is bounded: at most 64 MiB of body (a
 larger `Content-Length` is refused on the headers, and the request goes over TCP, which streams),

@@ -75,7 +75,6 @@ public sealed class Http3ClientConnection : IAsyncDisposable
     private bool _controlStreamSeen;
     private bool _qpackEncoderStreamSeen;
     private bool _qpackDecoderStreamSeen;
-    private volatile bool _responseStarted;
     private TimeSpan _idleTimeout = TimeSpan.FromSeconds(15);
 
     private Http3ClientConnection(QuicConnection connection) => _connection = connection;
@@ -103,10 +102,6 @@ public sealed class Http3ClientConnection : IAsyncDisposable
     }
 
     internal long MaxResponseBodyBytes { get; set; } = DefaultMaxResponseBodyBytes;
-
-    /// <summary>True once any header section of the response has arrived: the origin is reachable
-    /// over h3 and was answering, which changes what a later failure says about it.</summary>
-    public bool ResponseStarted => _responseStarted;
 
     /// <summary>The origin's SETTINGS, once its control stream has delivered them.</summary>
     public Http3PeerSettings? PeerSettings
@@ -284,10 +279,12 @@ public sealed class Http3ClientConnection : IAsyncDisposable
 
                     // The encoded section is no larger than the decoded one, so the limit advertised in
                     // SETTINGS is also the most a HEADERS frame may carry; the decoder enforces it on
-                    // the decoded form, which is the one it is defined for.
+                    // the decoded form, which is the one it is defined for. Both are the same breach.
+                    if (length > MaxFieldSectionSize)
+                        throw new Http3ProtocolException(Http3ErrorCode.ExcessiveLoad,
+                            $"HEADERS frame of {length} bytes exceeds the {MaxFieldSectionSize}-byte field section limit.");
                     var block = await reader.ReadPayloadAsync(length, MaxFieldSectionSize, ct).ConfigureAwait(false);
                     var decoded = QpackDecoder.Decode(block, MaxFieldSectionSize);
-                    _responseStarted = true;
                     progress();
 
                     if (fields is not null)
@@ -635,10 +632,15 @@ public sealed class Http3ClientConnection : IAsyncDisposable
 
         // Closing the connection ends the inbound loop; give it a moment, and abandon it rather than
         // wait on an origin that will not let go.
+        // Waiting with WhenAny never rethrows the task's own fault: teardown must not replace the
+        // failure the caller is about to see. The handlers already turn what can go wrong into the
+        // connection's abort reason; a fault that still escapes them is a teardown detail, only observed.
         if (_inbound is not null)
         {
-            try { await _inbound.WaitAsync(CloseGrace).ConfigureAwait(false); }
-            catch (TimeoutException) { /* abandoned: it holds only cancelled tokens, disposed below */ }
+            using var grace = new CancellationTokenSource();
+            var finished = await Task.WhenAny(_inbound, Task.Delay(CloseGrace, grace.Token)).ConfigureAwait(false);
+            await grace.CancelAsync().ConfigureAwait(false);
+            if (finished == _inbound && _inbound.IsFaulted) _ = _inbound.Exception; // observed, so it is not reported later
         }
 
         // Safe even for an abandoned task: both sources are already cancelled or only ever cancelled,

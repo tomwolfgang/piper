@@ -251,14 +251,14 @@ internal static class Http3HardeningTests
 
             var threw = false;
             try { QpackDecoder.Decode(Section(11), limit); }
-            catch (HttpParseException) { threw = true; }
-            runner.IsTrue(threw, "one field past the limit is refused");
+            catch (Http3ProtocolException ex) { threw = ex.ErrorCode == Http3ErrorCode.ExcessiveLoad; }
+            runner.IsTrue(threw, "one field past the limit is refused as H3_EXCESSIVE_LOAD");
 
             var big = Section(4_000);
             runner.IsTrue(big.Length < 4_100, $"the hostile block is tiny ({big.Length} bytes encoded)");
             threw = false;
             try { QpackDecoder.Decode(big, Http3ClientConnection.MaxFieldSectionSize); }
-            catch (HttpParseException) { threw = true; }
+            catch (Http3ProtocolException ex) { threw = ex.ErrorCode == Http3ErrorCode.ExcessiveLoad; }
             runner.IsTrue(threw, "yet it decodes to more than the advertised 128 KiB and is refused");
             return Task.CompletedTask;
         });
@@ -476,7 +476,7 @@ internal static class Http3HardeningTests
             (_, _) => Task.FromResult(HttpResponseData.Simple(200, "OK", "ok")), behavior);
 
     private sealed record Outcome(
-        HttpResponseData? Response, Exception? Failure, TimeSpan Elapsed, bool ResponseStarted,
+        HttpResponseData? Response, Exception? Failure, TimeSpan Elapsed,
         long? ClientCloseCode, Http3PeerSettings? PeerSettings, long? GoAwayStreamId);
 
     // One request against an origin with the given behaviour. The close code the client sent is
@@ -503,7 +503,7 @@ internal static class Http3HardeningTests
 
         // Only a connection error is answered with a close code; the others close quietly.
         var closeCode = failure is Http3ProtocolException ? await origin.ClientCloseCodeAsync(TimeSpan.FromSeconds(3)) : null;
-        return new Outcome(response, failure, clock.Elapsed, connection.ResponseStarted, closeCode,
+        return new Outcome(response, failure, clock.Elapsed, closeCode,
             connection.PeerSettings, connection.GoAwayStreamId);
     }
 
@@ -568,8 +568,7 @@ internal static class Http3HardeningTests
             // A HEADERS frame of 200 KiB: well under the old limit (the body cap), over the advertised 128 KiB.
             var oversize = await ExchangeAsync(ca,
                 Respond((s, ct) => SendAsync(s, ct, true, Frame((long)Http3FrameType.Headers, new byte[200 * 1024]))));
-            runner.IsTrue(oversize.Failure is HttpParseException, $"200 KiB HEADERS frame (was: {Describe(oversize.Failure)})");
-            runner.IsTrue(!oversize.ResponseStarted, "and nothing of it counted as a response");
+            ExpectProtocolError(runner, oversize, Http3ErrorCode.ExcessiveLoad, "200 KiB HEADERS frame");
 
             // A small frame that decodes to far more than the limit.
             var best = Enumerable.Range(0, 63).MaxBy(i => QpackStaticTable.Get(i).Name.Length + QpackStaticTable.Get(i).Value.Length);
@@ -577,12 +576,12 @@ internal static class Http3HardeningTests
             for (var i = 0; i < 4_000; i++) bomb.Add((byte)(0xC0 | best));
             var amplified = await ExchangeAsync(ca,
                 Respond((s, ct) => SendAsync(s, ct, true, Frame((long)Http3FrameType.Headers, bomb.ToArray()))));
-            runner.IsTrue(amplified.Failure is HttpParseException, $"a 4 KB block that decodes past 128 KiB (was: {Describe(amplified.Failure)})");
+            ExpectProtocolError(runner, amplified, Http3ErrorCode.ExcessiveLoad, "a 4 KB block that decodes past 128 KiB");
 
             // A huge but valid trailing section is held to the same limit.
             var trailers = await ExchangeAsync(ca,
                 Respond((s, ct) => SendAsync(s, ct, true, ResponseHeaders(200), DataFrame(10), Frame((long)Http3FrameType.Headers, bomb.ToArray()))));
-            runner.IsTrue(trailers.Failure is HttpParseException, $"an oversize trailer section (was: {Describe(trailers.Failure)})");
+            ExpectProtocolError(runner, trailers, Http3ErrorCode.ExcessiveLoad, "an oversize trailer section");
         });
 
         await runner.RunAsync("HTTP/3: frames out of order are connection errors (H3_FRAME_UNEXPECTED)", async () =>
@@ -829,11 +828,10 @@ internal static class Http3HardeningTests
         {
             var outcome = await ExchangeAsync(ca, Respond((_, ct) => Silence(ct)), c => c.IdleTimeout = TimeSpan.FromMilliseconds(400));
             runner.IsTrue(outcome.Failure is TimeoutException, $"timeout (was: {Describe(outcome.Failure)})");
-            runner.IsTrue(!outcome.ResponseStarted, "before any response, which is what makes it an h3 failure");
             runner.IsTrue(outcome.Elapsed < TimeSpan.FromSeconds(5), $"promptly ({outcome.Elapsed.TotalSeconds:0.0} s)");
         });
 
-        await runner.RunAsync("HTTP/3: a body that stalls part-way is cut, and remembered as started", async () =>
+        await runner.RunAsync("HTTP/3: a body that stalls part-way is cut by the idle timeout", async () =>
         {
             var outcome = await ExchangeAsync(ca,
                 Respond(async (s, ct) =>
@@ -843,7 +841,6 @@ internal static class Http3HardeningTests
                 }),
                 c => c.IdleTimeout = TimeSpan.FromMilliseconds(400));
             runner.IsTrue(outcome.Failure is TimeoutException, $"timeout (was: {Describe(outcome.Failure)})");
-            runner.IsTrue(outcome.ResponseStarted, "the origin had been answering");
         });
 
         await runner.RunAsync("HTTP/3: a slow download that keeps arriving outlives the idle timeout", async () =>
@@ -967,7 +964,7 @@ internal static class Http3HardeningTests
             runner.AreEqual(true, attempt.Eligible, "and the host is still eligible for h3");
         });
 
-        await runner.RunAsync("Http3Attempt: a body that stalls falls back to TCP without barring the host", async () =>
+        await runner.RunAsync("Http3Attempt: a body that stalls falls back to TCP and bars the host", async () =>
         {
             var attempt = await AttemptAsync(ca, Respond(async (s, ct) =>
             {
@@ -976,7 +973,7 @@ internal static class Http3HardeningTests
             }));
 
             runner.IsTrue(attempt.Response is null && attempt.Failure is null, $"null, so the caller uses TCP (was: {Describe(attempt.Failure)})");
-            runner.AreEqual(true, attempt.Eligible, "the origin was answering and then went quiet: that is not a verdict on h3");
+            runner.AreEqual(false, attempt.Eligible, "a path that stops delivering part-way (an MTU black hole looks like this) would otherwise cost every large response an idle period");
         });
 
         await runner.RunAsync("Http3Attempt: no answer at all falls back to TCP and bars the host", async () =>
