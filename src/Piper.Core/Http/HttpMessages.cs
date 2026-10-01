@@ -64,11 +64,31 @@ public abstract class HttpMessage
     /// and whether the cap (or a corrupt stream) cut it short. Decoded once per body array and remembered,
     /// so reading it again costs nothing.
     /// </summary>
-    public DecodedContent Decoded => ContentCodec.DecodeCached(Body, ContentEncoding);
+    internal DecodedContent Decoded => ContentCodec.DecodeCached(Body, ContentEncoding);
+
+    /// <summary>
+    /// True when <see cref="DecodedBody"/> is known to be incomplete or unreliable because a layer of the
+    /// Content-Encoding was cut (see <see cref="DecodedContent.Truncated"/> for the exact meaning). A
+    /// retained prefix of a larger body is a separate condition: check <see cref="IsBodyComplete"/> too.
+    /// </summary>
+    public bool IsDecodedBodyTruncated => Decoded.Truncated;
 
     /// <summary>Body with Content-Encoding removed. Falls back to the raw body if decoding fails.</summary>
-    /// <remarks>Shared, like <see cref="Body"/>: read it, never write into it.</remarks>
-    public byte[] DecodedBody => Decoded.Bytes;
+    /// <remarks>
+    /// A body that decodes to at most 8 MiB is remembered per message, so reading this again costs a copy
+    /// rather than a decompression; the copy is what lets a caller edit the result without corrupting
+    /// what the next reader sees. Larger ones (up to the 64 MiB cap) are never cached: they are decoded
+    /// afresh on each read and returned as the decoder's own array, with no copy on top. A body with no
+    /// Content-Encoding is <see cref="Body"/> itself, with the same "read it, never write into it" rule.
+    /// </remarks>
+    public byte[] DecodedBody
+    {
+        get
+        {
+            var decoded = ContentCodec.DecodeCached(Body, ContentEncoding, out var shared).Bytes;
+            return shared ? (byte[])decoded.Clone() : decoded;
+        }
+    }
 
     /// <summary>Best-effort text rendering of <see cref="DecodedBody"/> using the charset from Content-Type.</summary>
     public string BodyAsText() => TextOf(Body, ContentType, ContentEncoding);

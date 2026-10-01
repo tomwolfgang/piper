@@ -101,6 +101,40 @@ internal static class ContentCodecTests
             return Task.CompletedTask;
         });
 
+        await runner.RunAsync("a zlib stream over the cap is not second-guessed as raw deflate", () =>
+        {
+            // Valid zlib (header 78 01) whose first stored block is 65,534 bytes long, and whose bytes
+            // also parse, as raw deflate, as three short stored blocks producing a single byte. Raw would
+            // read it cleanly, so a decoder that lets raw win shows that byte instead of zlib's prefix.
+            var stream = new List<byte> { 0x78, 0x01, 0x00, 0xFE, 0xFF, 0x01, 0x00 };
+            stream.AddRange(new byte[] { 0x00, 0x00, 0xFF, 0xFF, 0x01, 0x00, 0x00, 0xFF, 0xFF });
+            while (stream.Count < 7 + 65_534) stream.Add((byte)'A');
+
+            var decoded = ContentCodec.DecodeBounded([.. stream], "deflate", 1024);
+            runner.AreEqual(1024, decoded.Bytes.Length, "zlib's output up to the cap is returned");
+            runner.IsTrue(decoded.Truncated, "and flagged as cut");
+            runner.IsTrue(decoded.Bytes.AsSpan().SequenceEqual(stream.Skip(7).Take(1024).ToArray()), "it is zlib's prefix, not raw's reading");
+            return Task.CompletedTask;
+        });
+
+        await runner.RunAsync("a deflate bomb allocates about one cap's worth, not two", () =>
+        {
+            var zeros = new byte[Cap + 1024 * 1024];
+            foreach (var encoding in new[] { "zlib", "deflate" })
+            {
+                var bomb = Compress(zeros, encoding);
+                var before = GC.GetAllocatedBytesForCurrentThread();
+                var decoded = ContentCodec.DecodeBounded(bomb, "deflate");
+                var allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+
+                runner.AreEqual(Cap, decoded.Bytes.Length, $"a {encoding} bomb is cut at the cap");
+                // Growing to the cap by doubling allocates about twice the cap in total. A second full
+                // decode (a fallback run after the first filled the cap) would double that again.
+                runner.IsTrue(allocated < 3L * Cap, $"a {encoding} bomb allocates under 3 caps (allocated {allocated / (1024 * 1024)} MiB)");
+            }
+            return Task.CompletedTask;
+        });
+
         await runner.RunAsync("output exactly at the cap is whole; one byte more is truncated", () =>
         {
             const int limit = 4096;
@@ -222,10 +256,10 @@ internal static class ContentCodecTests
             var response = new HttpResponseData { Body = Compress(Encoding.UTF8.GetBytes("cached body"), "gzip") };
             response.Headers.Set("Content-Encoding", "gzip");
 
-            var first = response.DecodedBody;
-            runner.AreEqual("cached body", Encoding.UTF8.GetString(first), "the body decodes");
-            runner.IsTrue(ReferenceEquals(first, response.DecodedBody), "a second read reuses the decoded array");
-            runner.IsTrue(!response.Decoded.Truncated, "a whole body is not flagged");
+            var first = response.Decoded.Bytes;
+            runner.AreEqual("cached body", Encoding.UTF8.GetString(response.DecodedBody), "the body decodes");
+            runner.IsTrue(ReferenceEquals(first, response.Decoded.Bytes), "a second read reuses the decoded array");
+            runner.IsTrue(!response.IsDecodedBodyTruncated, "a whole body is not flagged");
 
             response.Body = Compress(Encoding.UTF8.GetBytes("replaced"), "gzip");
             runner.AreEqual("replaced", Encoding.UTF8.GetString(response.DecodedBody), "a replaced body is decoded afresh");
@@ -235,6 +269,136 @@ internal static class ContentCodecTests
 
             response.Headers.Set("Content-Encoding", "gzip");
             runner.AreEqual("replaced", Encoding.UTF8.GetString(response.DecodedBody), "and changing it back decodes again");
+            return Task.CompletedTask;
+        });
+
+        await runner.RunAsync("a caller writing into DecodedBody cannot corrupt what later readers see", () =>
+        {
+            var response = new HttpResponseData { Body = Compress(Encoding.UTF8.GetBytes("pristine body"), "gzip") };
+            response.Headers.Set("Content-Encoding", "gzip");
+
+            var mine = response.DecodedBody;
+            mine[0] = (byte)'X';
+            var next = response.DecodedBody;
+            runner.AreEqual("pristine body", Encoding.UTF8.GetString(next), "the next reader gets the decoded body, not the edit");
+            runner.IsTrue(!ReferenceEquals(mine, next), "each read hands out its own array");
+            runner.AreEqual("pristine body", Encoding.UTF8.GetString(ContentCodec.Decode(response.Body, "gzip")), "and so does a fresh decode");
+
+            var cut = new HttpResponseData { Body = Compress(new byte[4096], "gzip") };
+            cut.Headers.Set("Content-Encoding", "gzip");
+            runner.IsTrue(!cut.IsDecodedBodyTruncated, "a whole body reports it is not truncated");
+            return Task.CompletedTask;
+        });
+
+        await runner.RunAsync("Decode and BodyAsText leave the cache to the bodies somebody looks at", () =>
+        {
+            var response = new HttpResponseData { Body = Compress(Encoding.UTF8.GetBytes(string.Concat(Enumerable.Repeat("sweep me ", 50_000))), "gzip") };
+            response.Headers.Set("Content-Encoding", "gzip");
+            response.Headers.Set("Content-Type", "text/plain");
+
+            // Settle finalizers of earlier tests' bodies first, so they cannot move the counter mid-test.
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+            var before = ContentCodec.CachedDecodeBytes;
+            _ = ContentCodec.Decode(response.Body, "gzip");
+            _ = response.BodyAsText();
+            _ = HttpMessage.TextOf(response.Body, "text/plain", "gzip");
+            runner.AreEqual(before, ContentCodec.CachedDecodeBytes, "sweeping a body through Decode and BodyAsText caches nothing");
+
+            _ = response.DecodedBody;
+            runner.IsTrue(ContentCodec.CachedDecodeBytes > before, "reading DecodedBody does cache it");
+            GC.KeepAlive(response);
+            return Task.CompletedTask;
+        });
+
+        await runner.RunAsync("only bodies that decode to 8 MiB or less are cached", () =>
+        {
+            const int entryLimit = 8 * 1024 * 1024;
+            var small = new HttpResponseData { Body = Compress(new byte[entryLimit], "gzip") };
+            small.Headers.Set("Content-Encoding", "gzip");
+            runner.IsTrue(ReferenceEquals(small.Decoded.Bytes, small.Decoded.Bytes), "a body decoding to exactly 8 MiB is served from the cache");
+
+            var large = new HttpResponseData { Body = Compress(new byte[entryLimit + 1], "gzip") };
+            large.Headers.Set("Content-Encoding", "gzip");
+            runner.IsTrue(!ReferenceEquals(large.Decoded.Bytes, large.Decoded.Bytes), "a body decoding to one byte more is decoded afresh");
+            runner.AreEqual(entryLimit + 1, large.DecodedBody.Length, "and still decodes correctly");
+            GC.KeepAlive(small);
+            return Task.CompletedTask;
+        });
+
+        await runner.RunAsync("a body too large to cache is handed back without a second copy", () =>
+        {
+            const int size = 12 * 1024 * 1024;
+            var large = new HttpResponseData { Body = Compress(new byte[size], "gzip") };
+            large.Headers.Set("Content-Encoding", "gzip");
+
+            // Decode is the uncached path and returns the decoder's own array; DecodedBody must cost no more
+            // than that, where a defensive copy of a never-shared array would add the body's size again.
+            _ = large.DecodedBody;
+            var before = GC.GetAllocatedBytesForCurrentThread();
+            _ = ContentCodec.Decode(large.Body, "gzip");
+            var plain = GC.GetAllocatedBytesForCurrentThread() - before;
+
+            before = GC.GetAllocatedBytesForCurrentThread();
+            var viaMessage = large.DecodedBody;
+            var message = GC.GetAllocatedBytesForCurrentThread() - before;
+
+            runner.AreEqual(size, viaMessage.Length, "the body decodes");
+            runner.IsTrue(message - plain < size / 2, $"no copy beyond the decode itself (decode {plain / 1024} KiB, via message {message / 1024} KiB)");
+
+            // A small body is cached and shared, so there the copy stays and protects the cache.
+            var small = new HttpResponseData { Body = Compress(Encoding.UTF8.GetBytes("small body"), "gzip") };
+            small.Headers.Set("Content-Encoding", "gzip");
+            small.DecodedBody[0] = (byte)'X';
+            runner.AreEqual("small body", Encoding.UTF8.GetString(small.DecodedBody), "a cached body is still protected from edits");
+            return Task.CompletedTask;
+        });
+
+        await runner.RunAsync("the eviction order does not grow with the bodies ever decoded", () =>
+        {
+            // One live entry sits at the head while thousands of short-lived bodies pass through under the
+            // budget, which is the case where nothing is ever evicted to sweep the dead ones out.
+            var anchor = new HttpResponseData { Body = Compress(Encoding.UTF8.GetBytes("anchor body"), "gzip") };
+            anchor.Headers.Set("Content-Encoding", "gzip");
+            _ = anchor.DecodedBody;
+
+            for (var i = 0; i < 6000; i++)
+            {
+                DecodeShortLived(i);
+                if (i % 500 == 499) GC.Collect();
+            }
+
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+            DecodeShortLived(-1);
+            runner.IsTrue(ContentCodec.EvictionQueueLength < 3000, $"6,000 short-lived bodies leave a bounded queue (length {ContentCodec.EvictionQueueLength})");
+            GC.KeepAlive(anchor);
+            return Task.CompletedTask;
+        });
+
+        await runner.RunAsync("a full cache evicts its oldest bodies so recent ones are still served", () =>
+        {
+            var bodies = new List<byte[]>();
+            var decodedFirst = default(byte[]);
+            byte[]? decodedLast = null;
+            for (var i = 0; i < 100; i++)
+            {
+                // Distinct 1 MiB bodies kept alive together: 100 MiB decoded against a 64 MiB budget.
+                var payload = new byte[1024 * 1024];
+                BitConverter.TryWriteBytes(payload, i + 5000);
+                var body = Compress(payload, "gzip");
+                bodies.Add(body);
+                var decoded = ContentCodec.DecodeCached(body, "gzip").Bytes;
+                if (i == 0) decodedFirst = decoded;
+                decodedLast = decoded;
+            }
+
+            runner.IsTrue(ReferenceEquals(decodedLast, ContentCodec.DecodeCached(bodies[^1], "gzip").Bytes),
+                "the newest body is still cached after the budget filled");
+            runner.IsTrue(!ReferenceEquals(decodedFirst, ContentCodec.DecodeCached(bodies[0], "gzip").Bytes),
+                "the oldest body was evicted to make room");
+            runner.IsTrue(ContentCodec.CachedDecodeBytes <= 64L * 1024 * 1024, "and eviction keeps the cache within its budget");
+            GC.KeepAlive(bodies);
             return Task.CompletedTask;
         });
 
@@ -351,6 +515,15 @@ internal static class ContentCodecTests
         });
     }
 
+    /// <summary>Caches the decoded form of a small distinct body and lets the message go.</summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void DecodeShortLived(int index)
+    {
+        var response = new HttpResponseData { Body = Compress(Encoding.UTF8.GetBytes($"short lived body {index}"), "gzip") };
+        response.Headers.Set("Content-Encoding", "gzip");
+        _ = response.DecodedBody;
+    }
+
     /// <summary>Decodes a message's body and lets the message go, reporting what should now be collectable.</summary>
     [MethodImpl(MethodImplOptions.NoInlining)]
     private static (WeakReference<byte[]> Body, WeakReference<byte[]> Decoded) DecodeAndDrop()
@@ -358,7 +531,7 @@ internal static class ContentCodecTests
         var body = Compress(Encoding.UTF8.GetBytes(string.Concat(Enumerable.Repeat("released ", 1000))), "gzip");
         var response = new HttpResponseData { Body = body };
         response.Headers.Set("Content-Encoding", "gzip");
-        return (new WeakReference<byte[]>(body), new WeakReference<byte[]>(response.DecodedBody));
+        return (new WeakReference<byte[]>(body), new WeakReference<byte[]>(response.Decoded.Bytes));
     }
 
     /// <summary>Compresses <paramref name="data"/> the way a server would label it: gzip, zlib, raw deflate or br.</summary>
