@@ -610,7 +610,10 @@ public sealed class ProxyServer : IAsyncDisposable
                 if (upstream is null)
                 {
                     var connectStart = stopwatch.Elapsed;
-                    upstream = await UpstreamConnection.ConnectAsync(host, port, targetIsTls, _options, ct).ConfigureAwait(false);
+                    // An upgrade stays on HTTP/1.1: an h2 request has no Connection/Upgrade, so an origin
+                    // that offers h2 in ALPN would answer 200 instead of 101.
+                    upstream = await UpstreamConnection.ConnectAsync(
+                        host, port, targetIsTls, _options, ct, allowHttp2: !isUpgrade).ConfigureAwait(false);
                     slot.Connection = upstream;
                     session.ConnectTime = stopwatch.Elapsed - connectStart;
                 }
