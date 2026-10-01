@@ -341,8 +341,13 @@ internal static class ProxyAdmissionTests
         {
             var options = new ProxyOptions { ListeningEndpoint = new IPEndPoint(IPAddress.Any, 1234) };
             runner.IsTrue(options.IsOwnEndpoint(IPAddress.Loopback, 1234), "IPv4 loopback");
-            runner.IsTrue(options.IsOwnEndpoint(IPAddress.IPv6Loopback, 1234), "IPv6 loopback");
+            runner.IsTrue(!options.IsOwnEndpoint(IPAddress.IPv6Loopback, 1234), "but not IPv6 loopback: 0.0.0.0 is an IPv4 socket, ::1 is another service");
             runner.IsTrue(options.IsOwnEndpoint(IPAddress.Loopback.MapToIPv6(), 1234), "IPv4-mapped loopback");
+
+            var wildcardV6 = new ProxyOptions { ListeningEndpoint = new IPEndPoint(IPAddress.IPv6Any, 1234) };
+            runner.IsTrue(wildcardV6.IsOwnEndpoint(IPAddress.IPv6Loopback, 1234), "an IPv6 wildcard listener owns ::1");
+            runner.IsTrue(wildcardV6.IsOwnEndpoint(IPAddress.Loopback, 1234), "and, possibly dual-mode, 127.0.0.1");
+            runner.IsTrue(!wildcardV6.IsOwnEndpoint(IPAddress.IPv6Loopback, 1235), "on its own port only");
             runner.IsTrue(!options.IsOwnEndpoint(IPAddress.Loopback, 1235), "another port is another service");
             runner.IsTrue(!options.IsOwnEndpoint(IPAddress.Parse("192.0.2.1"), 1234), "another host is another host");
 

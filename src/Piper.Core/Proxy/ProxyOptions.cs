@@ -1,4 +1,5 @@
 using System.Net;
+using System.Net.Sockets;
 
 namespace Piper.Core.Proxy;
 
@@ -170,8 +171,14 @@ public sealed class ProxyOptions
         if (ListeningEndpoint is not { } own || port != own.Port) return false;
 
         if (address.IsIPv4MappedToIPv6) address = address.MapToIPv4();
-        var listensEverywhere = own.Address.Equals(IPAddress.Any) || own.Address.Equals(IPAddress.IPv6Any);
-        if (!listensEverywhere) return address.Equals(own.Address);
+        var anyV4 = own.Address.Equals(IPAddress.Any);
+        var anyV6 = own.Address.Equals(IPAddress.IPv6Any);
+        if (!anyV4 && !anyV6) return address.Equals(own.Address);
+
+        // 0.0.0.0 is an IPv4 socket: the same port on ::1 is another service. An IPv6 wildcard may be
+        // dual-mode, so it is taken to cover both families (the cautious side: a refused request
+        // there is better than one looped through the proxy).
+        if (address.AddressFamily == AddressFamily.InterNetworkV6 && !anyV6) return false;
 
         if (IPAddress.IsLoopback(address) || address.Equals(IPAddress.Any) || address.Equals(IPAddress.IPv6Any)) return true;
         try
