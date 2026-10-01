@@ -289,6 +289,10 @@ internal static class HappyEyeballsTests
             using var peer = await accepted.WaitAsync(Patience);
             runner.IsTrue(socket.Connected, "connected");
             runner.IsTrue(socket.NoDelay, "with Nagle off, as every proxy connection is");
+
+            using var adopted = HappyEyeballs.Adopt(socket);
+            runner.IsTrue(ReferenceEquals(adopted.Client, socket) && adopted.Connected,
+                "and a TcpClient adopts it as the connection, not a socket of its own");
         });
     }
 

@@ -65,6 +65,19 @@ internal static class HappyEyeballs
         }
     }
 
+    /// <summary>
+    /// Wraps a connected socket in the <see cref="TcpClient"/> the rest of the proxy holds a
+    /// connection as. A new <c>TcpClient</c> creates a socket of its own, which assigning
+    /// <see cref="TcpClient.Client"/> does not dispose, so it is released first.
+    /// </summary>
+    internal static TcpClient Adopt(Socket connected)
+    {
+        var client = new TcpClient();
+        client.Client.Dispose();
+        client.Client = connected;
+        return client;
+    }
+
     private static async Task<IPAddress[]> ResolveAsync(string host, CancellationToken ct)
     {
         var resolved = await Dns.GetHostAddressesAsync(host, ct).ConfigureAwait(false);

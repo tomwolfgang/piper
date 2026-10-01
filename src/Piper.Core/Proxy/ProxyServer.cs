@@ -386,7 +386,7 @@ public sealed class ProxyServer : IAsyncDisposable
         {
             var socket = await HappyEyeballs.ConnectAsync(_options.HostRemapping.Resolve(host), port, _options, ct)
                 .ConfigureAwait(false);
-            server = new TcpClient { Client = socket };
+            server = HappyEyeballs.Adopt(socket);
 
             await WriteAsciiAsync(clientStream, "HTTP/1.1 200 Connection Established\r\n\r\n", ct).ConfigureAwait(false);
 

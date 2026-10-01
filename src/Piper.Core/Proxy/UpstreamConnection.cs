@@ -71,7 +71,7 @@ internal sealed class UpstreamConnection : IDisposable
         // Raced across the name's addresses and bounded by ConnectTimeout as a whole. The TcpClient
         // only adopts the socket: it is the type the rest of the proxy holds an upstream as.
         var socket = await HappyEyeballs.ConnectAsync(remapping.Host, port, options, ct).ConfigureAwait(false);
-        var client = new TcpClient { Client = socket };
+        var client = HappyEyeballs.Adopt(socket);
 
         Stream stream = client.GetStream();
         var isHttp2 = false;
