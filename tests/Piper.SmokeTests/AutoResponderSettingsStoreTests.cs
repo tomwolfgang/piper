@@ -144,9 +144,25 @@ internal static class AutoResponderSettingsStoreTests
                 runner.IsTrue(result.Settings is null, $"{what} yields no settings");
             }
 
+            // Notepad's "Unicode" and friends: a byte order mark says how the file is encoded, and
+            // File.ReadAllText honoured it, so these loaded before the byte cap was added.
+            foreach (var (encoding, name) in new (Encoding, string)[]
+            {
+                (new UTF8Encoding(true), "UTF-8 with a BOM"),
+                (new UnicodeEncoding(false, true), "UTF-16 little-endian with a BOM"),
+                (new UnicodeEncoding(true, true), "UTF-16 big-endian with a BOM"),
+                (new UTF32Encoding(false, true), "UTF-32 with a BOM"),
+            })
+            {
+                File.WriteAllBytes(path, [.. encoding.GetPreamble(), .. encoding.GetBytes("""{"Enabled":true,"Rules":[{"Match":"/é","Action":"*404"}]}""")]);
+                var decoded = AutoResponderSettingsStore.Load(path);
+                runner.AreEqual(AutoResponderLoadStatus.Loaded, decoded.Status, $"{name} loads");
+                runner.AreEqual("/é", decoded.Settings?.Rules.FirstOrDefault()?.Match, $"{name} keeps non-ASCII text");
+            }
+
             File.WriteAllBytes(path, Encoding.Unicode.GetBytes("""{"Enabled":true}"""));
             runner.AreEqual(AutoResponderLoadStatus.Malformed, AutoResponderSettingsStore.Load(path).Status,
-                "a UTF-16 file is not a rule set");
+                "UTF-16 with no byte order mark cannot be told from garbage, as before");
 
             // Truncated exactly as a crash mid-write used to leave a rule set.
             runner.IsTrue(AutoResponderSettingsStore.Save(new AutoResponderSettings
@@ -448,6 +464,8 @@ internal static class AutoResponderSettingsStoreTests
             runner.IsTrue(!tooMany.StartsWith("autoResponder.", StringComparison.Ordinal), "the too-many message is not a raw key");
             runner.IsTrue(tooMany.Contains(AutoResponderSettingsStore.MaxRules.ToString("N0")), "and names the limit");
             runner.IsTrue(tooMany.Contains(" rules would"), "several rules are plural");
+            runner.IsTrue(tooMany.Contains($"{AutoResponderSettingsStore.MaxRules:N0} rules Piper allows"),
+                "and the limit is stated as a number of rules");
 
             var one = Piper.App.Strings.AutoResponder.ImportTooManyRules(1);
             runner.IsTrue(!one.StartsWith("autoResponder.", StringComparison.Ordinal), "the singular message is not a raw key");
@@ -516,6 +534,35 @@ internal static class AutoResponderSettingsStoreTests
         runner.AreEqual(AutoResponderSaveStatus.TooManyRules,
             AutoResponderSettingsStore.CheckLimits(many.Appended(new AutoResponderSettings { Rules = [new AutoResponderRule()] })),
             "one more rule is over it");
+
+        // Load bounds the file as written; Save bounds the indented form it writes back. A compact
+        // file just under the byte cap therefore loads, and must still be refused on import (Replace
+        // and an empty list apply it as is), or the first autosave would fail and stay failed.
+        var path = TempPath();
+        try
+        {
+            var bodyBytes = (int)((AutoResponderSettingsStore.MaxFileBytes - 150_000) / AutoResponderSettingsStore.MaxRules) - 130;
+            var compact = new AutoResponderSettings
+            {
+                Rules = [.. Enumerable.Range(0, AutoResponderSettingsStore.MaxRules)
+                    .Select(i => new AutoResponderRule { Match = $"/r{i}", Action = "*inline", Body = new string('b', bodyBytes) })],
+            };
+            File.WriteAllText(path, System.Text.Json.JsonSerializer.Serialize(compact));
+            runner.IsTrue(new FileInfo(path).Length <= AutoResponderSettingsStore.MaxFileBytes, "the compact file is under the byte cap");
+
+            var loaded = AutoResponderSettingsStore.Load(path);
+            runner.AreEqual(AutoResponderLoadStatus.Loaded, loaded.Status, "so it loads");
+            runner.AreEqual(AutoResponderSaveStatus.TooLarge, AutoResponderSettingsStore.CheckLimits(loaded.Settings!),
+                "but its indented form is over the cap, so the import is refused");
+            runner.AreEqual(AutoResponderSaveStatus.TooLarge, AutoResponderSettingsStore.Save(loaded.Settings!, path + ".out").Status,
+                "which is what an autosave would have hit");
+        }
+        finally
+        {
+            DeleteAll(path);
+            if (File.Exists(path + ".out")) File.Delete(path + ".out");
+        }
+
         return Task.CompletedTask;
     });
 
@@ -610,9 +657,25 @@ internal static class AutoResponderSettingsStoreTests
             runner.IsTrue(!File.Exists(path), "the original name is free for the next save");
             runner.AreEqual("{ hand written, and broken", File.ReadAllText(path + ".invalid"), "and its content is kept");
 
+            // An earlier copy is never overwritten while a numbered slot is free.
             File.WriteAllText(path, "second breakage");
-            runner.AreEqual(path + ".invalid", AutoResponderSettingsStore.SetAside(path), "a second one replaces the first");
-            runner.AreEqual("second breakage", File.ReadAllText(path + ".invalid"), "keeping the newest");
+            runner.AreEqual(path + ".invalid.1", AutoResponderSettingsStore.SetAside(path), "a second one takes the next slot");
+            runner.AreEqual("second breakage", File.ReadAllText(path + ".invalid.1"), "with its own content");
+            runner.AreEqual("{ hand written, and broken", File.ReadAllText(path + ".invalid"), "and the first is untouched");
+
+            for (var i = 2; i < AutoResponderSettingsStore.SetAsideSlots; i++)
+            {
+                File.WriteAllText(path, $"breakage {i}");
+                runner.AreEqual($"{path}.invalid.{i}", AutoResponderSettingsStore.SetAside(path), $"slot {i} is used in turn");
+            }
+
+            // Every slot taken: the oldest is replaced, and nothing else is disturbed.
+            File.SetLastWriteTimeUtc(path + ".invalid.3", DateTime.UtcNow.AddDays(-30));
+            File.WriteAllText(path, "one too many");
+            runner.AreEqual(path + ".invalid.3", AutoResponderSettingsStore.SetAside(path), "with all slots taken the oldest is replaced");
+            runner.AreEqual("one too many", File.ReadAllText(path + ".invalid.3"), "by the newest");
+            runner.AreEqual("{ hand written, and broken", File.ReadAllText(path + ".invalid"), "and the first is still there");
+            runner.IsTrue(!File.Exists($"{path}.invalid.{AutoResponderSettingsStore.SetAsideSlots}"), "no more than the bounded number of copies exist");
         }
         finally
         {
@@ -708,7 +771,7 @@ internal static class AutoResponderSettingsStoreTests
 
     private static void DeleteAll(string path)
     {
-        foreach (var file in new[] { path, path + ".invalid" })
+        foreach (var file in new[] { path, path + ".invalid" }.Concat(Enumerable.Range(1, AutoResponderSettingsStore.SetAsideSlots).Select(i => $"{path}.invalid.{i}")))
         {
             if (!File.Exists(file)) continue;
             File.SetAttributes(file, FileAttributes.Normal);

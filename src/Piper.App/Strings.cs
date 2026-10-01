@@ -924,6 +924,8 @@ internal static class Strings
         public static string ImportTooManyRules(int count) =>
             I18n.T("autoResponder.importTooManyRules", ("count", count), ("limit", AutoResponderSettingsStore.MaxRules));
 
+        public static string ImportSetTooLarge => I18n.T("autoResponder.importSetTooLarge", ("limit", MaxFileMegabytes));
+
         public static string ImportTooLarge => I18n.T("autoResponder.importTooLarge", ("limit", MaxFileMegabytes));
 
         public static string ChooseFileCaption => I18n.T("autoResponder.chooseFileCaption");

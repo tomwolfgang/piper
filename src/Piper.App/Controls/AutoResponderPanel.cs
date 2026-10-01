@@ -743,13 +743,28 @@ public sealed class AutoResponderPanel : UserControl
         // Everything after an await runs on a panel that may have been closed meanwhile, so each
         // continuation checks before it touches a control or opens a dialog owned by it.
         var fileName = dialog.FileName;
-        var loaded = await OffThreadAsync(() => AutoResponderSettingsStore.Load(fileName));
+        // Read and measured together: Load bounds the file as written, but Save bounds the indented
+        // form it writes back, so a compact file under the cap can still be one that cannot be saved.
+        var (loaded, importedLimit) = await OffThreadAsync(() =>
+        {
+            var result = AutoResponderSettingsStore.Load(fileName);
+            return (result, result.Settings is null
+                ? AutoResponderSaveStatus.Saved
+                : AutoResponderSettingsStore.CheckLimits(result.Settings));
+        });
         if (IsDisposed) return;
 
         if (loaded.Settings is not { } imported)
         {
             MessageBox.Show(this, Strings.AutoResponder.LoadProblem(loaded),
                 Strings.App.Name, MessageBoxButtons.OK, MessageBoxIcon.Error);
+            return;
+        }
+
+        if (importedLimit != AutoResponderSaveStatus.Saved)
+        {
+            MessageBox.Show(this, Strings.AutoResponder.ImportSetTooLarge,
+                Strings.App.Name, MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return;
         }
 

@@ -311,7 +311,19 @@ public sealed class MainForm : Form, IMessageFilter
     /// <summary>True while saving the rules keeps failing, so one broken disk is reported once, not per keystroke.</summary>
     private bool _autoResponderSaveFailing;
 
+    /// <summary>The unusable saved rules found by the constructor; <see cref="OnShown"/> deals with the file off the UI thread.</summary>
+    private AutoResponderLoadResult? _unusableSavedRules;
+
     private void ReportUnusableSavedRules(AutoResponderLoadResult result)
+    {
+        // Nothing touches the file system here: the constructor runs on the UI thread before any
+        // window exists. OnShown moves the file aside (if it should be) on a worker and tells the user.
+        _unusableSavedRules = result;
+        _rulesFileProtected = result.OverLimits;
+        AppendLog(Strings.AutoResponder.LoadProblem(result));
+    }
+
+    private async Task<string> SetAsideAndDescribeAsync(AutoResponderLoadResult result)
     {
         var path = AutoResponderSettingsStore.DefaultPath;
         var problem = Strings.AutoResponder.LoadProblem(result);
@@ -319,13 +331,11 @@ public sealed class MainForm : Form, IMessageFilter
         // A file that is not a rule set is moved aside so the next save has room. One that is merely
         // locked or unreadable right now is left alone (it may be fine a minute later), and so is one
         // that is a valid rule set over Piper's limits: that is somebody's real work with no in-app
-        // way back, so it is neither moved nor, see below, overwritten.
-        _rulesFileProtected = result.OverLimits;
-        var keptAs = result.SetAsideAdvised ? AutoResponderSettingsStore.SetAside(path) : null;
-        _pendingRulesNotice = _rulesFileProtected ? Strings.AutoResponder.StartedWithoutRulesProtected(problem, path)
+        // way back, so it is neither moved nor, see _rulesFileProtected, overwritten.
+        var keptAs = result.SetAsideAdvised ? await Task.Run(() => AutoResponderSettingsStore.SetAside(path)) : null;
+        return result.OverLimits ? Strings.AutoResponder.StartedWithoutRulesProtected(problem, path)
             : keptAs is null ? Strings.AutoResponder.StartedWithoutRulesInPlace(problem, path)
             : Strings.AutoResponder.StartedWithoutRulesKept(problem, keptAs);
-        AppendLog(_pendingRulesNotice);
     }
 
     /// <summary>
@@ -358,7 +368,7 @@ public sealed class MainForm : Form, IMessageFilter
         else _pendingRulesNotice = _pendingRulesNotice is null ? message : $"{_pendingRulesNotice}\n\n{message}";
     }
 
-    protected override void OnShown(EventArgs e)
+    protected override async void OnShown(EventArgs e)
     {
         base.OnShown(e);
         _mainSplit.SplitterDistance = (int)(_mainSplit.Width * 0.55);
@@ -371,6 +381,16 @@ public sealed class MainForm : Form, IMessageFilter
 
         // After the restore, not before: this dialog stays up until it is dismissed, and behind it
         // the user's connection must already be back.
+        if (_unusableSavedRules is { } unusable)
+        {
+            _unusableSavedRules = null;
+            var described = await SetAsideAndDescribeAsync(unusable);
+            if (IsDisposed) return;
+
+            AppendLog(described);
+            _pendingRulesNotice = _pendingRulesNotice is null ? described : $"{described}\n\n{_pendingRulesNotice}";
+        }
+
         if (_pendingRulesNotice is { } rulesNotice)
         {
             _pendingRulesNotice = null;

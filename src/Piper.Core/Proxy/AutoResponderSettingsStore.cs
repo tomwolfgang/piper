@@ -1,3 +1,4 @@
+using System.Text;
 using System.Text.Json;
 
 namespace Piper.Core.Proxy;
@@ -87,6 +88,9 @@ public static class AutoResponderSettingsStore
     /// <summary>Most rules a set may hold. Every request walks the list, so it is also a latency bound.</summary>
     public const int MaxRules = 5000;
 
+    /// <summary>How many earlier unusable files <see cref="SetAside"/> keeps before it replaces the oldest.</summary>
+    public const int SetAsideSlots = 5;
+
     private static readonly JsonSerializerOptions ExportOptions = new() { WriteIndented = true };
 
     public static string DefaultPath => Path.Combine(
@@ -157,13 +161,15 @@ public static class AutoResponderSettingsStore
             if (!TryReadBounded(stream, out var content, out var length))
                 return new AutoResponderLoadResult(AutoResponderLoadStatus.TooLarge);
 
-            // File.ReadAllText used to drop a UTF-8 byte order mark that Notepad and friends write;
-            // the JSON reader treats it as garbage, so it is dropped here instead.
-            var start = length >= 3 && content[0] == 0xEF && content[1] == 0xBB && content[2] == 0xBF ? 3 : 0;
             AutoResponderSettings? settings;
             try
             {
-                settings = JsonSerializer.Deserialize<AutoResponderSettings>(content.AsSpan(start, length - start));
+                // Decoded the way File.ReadAllText did, so a file saved as UTF-8 with or without a
+                // byte order mark, UTF-16 (either byte order) or UTF-32 by Notepad or another editor
+                // still loads. The byte cap above has already bounded what is decoded.
+                using var reader = new StreamReader(new MemoryStream(content, 0, length), Encoding.UTF8,
+                    detectEncodingFromByteOrderMarks: true);
+                settings = JsonSerializer.Deserialize<AutoResponderSettings>(reader.ReadToEnd());
             }
             catch (ArgumentException ex)
             {
@@ -202,14 +208,19 @@ public static class AutoResponderSettingsStore
     /// <summary>
     /// Moves a rule file that cannot be used aside as <c>*.invalid</c> and returns where it went, or
     /// null when it could not be moved. Without this the first edit made after a failed load would
-    /// overwrite the only copy of rules the user may have spent an afternoon writing.
+    /// overwrite the only copy of rules the user may have spent an afternoon writing. An earlier
+    /// copy is not overwritten: the next free of <see cref="SetAsideSlots"/> names
+    /// (<c>.invalid</c>, <c>.invalid.1</c>, ...) is used, and only when all are taken is the oldest replaced.
     /// </summary>
     public static string? SetAside(string? path = null)
     {
         path ??= DefaultPath;
-        var destination = path + ".invalid";
         try
         {
+            var slots = Enumerable.Range(0, SetAsideSlots)
+                .Select(index => index == 0 ? path + ".invalid" : $"{path}.invalid.{index}").ToArray();
+            var destination = slots.FirstOrDefault(slot => !File.Exists(slot))
+                ?? slots.MinBy(slot => File.GetLastWriteTimeUtc(slot))!;
             File.Move(path, destination, overwrite: true);
             return destination;
         }
