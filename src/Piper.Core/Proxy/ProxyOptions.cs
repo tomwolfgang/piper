@@ -89,11 +89,17 @@ public sealed class ProxyOptions
     /// perfectly good TCP path available.</summary>
     public TimeSpan Http3ConnectTimeout { get; set; } = TimeSpan.FromSeconds(2);
 
-    /// <summary>How long to wait for a complete HTTP/3 response once the QUIC handshake has
-    /// succeeded. Bounding this matters as much as bounding the handshake: a network that passes
-    /// the handshake but drops later UDP leaves the request hanging with no error to fall back on,
-    /// which is worse than never having tried h3 at all.</summary>
+    /// <summary>How long an HTTP/3 request may go without the origin making progress (a complete
+    /// header section, or body bytes) once the QUIC handshake has succeeded. An idle timeout, not a
+    /// total: a long download that keeps arriving is never cut, while a network that passes the
+    /// handshake but drops later UDP is, so the request falls back to TCP instead of hanging.</summary>
     public TimeSpan Http3ResponseTimeout { get; set; } = TimeSpan.FromSeconds(15);
+
+    /// <summary>The longest one HTTP/3 request may take from the end of the handshake to the last
+    /// byte of the response, however steadily it progresses. A ceiling over the idle timeout, which
+    /// alone would let an origin trickle a response for as long as it likes. A response that needs
+    /// longer falls back to TCP, which streams it.</summary>
+    public TimeSpan Http3MaxResponseTime { get; set; } = TimeSpan.FromMinutes(15);
 
     public bool ShouldDecrypt(string host)
     {

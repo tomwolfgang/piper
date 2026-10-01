@@ -34,35 +34,40 @@ internal static class Http3Attempt
         if (!options.EnableHttp3Upstream) return null;
         if (!url.Scheme.Equals("https", StringComparison.OrdinalIgnoreCase)) return null; // h3 is always over QUIC+TLS
         if (!IsSafeToRetry(outbound.Method)) return null;
-        if (!altSvc.ShouldAttempt(url.Host)) return null;
+        if (!altSvc.TryGetEndpoint(url.Host, url.Port, out var udpPort)) return null;
 
         Http3ClientConnection? connection = null;
 
-        // One budget covering the whole attempt, re-armed after the handshake. Bounding only the
-        // handshake is not enough: a network that completes the QUIC handshake and then drops UDP
-        // leaves the response hanging forever, and because the caller's own token is the one that
-        // eventually fires, the failure would not be attributed to h3 and the host would stay
-        // eligible -- hanging every subsequent request too.
-        using var attempt = CancellationTokenSource.CreateLinkedTokenSource(ct);
-
         try
         {
-            attempt.CancelAfter(options.Http3ConnectTimeout);
-            connection = await Http3ClientConnection.ConnectAsync(url.Host, url.Port, options, attempt.Token).ConfigureAwait(false);
+            // The handshake gets its own short budget: a network that drops UDP never answers, and
+            // that must not cost the request more than a moment before it goes over TCP.
+            using (var handshake = CancellationTokenSource.CreateLinkedTokenSource(ct))
+            {
+                handshake.CancelAfter(options.Http3ConnectTimeout);
+                connection = await Http3ClientConnection.ConnectAsync(url.Host, udpPort, options, handshake.Token).ConfigureAwait(false);
+            }
 
-            attempt.CancelAfter(options.Http3ResponseTimeout);
+            // After the handshake the wait is an idle timeout owned by the connection, re-armed by the
+            // origin's progress. A total budget here killed every long download, restarted it over TCP
+            // from its first byte and barred the host from h3 for half an hour; a network that passes
+            // the handshake and then drops UDP is still caught, because then nothing arrives.
+            // A non-positive value (a setting gone wrong) must not throw in here and bar the host.
+            if (options.Http3ResponseTimeout > TimeSpan.Zero) connection.IdleTimeout = options.Http3ResponseTimeout;
+            if (options.Http3MaxResponseTime > TimeSpan.Zero) connection.MaxResponseTime = options.Http3MaxResponseTime;
             onRequestSent();
-            var response = await connection.SendRequestAsync(outbound, attempt.Token).ConfigureAwait(false);
+            var response = await connection.SendRequestAsync(outbound, ct).ConfigureAwait(false);
 
-            altSvc.RecordSuccess(url.Host);
+            altSvc.RecordSuccess(url.Host, url.Port);
             return response;
         }
-        catch (Exception) when (!ct.IsCancellationRequested)
+        catch (Exception ex) when (!ct.IsCancellationRequested)
         {
-            // Blocked UDP, an unreachable QUIC endpoint, a handshake or response timeout, a
-            // protocol disagreement -- all the same decision: stop trying this host for a while
-            // and let the caller proceed over TCP as though h3 had never been considered.
-            altSvc.RecordFailure(url.Host);
+            // Blocked UDP, an unreachable QUIC endpoint, a handshake or idle timeout, a protocol
+            // disagreement -- the same decision for the request: proceed over TCP as though h3 had
+            // never been considered. How long the ORIGIN is left on TCP depends on what failed.
+            if (ex is Http3GoAwayException or Http3ResponseTooLargeException) altSvc.RecordSoftFailure(url.Host, url.Port);
+            else altSvc.RecordFailure(url.Host, url.Port);
             return null;
         }
         finally
@@ -70,4 +75,12 @@ internal static class Http3Attempt
             if (connection is not null) await connection.DisposeAsync().ConfigureAwait(false);
         }
     }
+
+    // Two outcomes, by what the failure says about h3 for this origin. GOAWAY for the request and a
+    // response too big for the buffered path say nothing against h3 (TCP streams the big one; the
+    // origin's other resources are fine), so the origin is left on TCP for the short soft cool-down
+    // only -- not for none, or a hostile one would cost a handshake and a wasted response on every
+    // request. Everything else is barred for the long one: no handshake, no response, a protocol
+    // violation, a stall or a dropped connection part-way through (also what a UDP path that passes
+    // small packets and loses large ones looks like), a response over the time ceiling.
 }
