@@ -39,6 +39,68 @@ internal static class TextTransformsTests
             runner.AreEqual("hello", Apply(TextTransform.FromBase64, "aGVs bG8\r\n"), "wrapped and spaced base64 decodes");
             runner.AreEqual(Apply(TextTransform.FromBase64, "++//"), Apply(TextTransform.FromBase64, "--__"),
                 "the URL-safe alphabet decodes the same as the standard one");
+            runner.AreEqual("before hello after world", Apply(TextTransform.FromBase64,
+                "before aGVsbG8= after d29ybGQ="), "separate base64 parts decode in place");
+            runner.AreEqual("Bearer {\"alg\":\"HS256\"}.{\"sub\":\"alice\"}.sig",
+                Apply(TextTransform.FromBase64,
+                    "Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhbGljZSJ9.c2ln"),
+                "JWT header and payload parts decode without losing their context");
+            return Task.CompletedTask;
+        });
+
+        await runner.RunAsync("TextWizard inspects JWTs embedded in authorization text", () =>
+        {
+            const string alice = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhbGljZSJ9.c2ln";
+            const string bob = "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJib2IifQ.c2ln";
+
+            var inspection = TextTransforms.InspectJwt($"Bearer {alice} anything {bob}");
+            runner.AreEqual(2, inspection.Tokens.Count, "finds every compact token, not just a bearer value");
+            runner.IsTrue(inspection.Tokens.All(token => token.IsValid), "well-formed tokens are structurally valid");
+            runner.AreEqual("HS256", inspection.Tokens[0].Algorithm, "reads the first token algorithm");
+            runner.AreEqual("{\"sub\":\"bob\"}", inspection.Tokens[1].Payload, "reads the second token payload");
+            using (var json = JsonDocument.Parse(inspection.ToJson()))
+            {
+                runner.AreEqual(JsonValueKind.Array, json.RootElement.ValueKind, "multiple JWTs serialize as a JSON array");
+                runner.AreEqual("alice", json.RootElement[0].GetProperty("payload").GetProperty("sub").GetString(),
+                    "the JSON sent to TextWizard input retains the decoded payload");
+            }
+
+            var invalidPayload = TextTransforms.InspectJwt(
+                "eyJhbGciOiJIUzI1NiJ9.bm90LWpzb24.c2ln").Tokens.Single();
+            runner.AreEqual(false, invalidPayload.IsValid, "malformed payload is invalid");
+            runner.AreEqual(JwtValidationError.InvalidPayloadJson, invalidPayload.Error, "explains the malformed payload");
+
+            var invalidHeaderInspection = TextTransforms.InspectJwt(
+                "bm90LWpzb24.eyJzdWIiOiJhbGljZSJ9.c2ln");
+            var invalidHeader = invalidHeaderInspection.Tokens.Single();
+            runner.AreEqual(JwtValidationError.InvalidHeaderJson, invalidHeader.HeaderError, "explains the malformed header");
+            runner.AreEqual("{\"sub\":\"alice\"}", invalidHeader.Payload,
+                "still reads the payload when the header is malformed");
+            using (var json = JsonDocument.Parse(invalidHeaderInspection.ToJson()))
+            {
+                runner.AreEqual(JsonValueKind.Null, json.RootElement.GetProperty("header").ValueKind,
+                    "an invalid header has a JSON null placeholder");
+                runner.AreEqual("alice", json.RootElement.GetProperty("payload").GetProperty("sub").GetString(),
+                    "the valid payload remains in the JSON output");
+            }
+
+            var invalidSignature = TextTransforms.InspectJwt(
+                "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhbGljZSJ9.a").Tokens.Single();
+            runner.AreEqual(JwtValidationError.InvalidSignatureEncoding, invalidSignature.Error,
+                "rejects a base64url segment with impossible length");
+
+            var paddedSignature = TextTransforms.InspectJwt(
+                "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhbGljZSJ9.c2ln=").Tokens.Single();
+            runner.AreEqual(JwtValidationError.InvalidSignatureEncoding, paddedSignature.Error,
+                "does not report a padded signature prefix as a valid token");
+
+            var unsecured = TextTransforms.InspectJwt(
+                "eyJhbGciOiJub25lIn0.eyJzdWIiOiJhbGljZSJ9.").Tokens.Single();
+            runner.IsTrue(unsecured.IsValid, "allows the compact form of an unsecured JWT");
+            runner.AreEqual("none", unsecured.Algorithm, "identifies an unsecured JWT for the UI warning");
+
+            runner.AreEqual(0, TextTransforms.InspectJwt($"{alice}.tail").Tokens.Count,
+                "does not accept three segments from a four-segment value");
             return Task.CompletedTask;
         });
 

@@ -803,6 +803,7 @@
 
     "inputAccessibleName": "TextWizard input",
     "outputAccessibleName": "TextWizard output",
+    "jwtOutputAccessibleName": "TextWizard JWT inspection output",
     "transformAccessibleName": "TextWizard transform",
     "viewBytesAccessibleName": "TextWizard view bytes",
     "statusAccessibleName": "TextWizard status",
@@ -821,6 +822,7 @@
     "toBase64": "To Base64",
     "toBase64Url": "To Base64URL",
     "fromBase64": "From Base64",
+    "inspectJwt": "Inspect JWT",
     "urlEncode": "URLEncode",
     "urlDecode": "URLDecode",
     "hexEncode": "HexEncode",
@@ -838,6 +840,26 @@
     "toSha1": "To SHA1",
     "toSha256": "To SHA256",
     "toSha384": "To SHA384",
-    "toSha512": "To SHA512"
+    "toSha512": "To SHA512",
+
+    "jwtNoneFound": "No compact JWTs found.",
+    "jwtHeader": "Header",
+    "jwtPayload": "Payload",
+    "jwtToken": "JWT {{number}}",
+    "jwtHeaderInvalid": "Header (invalid: {{reason}})",
+    "jwtPayloadInvalid": "Payload (invalid: {{reason}})",
+    "jwtMoreTokens": "Only the first {{limit}} JWT candidates are shown.",
+    "jwtTreeTruncated": "... JSON tree is too large to show in full.",
+
+    "jwtInvalidHeaderEncoding": "header is not canonical Base64URL.",
+    "jwtInvalidHeaderJson": "header is not valid JSON.",
+    "jwtHeaderIsNotObject": "header is not a JSON object.",
+    "jwtMissingAlgorithm": "header has no non-empty alg value.",
+    "jwtInvalidPayloadEncoding": "payload is not canonical Base64URL.",
+    "jwtInvalidPayloadJson": "payload is not valid JSON.",
+    "jwtPayloadIsNotObject": "payload is not a JSON object.",
+    "jwtInvalidSignatureEncoding": "signature is not canonical Base64URL.",
+    "jwtMissingSignature": "a signed JWT has no signature.",
+    "jwtUnexpectedSignature": "an unsecured JWT must have an empty signature."
   }
 }

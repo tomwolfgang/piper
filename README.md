@@ -268,11 +268,12 @@ targets, so `Invoke-WebRequest -Proxy` would never reach Piper.
 like Fiddler's: input on top, the transform dropdown between the two panes, output below. The output
 updates as you type and the title tracks the character counts.
 
-The transform list matches Fiddler's, in the same order:
+The transform list keeps Fiddler's transforms in the same order, with Piper's JWT inspector alongside them:
 
 | | |
 | --- | --- |
 | Base64 | To Base64, To Base64URL, From Base64 |
+| JWT | Inspect JWT — finds compact tokens anywhere in the input and reads their header and payload |
 | URL | URLEncode, URLDecode — decoding treats `+` as a space, the way a query string does |
 | Hex | HexEncode, HexDecode — uppercase and unspaced |
 | Code | To C# byte[], To JS string, From JS string |
@@ -282,7 +283,7 @@ The transform list matches Fiddler's, in the same order:
 | Hashes | To MD5, SHA1, SHA256, SHA384, SHA512, as uppercase hex |
 
 When it opens with a value sent from an inspector it guesses the encoding and preselects the matching
-decoder - base64, URL, hex, HTML entities, a JSON string literal, UTF-7 or a deflated SAML payload - and
+decoder - JWT, base64, URL, hex, HTML entities, a JSON string literal, UTF-7 or a deflated SAML payload - and
 says so on the status bar. The guess is only a hint; picking something else is always one click away. When
 nothing is recognisable it falls back to the last transform you chose yourself, which is remembered between
 runs. Only the name of the transform is stored, never the text.
@@ -294,10 +295,19 @@ Rather than opening it and pasting, you can send a value straight from a capture
 TextWizard** sits on the Headers, JSON and WebForms inspector context menus, and **Send URL to TextWizard**
 on the session grid. The window is shared and stays open beside the grid.
 
+**Inspect JWT** reads compact `header.payload.signature` tokens directly or embedded in a longer value, such as
+`Bearer header.payload.signature anything header.payload.signature`. It shows each header and payload in an
+expanded JSON tree, and labels an invalid part without hiding a valid companion part. **To Input** and **Save**
+use the same decoded header/payload data as JSON. It deliberately does not claim that a signature,
+issuer, audience or lifetime is valid: checking those requires the issuer's key and the application's validation
+policy.
+
 Text is treated as UTF-8 throughout; bytes that are not valid UTF-8 come back as `�`, so use the Hex
 inspector for genuinely binary payloads. **From Base64** is deliberately forgiving — either alphabet,
-padding optional, line wrapping ignored — because that is how base64 arrives in headers and JWTs; illegal
-characters are still an error. Other decoders given malformed input say so instead of guessing. Input is
+padding optional, line wrapping ignored — because that is how base64 arrives in headers and JWTs. When a
+surrounding header makes the whole value invalid, it decodes each recognisable textual Base64 part in place
+instead; if there are no such parts, malformed input is still an error. Other decoders given malformed input say so instead of
+guessing. Input is
 capped at 1 MiB, and `From DeflatedSAML` refuses to inflate past 1 MiB so a compression bomb cannot
 exhaust memory.
 
