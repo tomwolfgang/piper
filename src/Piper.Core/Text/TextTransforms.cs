@@ -18,6 +18,7 @@ public enum TextTransform
     ToBase64,
     ToBase64Url,
     FromBase64,
+    InspectJwt,
     UrlEncode,
     UrlDecode,
     HexEncode,
@@ -53,6 +54,12 @@ public static class TextTransforms
     /// </summary>
     private const int MaxInflatedBytes = 1024 * 1024;
 
+    /// <summary>Caps independent runs in a mixed header to keep a separator flood cheap on the UI thread.</summary>
+    private const int MaxSeparateBase64Parts = 1_000;
+
+    private static readonly UTF8Encoding StrictUtf8 = new(encoderShouldEmitUTF8Identifier: false,
+        throwOnInvalidBytes: true);
+
     /// <summary>
     /// Escapes only what JSON requires, so a quote reads as a backslash-quote and an accented letter stays
     /// itself. The default encoder renders those as " and é — valid, but unreadable, and
@@ -61,6 +68,12 @@ public static class TextTransforms
     /// </summary>
     private static readonly JsonSerializerOptions JsStringOptions =
         new() { Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
+
+    /// <summary>
+    /// Finds and structurally validates compact JSON Web Tokens. A result never asserts that a signature or
+    /// claim is trustworthy: that needs an issuer's key and validation policy, which a text inspector lacks.
+    /// </summary>
+    public static JwtInspection InspectJwt(string input) => JwtInspector.Inspect(input);
 
 #pragma warning disable SYSLIB0001 // UTF-7 is obsolete because it is dangerous, which is exactly why a
     // debugging proxy needs to read it: legacy mail gateways still emit it and UTF-7 is a classic XSS
@@ -80,7 +93,7 @@ public static class TextTransforms
         {
             TextTransform.ToBase64 => Convert.ToBase64String(Encoding.UTF8.GetBytes(input)),
             TextTransform.ToBase64Url => Base64Url.EncodeToString(Encoding.UTF8.GetBytes(input)),
-            TextTransform.FromBase64 => Encoding.UTF8.GetString(FromBase64Lenient(input)),
+            TextTransform.FromBase64 => FromBase64(input),
             TextTransform.UrlEncode => Uri.EscapeDataString(input),
             // Fiddler, and every HTML form, treats "+" in a query string as a space.
             TextTransform.UrlDecode => Uri.UnescapeDataString(input.Replace('+', ' ')),
@@ -129,6 +142,106 @@ public static class TextTransforms
 
         return Convert.FromBase64String(buffer.ToString());
     }
+
+    /// <summary>
+    /// Decodes a complete Base64 value when possible. Headers often carry several Base64 runs instead - for
+    /// example a bearer prefix followed by the dot-separated parts of a JWT - so if the complete input is
+    /// not Base64, decode each recognisable textual run in place and leave the surrounding text intact.
+    /// </summary>
+    private static string FromBase64(string input)
+    {
+        try
+        {
+            return Encoding.UTF8.GetString(FromBase64Lenient(input));
+        }
+        catch (FormatException)
+        {
+            // A mixed header is expected to fail as one value. Its individual runs get a second, independent
+            // chance below rather than making the user copy every JWT part by hand.
+        }
+
+        var output = new StringBuilder(input.Length);
+        var decodedAny = false;
+        var examinedParts = 0;
+        var position = 0;
+        while (position < input.Length)
+        {
+            if (!IsBase64Character(input[position]))
+            {
+                output.Append(input[position++]);
+                continue;
+            }
+
+            var start = position;
+            while (position < input.Length && IsBase64Character(input[position])) position++;
+            var length = position - start;
+            if (length < 4)
+            {
+                output.Append(input, start, length);
+                continue;
+            }
+
+            if (examinedParts++ == MaxSeparateBase64Parts)
+            {
+                output.Append(input, start, input.Length - start);
+                break;
+            }
+
+            var run = input[start..position];
+            if (TryDecodeTextRun(run, out var decoded))
+            {
+                output.Append(decoded);
+                decodedAny = true;
+            }
+            else
+            {
+                output.Append(run);
+            }
+        }
+
+        if (!decodedAny)
+            throw new FormatException("The input is not Base64 or does not contain a textual Base64 part.");
+
+        return output.ToString();
+    }
+
+    private static bool TryDecodeTextRun(string input, out string decoded)
+    {
+        decoded = string.Empty;
+        // Short words such as "a" and "the" are too easy to mistake for Base64. Four characters is a full
+        // quantum and still covers the smallest useful independently encoded value (three decoded bytes).
+        if (input.Length < 4) return false;
+
+        byte[] bytes;
+        try
+        {
+            bytes = FromBase64Lenient(input);
+        }
+        catch (FormatException)
+        {
+            return false;
+        }
+
+        try
+        {
+            decoded = StrictUtf8.GetString(bytes);
+        }
+        catch (DecoderFallbackException)
+        {
+            return false;
+        }
+
+        if (decoded.Length == 0) return false;
+
+        var printable = 0;
+        foreach (var character in decoded)
+            if (!char.IsControl(character) || character is '\n' or '\r' or '\t') printable++;
+
+        return printable * 10 >= decoded.Length * 9;
+    }
+
+    private static bool IsBase64Character(char character) =>
+        char.IsAsciiLetterOrDigit(character) || character is '+' or '/' or '-' or '_' or '=';
 
     /// <summary>
     /// UTF-7 is an ASCII-only encoding, so anything outside ASCII is malformed input rather than something

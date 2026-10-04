@@ -10,6 +10,9 @@ internal static class TextTransformDetectorTests
             // Every one of these is a value this feature was built to read, taken from real captured traffic.
             Detects(runner, TextTransform.FromBase64, "YWRtaW46aHVudGVyMg==", "an Authorization: Basic value");
             Detects(runner, TextTransform.FromBase64, "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9", "a JWT header segment");
+            Detects(runner, TextTransform.InspectJwt,
+                "Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhbGljZSJ9.c2ln anything eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJib2IifQ.c2ln",
+                "JWTs embedded in an Authorization-style value");
             Detects(runner, TextTransform.UrlDecode, "redirect=https%3A%2F%2Fexample.com%2Fa%2Bb", "an encoded query string");
             Detects(runner, TextTransform.HexDecode, "48656C6C6F2C20576F726C6421", "a hex payload header");
             Detects(runner, TextTransform.HtmlDecode, "&lt;script&gt;alert(1)&lt;/script&gt;", "HTML entities");

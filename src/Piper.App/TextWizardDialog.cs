@@ -24,12 +24,16 @@ public sealed class TextWizardDialog : Form
     /// <summary>How much of the output the byte view will render. See <see cref="HexDump"/>.</summary>
     private const int MaxDumpBytes = 64 * 1024;
 
-    /// <summary>Fiddler's transform list, in Fiddler's order and using Fiddler's names.</summary>
+    /// <summary>A token can hold a deeply nested or very wide JSON value; don't let it create an endless UI tree.</summary>
+    private const int MaxJwtTreeNodes = 10_000;
+
+    /// <summary>Fiddler-compatible transforms, followed by Piper's JWT inspector.</summary>
     private static readonly (string Label, TextTransform Transform)[] Choices =
     [
         (Strings.TextWizard.ToBase64, TextTransform.ToBase64),
         (Strings.TextWizard.ToBase64Url, TextTransform.ToBase64Url),
         (Strings.TextWizard.FromBase64, TextTransform.FromBase64),
+        (Strings.TextWizard.InspectJwt, TextTransform.InspectJwt),
         (Strings.TextWizard.UrlEncode, TextTransform.UrlEncode),
         (Strings.TextWizard.UrlDecode, TextTransform.UrlDecode),
         (Strings.TextWizard.HexEncode, TextTransform.HexEncode),
@@ -57,6 +61,7 @@ public sealed class TextWizardDialog : Form
     private readonly ComboBox _transform;
     private readonly CheckBox _viewBytes;
     private readonly TextBox _output;
+    private readonly TreeView _jwtOutput;
     private readonly ToolStripStatusLabel _status;
 
     private readonly ToolTip _tips = new();
@@ -65,6 +70,7 @@ public sealed class TextWizardDialog : Form
     private readonly List<Image> _icons = [];
 
     private string _result = string.Empty;
+    private JwtInspection? _jwtInspection;
 
     /// <summary>
     /// Set while the dialog is choosing a transform for the user, so that a detected or restored choice is
@@ -115,6 +121,16 @@ public sealed class TextWizardDialog : Form
             WordWrap = false,
             Font = Palette.Mono,
             AccessibleName = Strings.TextWizard.OutputAccessibleName,
+        };
+
+        _jwtOutput = new TreeView
+        {
+            Dock = DockStyle.Fill,
+            BorderStyle = BorderStyle.None,
+            HideSelection = false,
+            Font = Palette.Mono,
+            AccessibleName = Strings.TextWizard.JwtOutputAccessibleName,
+            Visible = false,
         };
 
         _transform = new ComboBox
@@ -187,6 +203,7 @@ public sealed class TextWizardDialog : Form
         };
         _split.Panel1.Controls.Add(_input);
         _split.Panel2.Controls.Add(_output);
+        _split.Panel2.Controls.Add(_jwtOutput);
         _split.Panel2.Controls.Add(bar);
 
         // A real status bar rather than a label: it carries the sizing grip, which is the affordance that
@@ -290,7 +307,11 @@ public sealed class TextWizardDialog : Form
 
         try
         {
-            _result = TextTransforms.Apply(Choices[index].Transform, _input.Text);
+            var transform = Choices[index].Transform;
+            _jwtInspection = transform == TextTransform.InspectJwt ? TextTransforms.InspectJwt(_input.Text) : null;
+            _result = _jwtInspection is { } inspection
+                ? FormatJwtInspection(inspection)
+                : TextTransforms.Apply(transform, _input.Text);
             _status.ForeColor = Palette.TextDim;
             // At the limit is not the same as cut short: text of exactly this length was never truncated.
             if (_input.TextLength >= MaxInputLength && !keepStatus)
@@ -309,11 +330,167 @@ public sealed class TextWizardDialog : Form
         ShowResult();
     }
 
+    /// <summary>
+    /// The text result is JSON even though it is normally presented as a tree. That gives To Input and Save
+    /// an ordinary, useful value instead of the tree's display labels.
+    /// </summary>
+    private static string FormatJwtInspection(JwtInspection inspection) => inspection.ToJson();
+
+    private static string JwtError(JwtValidationError error) => error switch
+    {
+        JwtValidationError.InvalidHeaderEncoding => Strings.TextWizard.JwtInvalidHeaderEncoding,
+        JwtValidationError.InvalidHeaderJson => Strings.TextWizard.JwtInvalidHeaderJson,
+        JwtValidationError.HeaderIsNotObject => Strings.TextWizard.JwtHeaderIsNotObject,
+        JwtValidationError.MissingAlgorithm => Strings.TextWizard.JwtMissingAlgorithm,
+        JwtValidationError.InvalidPayloadEncoding => Strings.TextWizard.JwtInvalidPayloadEncoding,
+        JwtValidationError.InvalidPayloadJson => Strings.TextWizard.JwtInvalidPayloadJson,
+        JwtValidationError.PayloadIsNotObject => Strings.TextWizard.JwtPayloadIsNotObject,
+        JwtValidationError.InvalidSignatureEncoding => Strings.TextWizard.JwtInvalidSignatureEncoding,
+        JwtValidationError.MissingSignature => Strings.TextWizard.JwtMissingSignature,
+        JwtValidationError.UnexpectedSignature => Strings.TextWizard.JwtUnexpectedSignature,
+        _ => throw new ArgumentOutOfRangeException(nameof(error)),
+    };
+
     private void ShowResult()
     {
-        _output.Text = _viewBytes.Checked ? HexDump(_result) : _result;
+        var inspectingJwt = _jwtInspection is not null;
+        _viewBytes.Visible = !inspectingJwt;
+        _jwtOutput.Visible = inspectingJwt;
+        _output.Visible = !inspectingJwt;
+
+        if (inspectingJwt)
+            ShowJwtInspection(_jwtInspection!);
+        else
+            _output.Text = _viewBytes.Checked ? HexDump(_result) : _result;
+
         Text = Strings.TextWizard.CaptionWithCounts(_input.TextLength, _result.Length);
     }
+
+    private void ShowJwtInspection(JwtInspection inspection)
+    {
+        _jwtOutput.BeginUpdate();
+        try
+        {
+            _jwtOutput.Nodes.Clear();
+            if (inspection.Tokens.Count == 0)
+            {
+                _jwtOutput.Nodes.Add(Strings.TextWizard.JwtNoneFound);
+                return;
+            }
+
+            var renderedNodes = 0;
+            var treeTruncated = false;
+            for (var index = 0; index < inspection.Tokens.Count; index++)
+            {
+                var token = inspection.Tokens[index];
+                var parent = inspection.Tokens.Count == 1
+                    ? null
+                    : AddJwtNode(_jwtOutput.Nodes, Strings.TextWizard.JwtToken(index + 1), ref renderedNodes,
+                        ref treeTruncated);
+                if (treeTruncated) break;
+                AddJwtPart(parent?.Nodes ?? _jwtOutput.Nodes, Strings.TextWizard.JwtHeader,
+                    token.Header, token.HeaderError, isHeader: true, ref renderedNodes, ref treeTruncated);
+                AddJwtPart(parent?.Nodes ?? _jwtOutput.Nodes, Strings.TextWizard.JwtPayload,
+                    token.Payload, token.PayloadError, isHeader: false, ref renderedNodes, ref treeTruncated);
+                if (treeTruncated) break;
+            }
+
+            if (inspection.IsTruncated)
+                _jwtOutput.Nodes.Add(Strings.TextWizard.JwtMoreTokens(100));
+            if (treeTruncated)
+                _jwtOutput.Nodes.Add(Strings.TextWizard.JwtTreeTruncated);
+
+            _jwtOutput.ExpandAll();
+        }
+        finally
+        {
+            _jwtOutput.EndUpdate();
+        }
+    }
+
+    private static void AddJwtPart(TreeNodeCollection nodes, string name, string? json, JwtValidationError? error,
+        bool isHeader, ref int renderedNodes, ref bool treeTruncated)
+    {
+        var label = error is { } validationError
+            ? JwtPartInvalid(isHeader, JwtError(validationError))
+            : name;
+        if (json is null)
+        {
+            AddJwtNode(nodes, label, ref renderedNodes, ref treeTruncated);
+            return;
+        }
+
+        using var document = JsonDocument.Parse(json);
+        if (renderedNodes >= MaxJwtTreeNodes)
+        {
+            treeTruncated = true;
+            return;
+        }
+
+        nodes.Add(CreateJsonNode(label, document.RootElement, ref renderedNodes, ref treeTruncated));
+    }
+
+    private static TreeNode? AddJwtNode(TreeNodeCollection nodes, string text, ref int renderedNodes,
+        ref bool treeTruncated)
+    {
+        if (renderedNodes >= MaxJwtTreeNodes)
+        {
+            treeTruncated = true;
+            return null;
+        }
+
+        renderedNodes++;
+        return nodes.Add(text);
+    }
+
+    private static string JwtPartInvalid(bool isHeader, string reason) =>
+        isHeader
+            ? Strings.TextWizard.JwtHeaderInvalid(reason)
+            : Strings.TextWizard.JwtPayloadInvalid(reason);
+
+    private static TreeNode CreateJsonNode(string name, JsonElement value, ref int renderedNodes, ref bool treeTruncated)
+    {
+        var node = new TreeNode(FormatJsonValue(name, value));
+        renderedNodes++;
+        switch (value.ValueKind)
+        {
+            case JsonValueKind.Object:
+                foreach (var property in value.EnumerateObject())
+                {
+                    if (renderedNodes >= MaxJwtTreeNodes)
+                    {
+                        treeTruncated = true;
+                        break;
+                    }
+                    node.Nodes.Add(CreateJsonNode(property.Name, property.Value, ref renderedNodes, ref treeTruncated));
+                }
+                break;
+            case JsonValueKind.Array:
+                var index = 0;
+                foreach (var item in value.EnumerateArray())
+                {
+                    if (renderedNodes >= MaxJwtTreeNodes)
+                    {
+                        treeTruncated = true;
+                        break;
+                    }
+                    node.Nodes.Add(CreateJsonNode($"[{index++}]", item, ref renderedNodes, ref treeTruncated));
+                }
+                break;
+        }
+
+        return node;
+    }
+
+    private static string FormatJsonValue(string name, JsonElement value) => value.ValueKind switch
+    {
+        JsonValueKind.Object => $"{name}: {{ }}",
+        JsonValueKind.Array => $"{name}: [ ]",
+        JsonValueKind.String => $"{name}: {JsonSerializer.Serialize(value.GetString())}",
+        JsonValueKind.Number or JsonValueKind.True or JsonValueKind.False => $"{name}: {value.GetRawText()}",
+        JsonValueKind.Null => $"{name}: null",
+        _ => $"{name}: {value.GetRawText()}",
+    };
 
     private static int? IndexOf(TextTransform? transform)
     {
