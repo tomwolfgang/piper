@@ -186,8 +186,9 @@ internal static partial class ProxyAdmissionTests
             fail = true;
             using var trigger = await ConnectAsync(proxy.Endpoint!.Port); // the accept after this one fails
             runner.IsTrue(await Poll.UntilAsync(() => !proxy.IsRunning), "the proxy stops claiming to run");
-            runner.IsTrue(lines.Any(l => l.Contains("Accept loop failed", StringComparison.Ordinal) && l.Contains("the listener broke", StringComparison.Ordinal)),
-                "and says why");
+            runner.IsTrue(await Poll.UntilAsync(() => lines.Any(l => l.Contains("Accept loop failed", StringComparison.Ordinal)
+                                                                   && l.Contains("the listener broke", StringComparison.Ordinal))),
+                "and says why"); // the line follows the flag by a moment
             var refused = false;
             try { using var late = await ConnectAsync(proxy.Endpoint!.Port); }
             catch (SocketException) { refused = true; }
@@ -340,6 +341,10 @@ internal static partial class ProxyAdmissionTests
                 "99 buffered plus 1 read meets a minimum of 100");
             runner.IsTrue(await StalledAsync(minimum: 100, bodyLength: 1000, buffered: 0, arriving: 1),
                 "where one byte alone does not");
+            runner.IsTrue(!await StalledAsync(minimum: 1024, bodyLength: 100, buffered: 50, arriving: 25),
+                "and a small body is asked only for what was still to come: 50 left, 25 arrived, 50 buffered");
+            runner.IsTrue(await StalledAsync(minimum: 1024, bodyLength: 100, buffered: 0, arriving: 25),
+                "where without the buffered half it is a stall");
         });
 
         await runner.RunAsync("a small body that arrives slowly through a tight idle timeout is served, not answered 408", async () =>

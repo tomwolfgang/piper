@@ -215,11 +215,24 @@ public sealed class ProxyOptions
 
     /// <summary>Where the running <see cref="ProxyServer"/> is listening; null while none is. Set by
     /// the server so that a connection made on its behalf can tell it would be dialling itself.</summary>
-    internal IPEndPoint? ListeningEndpoint { get; set; }
+    internal IPEndPoint? ListeningEndpoint
+    {
+        get => _listeningEndpoint;
+        set => _listeningEndpoint = value;
+    }
+
+    // Written when a run starts or ends and read on every connection thread.
+    private volatile IPEndPoint? _listeningEndpoint;
 
     /// <summary>Whether the listening socket also accepts IPv4 clients while bound to an IPv6 address
     /// (a dual-mode socket). Meaningful only with <see cref="ListeningEndpoint"/>.</summary>
-    internal bool ListeningDualMode { get; set; }
+    internal bool ListeningDualMode
+    {
+        get => _listeningDualMode;
+        set => _listeningDualMode = value;
+    }
+
+    private volatile bool _listeningDualMode;
 
     /// <summary>
     /// True when connecting to <paramref name="address"/>:<paramref name="port"/> would reach the

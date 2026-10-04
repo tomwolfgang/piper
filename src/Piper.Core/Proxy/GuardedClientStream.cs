@@ -23,6 +23,7 @@ internal sealed class GuardedClientStream(Stream inner, TimeSpan writeTimeout) :
     private long _minimum;
     private long _windowStart;
     private long _windowBytes;
+    private long _windowCredit;
     private long _remaining;
 
     /// <summary>From now on, at least <paramref name="minimumBytes"/> must arrive in every
@@ -44,9 +45,9 @@ internal sealed class GuardedClientStream(Stream inner, TimeSpan writeTimeout) :
 
         _window = window;
         _minimum = minimumBytes;
-        _remaining = bodyLength >= 0 ? bodyLength : long.MaxValue;
+        _windowBytes = _windowCredit = Math.Max(0, alreadyBuffered);
+        _remaining = bodyLength >= 0 ? Math.Max(0, bodyLength - _windowCredit) : long.MaxValue;
         _windowStart = Stopwatch.GetTimestamp();
-        _windowBytes = Math.Max(0, alreadyBuffered);
         _floorArmed = true;
     }
 
@@ -72,7 +73,8 @@ internal sealed class GuardedClientStream(Stream inner, TimeSpan writeTimeout) :
                 $"Only {_windowBytes} bytes arrived in {elapsed.TotalSeconds:0.#}s; the minimum is {required} bytes per {_window.TotalSeconds:0.#}s.");
         }
 
-        if (_remaining != long.MaxValue) _remaining = Math.Max(0, _remaining - _windowBytes);
+        if (_remaining != long.MaxValue) _remaining = Math.Max(0, _remaining - (_windowBytes - _windowCredit));
+        _windowCredit = 0;
         _windowStart = Stopwatch.GetTimestamp();
         _windowBytes = 0;
     }
