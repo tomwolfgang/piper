@@ -23,7 +23,6 @@ internal sealed class GuardedClientStream(Stream inner, TimeSpan writeTimeout) :
     private long _minimum;
     private long _windowStart;
     private long _windowBytes;
-    private long _windowCredit;
     private long _remaining;
 
     /// <summary>From now on, at least <paramref name="minimumBytes"/> must arrive in every
@@ -34,7 +33,9 @@ internal sealed class GuardedClientStream(Stream inner, TimeSpan writeTimeout) :
     /// (chunked). A body that is shorter than the minimum cannot be asked for more than it has, so a
     /// small body that is slow is not cut for being small.</param>
     /// <param name="alreadyBuffered">Body bytes that came in with the head and so were read before the
-    /// floor was armed; they count as progress made in the first window.</param>
+    /// floor was armed. They are credited once, against what is left to arrive, and are not counted as
+    /// progress of the first window as well: a client that sends its head and a kilobyte of body and
+    /// then nothing is held to the minimum from the first window on, like any other.</param>
     public void ArmProgressFloor(TimeSpan window, long minimumBytes, long bodyLength = -1, long alreadyBuffered = 0)
     {
         if (window <= TimeSpan.Zero || window == Timeout.InfiniteTimeSpan || minimumBytes <= 0)
@@ -45,8 +46,8 @@ internal sealed class GuardedClientStream(Stream inner, TimeSpan writeTimeout) :
 
         _window = window;
         _minimum = minimumBytes;
-        _windowBytes = _windowCredit = Math.Max(0, alreadyBuffered);
-        _remaining = bodyLength >= 0 ? Math.Max(0, bodyLength - _windowCredit) : long.MaxValue;
+        _windowBytes = 0;
+        _remaining = bodyLength >= 0 ? Math.Max(0, bodyLength - Math.Max(0, alreadyBuffered)) : long.MaxValue;
         _windowStart = Stopwatch.GetTimestamp();
         _floorArmed = true;
     }
@@ -73,8 +74,7 @@ internal sealed class GuardedClientStream(Stream inner, TimeSpan writeTimeout) :
                 $"Only {_windowBytes} bytes arrived in {elapsed.TotalSeconds:0.#}s; the minimum is {required} bytes per {_window.TotalSeconds:0.#}s.");
         }
 
-        if (_remaining != long.MaxValue) _remaining = Math.Max(0, _remaining - (_windowBytes - _windowCredit));
-        _windowCredit = 0;
+        if (_remaining != long.MaxValue) _remaining = Math.Max(0, _remaining - _windowBytes);
         _windowStart = Stopwatch.GetTimestamp();
         _windowBytes = 0;
     }

@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Net;
 
 namespace Piper.Core.Proxy;
@@ -259,20 +260,52 @@ public sealed class ProxyOptions
         if (!reachable) return false;
 
         if (IPAddress.IsLoopback(address) || address.Equals(IPAddress.Any) || address.Equals(IPAddress.IPv6Any)) return true;
+        return LocalAddresses().Contains(address);
+    }
+
+    // The addresses of this machine's interfaces, as of the last time they were listed. Listing them
+    // is a heavy system call and a client picks how often the question is asked (a name with many
+    // addresses, on the proxy's port), so it is answered from a snapshot that is retaken after
+    // LocalAddressLifetime. An address acquired within that time is not known yet: a request for it
+    // on the proxy's port can loop, which the connection cap and idle eviction bound.
+    private sealed record LocalAddressSnapshot(HashSet<IPAddress> Addresses, long TakenAt);
+
+    private volatile LocalAddressSnapshot? _localAddresses;
+
+    /// <summary>How long a listing of the machine's addresses is trusted.</summary>
+    internal TimeSpan LocalAddressLifetime { get; set; } = TimeSpan.FromSeconds(30);
+
+    /// <summary>Test seam: where the machine's addresses come from. Null means its network interfaces.</summary>
+    internal Func<IEnumerable<IPAddress>>? LocalAddressSource { get; set; }
+
+    private HashSet<IPAddress> LocalAddresses()
+    {
+        var snapshot = _localAddresses;
+        if (snapshot is not null && Stopwatch.GetElapsedTime(snapshot.TakenAt) < LocalAddressLifetime)
+            return snapshot.Addresses;
+
+        HashSet<IPAddress> addresses;
         try
         {
-            return System.Net.NetworkInformation.NetworkInterface.GetAllNetworkInterfaces()
-                .SelectMany(nic => nic.GetIPProperties().UnicastAddresses)
-                .Any(unicast => unicast.Address.Equals(address));
+            addresses = [.. (LocalAddressSource ?? ListInterfaceAddresses)()];
         }
         catch (System.Net.NetworkInformation.NetworkInformationException)
         {
-            // The system will not list its interfaces (a restricted or containerised host): treat the
-            // address as someone else's. If it was in fact our own, the connect that follows ends in
-            // the same loop that was always possible, bounded by the connection cap and eviction.
-            return false;
+            // The system will not list its interfaces (a restricted or containerised host): no address
+            // is known to be ours, and that is remembered for the same time, not retried per request.
+            // If one was in fact our own, the connect that follows ends in the same loop that was
+            // always possible, bounded by the connection cap and eviction.
+            addresses = [];
         }
+
+        _localAddresses = new LocalAddressSnapshot(addresses, Stopwatch.GetTimestamp());
+        return addresses;
     }
+
+    private static IEnumerable<IPAddress> ListInterfaceAddresses() =>
+        System.Net.NetworkInformation.NetworkInterface.GetAllNetworkInterfaces()
+            .SelectMany(nic => nic.GetIPProperties().UnicastAddresses)
+            .Select(unicast => unicast.Address);
 
     public bool ShouldDecrypt(string host)
     {

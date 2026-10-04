@@ -88,45 +88,61 @@ public sealed class ProxyServer : IAsyncDisposable
 
     public void Start()
     {
-        lock (_runLock)
+        // What a run that ended by failing (rather than by StopAsync) left behind. Its listener is
+        // closed here, before the bind below, since the new run may want the same port; its
+        // connections are told to stop afterwards and off this thread (see EndRunAsync).
+        Run? previous = null;
+        try
         {
-            if (IsRunning) return;
-
-            // What a run that ended by failing (rather than by StopAsync) left behind: its connections
-            // are told to stop before anything of the new run exists.
-            ReleaseRun();
-
-            var listener = new TcpListener(_options.ListenAddress, _options.Port);
-            try
+            lock (_runLock)
             {
-                listener.Server.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, false);
-                listener.Start(ListenBacklog);
+                if (IsRunning) return;
+                previous = TakeRun();
+                StopListener(previous.Listener);
+                StartRun();
             }
-            catch
-            {
-                listener.Stop();
-                throw;
-            }
-
-            var cts = new CancellationTokenSource();
-            _listener = listener;
-            _cts = cts;
-            Endpoint = (IPEndPoint)listener.LocalEndpoint;
-            _options.ListeningDualMode = listener.Server.AddressFamily == AddressFamily.InterNetworkV6 && listener.Server.DualMode;
-            _options.ListeningEndpoint = Endpoint;
-            IsRunning = true;
-
-            // One admission per run: connections still ending after a Stop give their slot back to the
-            // gate they took it from, not to the next run's, and are never evicted for the next run.
-            var admission = new Admission(_options.MaxConcurrentConnections);
-            Func<CancellationToken, ValueTask<TcpClient>> accept = ct => listener.AcceptTcpClientAsync(ct);
-            if (WrapAccept is { } wrap) accept = wrap(accept);
-            var pending = listener.Pending;
-            var token = cts.Token;
-            _acceptLoop = Task.Run(() => RunAcceptLoopAsync(admission, accept, pending, token, listener));
+        }
+        finally
+        {
+            if (previous is { Cts: not null }) _ = Task.Run(() => EndRunAsync(previous));
         }
 
         Log?.Invoke(this, $"Listening on {Endpoint}. HTTPS decryption {(_options.DecryptHttps ? "enabled" : "disabled")}.");
+    }
+
+    /// <summary>Binds the listener and starts the accept loop. Called with <c>_runLock</c> held.</summary>
+    private void StartRun()
+    {
+        var listener = new TcpListener(_options.ListenAddress, _options.Port);
+        try
+        {
+            listener.Server.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, false);
+            listener.Start(ListenBacklog);
+        }
+        catch
+        {
+            // Not a raw Stop(): were that to throw, it would replace the bind error that
+            // ClassifyStartFailure reads.
+            StopListener(listener);
+            throw;
+        }
+
+        var cts = new CancellationTokenSource();
+        _listener = listener;
+        _cts = cts;
+        Endpoint = (IPEndPoint)listener.LocalEndpoint;
+        _options.ListeningDualMode = listener.Server.AddressFamily == AddressFamily.InterNetworkV6 && listener.Server.DualMode;
+        _options.ListeningEndpoint = Endpoint;
+        IsRunning = true;
+
+        // One admission per run: connections still ending after a Stop give their slot back to the
+        // gate they took it from, not to the next run's, and are never evicted for the next run.
+        var admission = new Admission(_options.MaxConcurrentConnections);
+        Func<CancellationToken, ValueTask<TcpClient>> accept = ct => listener.AcceptTcpClientAsync(ct);
+        if (WrapAccept is { } wrap) accept = wrap(accept);
+        var pending = listener.Pending;
+        var token = cts.Token;
+        _acceptLoop = Task.Run(() => RunAcceptLoopAsync(admission, accept, pending, token, listener));
     }
 
     /// <summary>
@@ -170,19 +186,23 @@ public sealed class ProxyServer : IAsyncDisposable
 
     public async Task StopAsync()
     {
-        Task? acceptLoop;
+        Run run;
         lock (_runLock)
         {
             // Not "if not running": a run that ended by failing has still to be cleaned up.
             if (_cts is null) return;
-            acceptLoop = _acceptLoop;
             IsRunning = false;
-            ReleaseRun();
+            run = TakeRun();
         }
 
-        if (acceptLoop is not null)
+        // Outside the lock, and asynchronously: telling every connection to stop runs a callback
+        // chain per connection, which must not be paid for by the thread that asked for the stop.
+        StopListener(run.Listener);
+        await EndRunAsync(run).ConfigureAwait(false);
+
+        if (run.AcceptLoop is not null)
         {
-            try { await acceptLoop.ConfigureAwait(false); }
+            try { await run.AcceptLoop.ConfigureAwait(false); }
             catch (OperationCanceledException) { /* expected */ }
             catch (Exception ex)
             {
@@ -194,29 +214,44 @@ public sealed class ProxyServer : IAsyncDisposable
         Log?.Invoke(this, "Proxy stopped.");
     }
 
+    /// <summary>What one run of the proxy holds: enough to end it.</summary>
+    private sealed record Run(CancellationTokenSource? Cts, TcpListener? Listener, Task? AcceptLoop);
+
     /// <summary>
-    /// Ends the run that is held, whichever way it came to an end: its connections are told to stop
-    /// (the source is cancelled, and only then disposed - a source that is disposed but never
-    /// cancelled tells nobody anything), and the listener is closed and let go. Called with
-    /// <c>_runLock</c> held.
+    /// Detaches the current run, whichever way it came to an end, so that nothing else sees it any
+    /// more (a late report from its accept loop is then ignored). Quick: it only takes the fields.
+    /// Called with <c>_runLock</c> held; the caller ends the run with <see cref="EndRunAsync"/>.
     /// </summary>
-    private void ReleaseRun()
+    private Run TakeRun()
     {
-        var cts = _cts;
-        var listener = _listener;
+        var run = new Run(_cts, _listener, _acceptLoop);
         _cts = null;
         _listener = null;
         _acceptLoop = null;
         _options.ListeningEndpoint = null;
+        return run;
+    }
 
-        if (cts is not null)
+    /// <summary>
+    /// Tells the connections of a run to stop: the source is cancelled (asynchronously, so the
+    /// callbacks run on the thread pool) and only then disposed - a source that is disposed but never
+    /// cancelled tells nobody anything.
+    /// </summary>
+    private static async Task EndRunAsync(Run run)
+    {
+        if (run.Cts is not { } cts) return;
+        try
         {
-            try { cts.Cancel(); }
-            catch (AggregateException) { /* a callback of a connection threw; the stop goes on */ }
+            await cts.CancelAsync().ConfigureAwait(false);
+        }
+        catch (Exception)
+        {
+            // A callback of one connection threw. The rest have run, and the run is over either way.
+        }
+        finally
+        {
             cts.Dispose();
         }
-
-        StopListener(listener);
     }
 
     private static void StopListener(TcpListener? listener)
@@ -249,9 +284,9 @@ public sealed class ProxyServer : IAsyncDisposable
 
         lock (_runLock)
         {
-            // Stopped or restarted meanwhile: this run's end is not a failure, and the state now
-            // belongs to whoever ended it.
-            if (ct.IsCancellationRequested) return;
+            // Stopped or restarted meanwhile (the run was detached, or is being told to stop): this
+            // run's end is not a failure, and the state now belongs to whoever ended it.
+            if (ct.IsCancellationRequested || _cts is null || _cts.Token != ct) return;
 
             IsRunning = false;
             _options.ListeningEndpoint = null;

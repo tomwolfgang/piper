@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
 using Piper.Core.Http;
@@ -269,6 +270,122 @@ internal static partial class ProxyAdmissionTests
             runner.AreEqual(2, admission.Gate.CurrentCount, "and no slot is kept by a failure");
         });
 
+        await runner.RunAsync("stopping and restarting do not wait for the connections to be told to stop, nor hold the run lock meanwhile", async () =>
+        {
+            // Each accepted connection's token registers a callback that takes 200 ms. Cancelling the
+            // run inline would hold the caller (the UI thread, in the application) for all of them.
+            var proxy = new ProxyServer(new ProxyOptions { Port = 0, MaxConcurrentConnections = 16 }, ca, new SessionStore());
+            var slow = true;
+            var fail = false;
+            proxy.WrapAccept = real => ct =>
+            {
+                if (fail) return ValueTask.FromException<TcpClient>(new InvalidOperationException("the listener broke"));
+                if (slow) ct.Register(() => Thread.Sleep(200));
+                return real(ct);
+            };
+            proxy.Start();
+
+            var clients = new List<TcpClient>();
+            for (var i = 0; i < 6; i++) clients.Add(await ConnectAsync(proxy.Endpoint!.Port));
+            runner.IsTrue(await Poll.UntilAsync(() => proxy.ActiveConnections == 6), "six connections are live, each with a slow callback");
+
+            slow = false; // the next run's connections are not slowed
+            var clock = Stopwatch.StartNew();
+            var stopping = proxy.StopAsync();
+            runner.IsTrue(clock.ElapsedMilliseconds < 700, $"StopAsync gives control back at once ({clock.ElapsedMilliseconds} ms, the callbacks take over a second)");
+
+            clock.Restart();
+            proxy.Start(); // while the old run is still being told to stop: the run lock is free
+            runner.IsTrue(clock.ElapsedMilliseconds < 700, $"and so does a Start meanwhile ({clock.ElapsedMilliseconds} ms)");
+            runner.IsTrue(proxy.IsRunning, "which starts a new run");
+
+            await stopping;
+            foreach (var client in clients)
+            {
+                var closed = await ReadAsync(client.GetStream(), null, Patience);
+                runner.IsTrue(closed.Eof, "every connection of the old run is closed once the callbacks have run");
+                client.Dispose();
+            }
+            runner.IsTrue(proxy.IsRunning, "and the stop of the old run did not stop the new one");
+
+            // The same on a restart after a failure, with connections in flight.
+            slow = true;
+            var inFlight = new List<TcpClient>();
+            for (var i = 0; i < 4; i++) inFlight.Add(await ConnectAsync(proxy.Endpoint!.Port));
+            runner.IsTrue(await Poll.UntilAsync(() => proxy.ActiveConnections == 4), "four connections are live in the new run");
+            fail = true;
+            using (var trigger = await ConnectAsync(proxy.Endpoint!.Port))
+            {
+                runner.IsTrue(await Poll.UntilAsync(() => !proxy.IsRunning), "its accept loop fails");
+            }
+            fail = false;
+            slow = false;
+            clock.Restart();
+            proxy.Start();
+            runner.IsTrue(clock.ElapsedMilliseconds < 700, $"Start after a failure does not wait for the old connections either ({clock.ElapsedMilliseconds} ms)");
+            foreach (var client in inFlight)
+            {
+                var closed = await ReadAsync(client.GetStream(), null, Patience);
+                runner.IsTrue(closed.Eof, "and they are all told to go");
+                client.Dispose();
+            }
+            await proxy.DisposeAsync();
+        });
+
+        await runner.RunAsync("a failed Start surfaces the bind error, which is what tells the user the port is taken", async () =>
+        {
+            using var first = new Harness(ca);
+            await using var second = new ProxyServer(new ProxyOptions { Port = first.Port }, ca, new SessionStore());
+            SocketException? thrown = null;
+            try { second.Start(); }
+            catch (SocketException ex) { thrown = ex; }
+
+            runner.IsTrue(thrown is not null, "the second proxy on the same port does not start");
+            runner.AreEqual(ProxyStartFailure.PortInUse, thrown is null ? ProxyStartFailure.Other : ProxyServer.ClassifyStartFailure(thrown),
+                "and it is the port-in-use error that arrives");
+            runner.IsTrue(!second.IsRunning, "not running");
+            runner.IsTrue(first.Proxy.IsRunning, "and the first is undisturbed");
+        });
+
+        await runner.RunAsync("the machine's addresses are listed once and kept, not listed per question", async () =>
+        {
+            var listings = 0;
+            var own = IPAddress.Parse("192.0.2.55");
+            var options = new ProxyOptions
+            {
+                ListeningEndpoint = new IPEndPoint(IPAddress.Any, 1234),
+                LocalAddressSource = () =>
+                {
+                    Interlocked.Increment(ref listings);
+                    return [own];
+                },
+            };
+
+            var allRight = true;
+            for (var i = 0; i < 1000; i++)
+                allRight &= options.IsOwnEndpoint(own, 1234) && !options.IsOwnEndpoint(IPAddress.Parse("192.0.2.56"), 1234);
+            runner.IsTrue(allRight, "an address of the machine is the proxy's, another is not, a thousand times over");
+            runner.AreEqual(1, listings, "from one listing");
+
+            options.LocalAddressLifetime = TimeSpan.FromMilliseconds(50);
+            await Task.Delay(300);
+            runner.IsTrue(options.IsOwnEndpoint(own, 1234), "still right once the listing is old");
+            runner.AreEqual(2, listings, "after taking a fresh one");
+
+            var broken = 0;
+            var unlistable = new ProxyOptions
+            {
+                ListeningEndpoint = new IPEndPoint(IPAddress.Any, 1234),
+                LocalAddressSource = () =>
+                {
+                    Interlocked.Increment(ref broken);
+                    throw new System.Net.NetworkInformation.NetworkInformationException(5);
+                },
+            };
+            runner.IsTrue(!unlistable.IsOwnEndpoint(own, 1234) && !unlistable.IsOwnEndpoint(own, 1234), "a system that will not list its interfaces knows no address");
+            runner.AreEqual(1, broken, "and is not asked again for every request");
+        });
+
         // --------------------------------------------------------------- eviction and capacity
 
         await runner.RunAsync("eviction is asynchronous, so a poll does not close another connection while the last one is still unwinding", async () =>
@@ -335,16 +452,20 @@ internal static partial class ProxyAdmissionTests
                 "and a body of unknown length keeps the whole minimum");
         });
 
-        await runner.RunAsync("body bytes that came in with the head count as progress", async () =>
+        await runner.RunAsync("body bytes that came in with the head are credited once, against what is left", async () =>
         {
-            runner.IsTrue(!await StalledAsync(minimum: 100, bodyLength: 1000, buffered: 99, arriving: 1),
-                "99 buffered plus 1 read meets a minimum of 100");
-            runner.IsTrue(await StalledAsync(minimum: 100, bodyLength: 1000, buffered: 0, arriving: 1),
-                "where one byte alone does not");
-            runner.IsTrue(!await StalledAsync(minimum: 1024, bodyLength: 100, buffered: 50, arriving: 25),
-                "and a small body is asked only for what was still to come: 50 left, 25 arrived, 50 buffered");
-            runner.IsTrue(await StalledAsync(minimum: 1024, bodyLength: 100, buffered: 0, arriving: 25),
-                "where without the buffered half it is a stall");
+            // 990 of 1,000 bytes came with the head: the 10 that follow are all that is asked for.
+            runner.IsTrue(!await StalledAsync(minimum: 1024, bodyLength: 1000, buffered: 990, arriving: 10),
+                "the last 10 bytes arriving after the window complete the body");
+            runner.IsTrue(await StalledAsync(minimum: 1024, bodyLength: 1000, buffered: 0, arriving: 10),
+                "where without the buffered bytes they are a stall");
+            runner.IsTrue(await StalledAsync(minimum: 1024, bodyLength: 100, buffered: 50, arriving: 25),
+                "and 25 of the remaining 50 is still a stall");
+
+            // ...but not counted a second time as progress of the first window: head plus 1 KB of a
+            // large body, then (all but) silence, is held to the minimum from the first window on.
+            runner.IsTrue(await StalledAsync(minimum: 1024, bodyLength: 100_000, buffered: 1024, arriving: 1),
+                "a kilobyte buffered with the head buys no free window");
         });
 
         await runner.RunAsync("a small body that arrives slowly through a tight idle timeout is served, not answered 408", async () =>
