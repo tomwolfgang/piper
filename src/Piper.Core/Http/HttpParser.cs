@@ -7,6 +7,10 @@ public static class HttpParser
 {
     private const long MaxBodyBytes = 256L * 1024 * 1024;
 
+    /// <summary>The most a request line and its headers may add up to. Each line and the header
+    /// count were already capped, which on their own allowed hundreds of megabytes of headers.</summary>
+    private const int MaxRequestHeadBytes = 64 * 1024;
+
     /// <summary>
     /// How many interim (1xx) responses may precede the real one before the exchange is treated as
     /// hostile. RFC 9112 puts no limit on them, so without a cap an origin can hold a connection
@@ -20,12 +24,29 @@ public static class HttpParser
     /// </summary>
     public static async Task<HttpRequestData?> ReadRequestAsync(HttpStreamReader reader, CancellationToken ct)
     {
+        var request = await ReadRequestHeadAsync(reader, ct).ConfigureAwait(false);
+        if (request is null) return null;
+
+        request.Body = await ReadBodyAsync(reader, DescribeRequestBody(request.Headers), ct).ConfigureAwait(false);
+        return request;
+    }
+
+    /// <summary>
+    /// Reads a request line and headers, leaving the body unread (<see cref="HttpRequestData.Body"/>
+    /// is empty). For a caller that applies a different deadline to the head than to the body.
+    /// Returns null when the connection closed cleanly before a request started.
+    /// </summary>
+    public static async Task<HttpRequestData?> ReadRequestHeadAsync(HttpStreamReader reader, CancellationToken ct)
+    {
         string? line;
-        // Tolerate leading blank lines between pipelined requests (RFC 9112 2.2).
+        var consumed = 0;
+        // Tolerate leading blank lines between pipelined requests (RFC 9112 2.2), within the head's budget.
         do
         {
             line = await reader.ReadLineAsync(ct).ConfigureAwait(false);
             if (line is null) return null;
+            consumed += line.Length + 2;
+            if (consumed > MaxRequestHeadBytes) throw new HttpParseException($"Request head exceeded {MaxRequestHeadBytes} bytes.");
         } while (line.Length == 0);
 
         var parts = line.Split(' ', 3, StringSplitOptions.RemoveEmptyEntries);
@@ -39,9 +60,8 @@ public static class HttpParser
             HttpVersion = parts.Length > 2 ? parts[2] : "HTTP/1.0",
         };
 
-        request.Headers = await ReadHeadersAsync(reader, ct).ConfigureAwait(false);
+        request.Headers = await ReadHeadersAsync(reader, ct, MaxRequestHeadBytes - consumed).ConfigureAwait(false);
         request.Url = ResolveUrl(request);
-        request.Body = await ReadBodyAsync(reader, DescribeRequestBody(request.Headers), ct).ConfigureAwait(false);
         return request;
     }
 
@@ -168,7 +188,8 @@ public static class HttpParser
                && long.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out length);
     }
 
-    private static async Task<HeaderCollection> ReadHeadersAsync(HttpStreamReader reader, CancellationToken ct)
+    private static async Task<HeaderCollection> ReadHeadersAsync(
+        HttpStreamReader reader, CancellationToken ct, long budget = long.MaxValue)
     {
         var headers = new HeaderCollection();
         while (true)
@@ -176,6 +197,9 @@ public static class HttpParser
             var line = await reader.ReadLineAsync(ct).ConfigureAwait(false);
             if (line is null) throw new HttpParseException("Connection closed inside the header block.");
             if (line.Length == 0) return headers;
+
+            budget -= line.Length + 2;
+            if (budget < 0) throw new HttpParseException($"Request head exceeded {MaxRequestHeadBytes} bytes.");
 
             if (line[0] == ' ' || line[0] == '\t')
             {

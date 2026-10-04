@@ -217,6 +217,27 @@ targets, so `Invoke-WebRequest -Proxy` would never reach Piper.
   original bytes are always kept
 - WebSocket / `101 Switching Protocols` upgrade pass-through, relayed in both directions until
   both sides close rather than until the first one does
+- Clients are limited, but a local proxy cannot treat them as fully trusted or fully hostile.
+  What is bounded: at most `MaxConcurrentConnections` (default 1,024, clamped to 1..100,000) are
+  served at once, and the rest wait in the operating system's accept queue (which itself holds
+  at most 512). When that limit is reached the log says so once per episode (no host or address),
+  and each waiting client closes the connection that has been idle longest, meaning one waiting for
+  its first byte or sitting between kept-alive requests; there is no per-address quota, because
+  every local process connects from 127.0.0.1. A connection's first byte must arrive within
+  `RequestHeadTimeout` (30 s); from that first byte, the request line and headers have a further
+  `RequestHeadTimeout` in total (so dripping bytes does not help) and at most 64 KB. Only a
+  connection reused for a further request waits `IdleTimeout` (120 s) for its next one. A body may
+  pause for at most `IdleTimeout` and must deliver `MinRequestBodyBytesPerWindow` (1,024) bytes in
+  each such window, so a slow upload that keeps moving succeeds and a one-byte trickle does not.
+  A client cut off in the middle of a head or body gets a `408` (best effort, especially over
+  TLS), and a stalled body also leaves a failed session. A client that stops reading a response is
+  cut after `IdleTimeout` per write. The timeouts are clamped to 1 ms..1 day. What is **not**
+  bounded: a request body is read into memory up to its declared length (at most 256 MB) as soon
+  as the headers arrive, whether or not the bytes follow, so the worst case is the connection
+  limit times that (this is not fixed here); an established blind `CONNECT` tunnel or WebSocket
+  relay has no idle limit (only the write deadline above), nor has a browser-facing HTTP/2
+  connection beyond its own five-minute one; and the TLS handshake of a decrypted tunnel is held
+  to `TlsHandshakeTimeout`, not to the head timeout, and is not evictable while it runs
 - Virtual-mode session grid that stays responsive under load
 - Request and response inspectors: headers, decoded body, pretty-printed JSON, hex dump
 - Composer with search, raw-request editing, repeat-N, and verbatim header sending

@@ -79,7 +79,13 @@ public sealed class ProxyServer : IAsyncDisposable
 
         Endpoint = (IPEndPoint)_listener.LocalEndpoint;
         IsRunning = true;
-        _acceptLoop = Task.Run(() => AcceptLoopAsync(_cts.Token));
+
+        // One gate per run: connections still ending after a Stop give their slot back to the gate
+        // they took it from, not to the next run's.
+        var gate = new SemaphoreSlim(_options.MaxConcurrentConnections, _options.MaxConcurrentConnections);
+        var token = _cts.Token;
+        var listener = _listener;
+        _acceptLoop = Task.Run(() => AcceptLoopAsync(gate, ct => listener.AcceptTcpClientAsync(ct), listener.Pending, token));
 
         Log?.Invoke(this, $"Listening on {Endpoint}. HTTPS decryption {(_options.DecryptHttps ? "enabled" : "disabled")}.");
     }
@@ -143,60 +149,235 @@ public sealed class ProxyServer : IAsyncDisposable
         Log?.Invoke(this, "Proxy stopped.");
     }
 
-    private async Task AcceptLoopAsync(CancellationToken ct)
+    /// <summary>Connections closed to make room because the connection limit was reached.</summary>
+    public long EvictedIdleConnections => Interlocked.Read(ref _evictedIdleConnections);
+
+    /// <summary>How many times the connection limit has been reached (each stretch of time at the limit counts once).</summary>
+    public long SaturationEpisodes => Interlocked.Read(ref _saturationEpisodes);
+
+    private long _evictedIdleConnections;
+    private long _saturationEpisodes;
+
+    /// <summary>How often a full gate looks for a waiting client and an idle connection to close for it.</summary>
+    private static readonly TimeSpan EvictionPollInterval = TimeSpan.FromMilliseconds(100);
+
+    private readonly Lock _connectionsLock = new();
+    private readonly HashSet<ConnectionState> _connections = [];
+
+    /// <summary>What the accept loop needs to know about a connection it may have to close: whether it
+    /// is idle, since when, and a way to tell it to go.</summary>
+    internal sealed class ConnectionState
     {
+        private readonly Lock _gate = new();
+
+        // One source per idle period, so that an eviction aimed at one wait can never close the
+        // connection's next. Whoever takes it out of this field under the lock (the end of the wait,
+        // or an eviction) is its only user from then on, and disposes it.
+        private CancellationTokenSource? _evict;
+        private long _idleSince;
+
+        /// <summary>Timestamp from which the connection has been waiting for a request, or 0 while busy.</summary>
+        public long IdleSince
+        {
+            get { lock (_gate) return _idleSince; }
+        }
+
+        /// <summary>Starts an idle period; the token is cancelled if the connection is evicted during it.</summary>
+        public CancellationToken BeginIdle()
+        {
+            lock (_gate)
+            {
+                _evict = new CancellationTokenSource();
+                _idleSince = Stopwatch.GetTimestamp();
+                return _evict.Token;
+            }
+        }
+
+        public void EndIdle()
+        {
+            CancellationTokenSource? ended;
+            lock (_gate)
+            {
+                ended = _evict;
+                _evict = null;
+                _idleSince = 0;
+            }
+
+            ended?.Dispose();
+        }
+
+        /// <summary>Cancels the current idle period, if there is one. False when the connection is busy.</summary>
+        public bool TryEvict()
+        {
+            CancellationTokenSource? evict;
+            lock (_gate)
+            {
+                evict = _evict;
+                _evict = null;
+                _idleSince = 0; // so a second pass does not pick it again before it has gone
+            }
+
+            if (evict is null) return false;
+            evict.Cancel();
+            evict.Dispose();
+            return true;
+        }
+    }
+
+    /// <summary>Closes the connection that has been idle longest, if any is idle. Returns whether one was closed.</summary>
+    private bool EvictOldestIdle()
+    {
+        // A candidate can stop being idle between choosing it and closing it; then the next oldest is tried.
+        for (var attempt = 0; attempt < 4; attempt++)
+        {
+            ConnectionState? oldest = null;
+            var oldestSince = 0L;
+            lock (_connectionsLock)
+            {
+                foreach (var candidate in _connections)
+                {
+                    var since = candidate.IdleSince;
+                    if (since != 0 && (oldest is null || since < oldestSince))
+                    {
+                        oldest = candidate;
+                        oldestSince = since;
+                    }
+                }
+            }
+
+            if (oldest is null) return false;
+            if (!oldest.TryEvict()) continue;
+
+            Interlocked.Increment(ref _evictedIdleConnections);
+            return true;
+        }
+
+        return false;
+    }
+
+    /// <param name="accept">Where the next connection comes from: the listener, or a stand-in in a test.</param>
+    /// <param name="hasPending">Whether a client is waiting to be accepted; asked only while the gate is full.</param>
+    internal async Task AcceptLoopAsync(
+        SemaphoreSlim gate, Func<CancellationToken, ValueTask<TcpClient>> accept, Func<bool> hasPending, CancellationToken ct)
+    {
+        var saturated = false;
         while (!ct.IsCancellationRequested)
         {
-            TcpClient client;
+            // The slot is taken before the next connection is accepted, not after: a connection
+            // over the limit then waits in the operating system's accept queue, which is bounded,
+            // instead of becoming a socket and a task of ours.
+            if (gate.Wait(0))
+            {
+                saturated = false;
+            }
+            else
+            {
+                if (!saturated)
+                {
+                    saturated = true;
+                    Interlocked.Increment(ref _saturationEpisodes);
+                    Log?.Invoke(this, $"Connection limit ({_options.MaxConcurrentConnections}) reached: new clients wait for a "
+                                      + "free slot, and the connection idle longest is closed to make room for each.");
+                }
+
+                // Waiting is not enough on its own. Silent sockets would hold every slot until their
+                // timeout, so each waiting client closes the idle connection that has waited longest.
+                try
+                {
+                    while (!await gate.WaitAsync(EvictionPollInterval, ct).ConfigureAwait(false))
+                    {
+                        if (hasPending()) EvictOldestIdle();
+                    }
+                }
+                catch (OperationCanceledException) { break; }
+                catch (Exception ex) when (ct.IsCancellationRequested && ex is InvalidOperationException or ObjectDisposedException)
+                {
+                    break; // the listener was stopped under the poll
+                }
+            }
+
+            // The slot is this iteration's until a connection takes it over. The one finally gives
+            // it back on every other way out, including an exception nothing here expects.
+            var handedOver = false;
             try
             {
-                client = await _listener!.AcceptTcpClientAsync(ct).ConfigureAwait(false);
+                var client = await accept(ct).ConfigureAwait(false);
+                handedOver = true;
+                _ = ServeConnectionAsync(client, gate, ct);
             }
             catch (OperationCanceledException) { break; }
             catch (ObjectDisposedException) { break; }
+            // A Stop that lands before the listener was accepting, which is how a stop racing the
+            // start reaches this loop.
+            catch (InvalidOperationException) when (ct.IsCancellationRequested) { break; }
             catch (SocketException ex)
             {
                 Log?.Invoke(this, $"Accept failed: {ex.Message}");
-                continue;
             }
-
-            _ = Task.Run(async () =>
+            finally
             {
-                Interlocked.Increment(ref _activeConnections);
-                try { await HandleClientAsync(client, ct).ConfigureAwait(false); }
-                catch (Exception ex) { Log?.Invoke(this, $"Connection error: {ex.Message}"); }
-                finally
-                {
-                    Interlocked.Decrement(ref _activeConnections);
-                    try { client.Dispose(); } catch { /* already gone */ }
-                }
-            }, ct);
+                if (!handedOver) gate.Release();
+            }
+        }
+    }
+
+    /// <summary>
+    /// Owns an accepted connection from here to its end: the counter, the socket and the slot taken
+    /// for it are all given back whichever way it ends, including a Stop that races its start.
+    /// </summary>
+    private async Task ServeConnectionAsync(TcpClient client, SemaphoreSlim gate, CancellationToken ct)
+    {
+        Interlocked.Increment(ref _activeConnections);
+        var state = new ConnectionState();
+        lock (_connectionsLock) _connections.Add(state);
+        try
+        {
+            // Everything past this point runs on the thread pool rather than on the accept loop:
+            // working out which process owns the socket is synchronous and must not hold up accepting.
+            await Task.Yield();
+            await HandleClientAsync(client, state, ct).ConfigureAwait(false);
+        }
+        catch (Exception ex) { Log?.Invoke(this, $"Connection error: {ex.Message}"); }
+        finally
+        {
+            try
+            {
+                lock (_connectionsLock) _connections.Remove(state);
+                Interlocked.Decrement(ref _activeConnections);
+                client.Dispose();
+            }
+            finally
+            {
+                gate.Release();
+            }
         }
     }
 
     // ------------------------------------------------------------ connection loop
 
-    private async Task HandleClientAsync(TcpClient client, CancellationToken ct)
+    private async Task HandleClientAsync(TcpClient client, ConnectionState state, CancellationToken ct)
     {
         client.NoDelay = true;
         var clientEndpoint = client.Client.RemoteEndPoint?.ToString() ?? "?";
         var processName = ClientProcessLookup.Resolve(client.Client.RemoteEndPoint as IPEndPoint);
 
-        Stream clientStream = client.GetStream();
+        var clientStream = new GuardedClientStream(client.GetStream(), _options.IdleTimeout);
         using var reader = new HttpStreamReader(clientStream);
         using var slot = new ConnectionSlot();
 
         try
         {
-            while (!ct.IsCancellationRequested)
+            for (var first = true; !ct.IsCancellationRequested; first = false)
             {
-                var request = await ReadRequestWithIdleTimeoutAsync(reader, ct).ConfigureAwait(false);
+                var request = await ReadRequestAsync(
+                    reader, clientStream, state, first, isHttps: false, locate: null, clientEndpoint, processName, ct)
+                    .ConfigureAwait(false);
                 if (request is null) break;
 
                 if (string.Equals(request.Method, "CONNECT", StringComparison.OrdinalIgnoreCase))
                 {
                     // CONNECT takes over the connection entirely; it never returns to this loop.
-                    await HandleConnectAsync(request, clientStream, client.Client, clientEndpoint, processName, ct)
+                    await HandleConnectAsync(request, clientStream, client.Client, state, clientEndpoint, processName, ct)
                         .ConfigureAwait(false);
                     return;
                 }
@@ -208,29 +389,132 @@ public sealed class ProxyServer : IAsyncDisposable
                 if (!keepAlive) break;
             }
         }
-        catch (OperationCanceledException) { /* shutting down or idle timeout */ }
+        catch (OperationCanceledException) { /* shutting down */ }
         catch (IOException) { /* peer went away mid-message */ }
         catch (HttpParseException ex) { Log?.Invoke(this, $"Protocol error from {clientEndpoint}: {ex.Message}"); }
     }
 
-    private async Task<HttpRequestData?> ReadRequestWithIdleTimeoutAsync(HttpStreamReader reader, CancellationToken ct)
+    /// <summary>How long a 408 is given to reach a client that has just been cut off. It may well
+    /// not be reading, and this must never hold a connection slot.</summary>
+    private static readonly TimeSpan TimeoutReplyLimit = TimeSpan.FromSeconds(2);
+
+    /// <summary>
+    /// Reads the next request from a client connection, with a different clock for each stage:
+    /// <list type="number">
+    /// <item>the wait for its first byte is bounded by <see cref="ProxyOptions.RequestHeadTimeout"/>
+    /// for the first request of a connection and by <see cref="ProxyOptions.IdleTimeout"/> between
+    /// kept-alive requests, and ends quietly. While it waits the connection is idle, so a full
+    /// connection gate may close it (oldest first) to make room;</item>
+    /// <item>the request line and headers must then arrive within
+    /// <see cref="ProxyOptions.RequestHeadTimeout"/> in total, so a client dripping bytes cannot
+    /// hold the connection for ever by never being silent for long;</item>
+    /// <item>the body is bounded by silence (<see cref="ProxyOptions.IdleTimeout"/> between reads)
+    /// and by a progress floor (<see cref="ProxyOptions.MinRequestBodyBytesPerWindow"/> per window),
+    /// so a large upload that keeps flowing is never cut for taking long, and one trickling a byte at
+    /// a time is.</item>
+    /// </list>
+    /// A client cut off at stage 2 or 3 is answered with 408 (best effort: a client that is not
+    /// reading, or a TLS stream broken by the read that was cancelled, may never see it); one cut off
+    /// at stage 3 also leaves a failed session, because by then there is a request to show.
+    /// </summary>
+    /// <returns>The request, or null when the connection should be closed.</returns>
+    private async Task<HttpRequestData?> ReadRequestAsync(
+        HttpStreamReader reader, GuardedClientStream clientStream, ConnectionState state, bool first, bool isHttps,
+        Func<HttpRequestData, Uri?>? locate, string clientEndpoint, string processName, CancellationToken ct)
     {
-        using var idle = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        idle.CancelAfter(_options.IdleTimeout);
+        reader.IdleTimeout = Timeout.InfiniteTimeSpan; // stages 1 and 2 have clocks of their own
+        var evicted = state.BeginIdle();
+        using (var idle = CancellationTokenSource.CreateLinkedTokenSource(ct, evicted))
+        {
+            idle.CancelAfter(first ? _options.RequestHeadTimeout : _options.IdleTimeout);
+            try
+            {
+                if (!await reader.HasMoreDataAsync(idle.Token).ConfigureAwait(false)) return null;
+            }
+            catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+            {
+                return null; // idle (or evicted) - close it quietly
+            }
+            finally
+            {
+                state.EndIdle();
+            }
+        }
+
+        HttpRequestData? request;
+        using (var head = CancellationTokenSource.CreateLinkedTokenSource(ct))
+        {
+            head.CancelAfter(_options.RequestHeadTimeout);
+            try
+            {
+                request = await HttpParser.ReadRequestHeadAsync(reader, head.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+            {
+                Log?.Invoke(this, $"{clientEndpoint} did not finish its request head within "
+                                  + $"{_options.RequestHeadTimeout.TotalSeconds:0.#}s; connection closed.");
+                await TryReplyAsync(clientStream, RequestTimeout("The request head was not received in time.")).ConfigureAwait(false);
+                return null;
+            }
+        }
+
+        if (request is null) return null;
+
+        reader.IdleTimeout = _options.IdleTimeout;
+        clientStream.ArmProgressFloor(_options.IdleTimeout, _options.MinRequestBodyBytesPerWindow);
         try
         {
-            return await HttpParser.ReadRequestAsync(reader, idle.Token).ConfigureAwait(false);
+            request.Body = await HttpParser.ReadBodyAsync(reader, HttpParser.DescribeRequestBody(request.Headers), ct)
+                .ConfigureAwait(false);
+            clientStream.DisarmProgressFloor();
         }
-        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        catch (HttpStalledException ex)
         {
-            return null; // idle keep-alive socket timed out - close it quietly
+            clientStream.DisarmProgressFloor();
+            var reply = RequestTimeout("The request body stopped arriving.");
+            request.Url = locate?.Invoke(request) ?? request.Url;
+            _store.Add(new Session
+            {
+                Request = request,
+                Response = reply,
+                IsHttps = isHttps,
+                ClientEndpoint = clientEndpoint,
+                ProcessName = processName,
+                State = SessionState.Failed,
+                Error = $"The client stopped sending the request body: {ex.Message}",
+                Completed = DateTimeOffset.Now,
+            });
+            await TryReplyAsync(clientStream, reply).ConfigureAwait(false);
+            return null;
+        }
+
+        return request;
+    }
+
+    private static HttpResponseData RequestTimeout(string reason) =>
+        HttpResponseData.Simple(408, "Request Timeout", $"Piper closed this connection: {reason}");
+
+    /// <summary>Best-effort answer to a client being cut off. It is going away either way, and it may
+    /// not be reading, so a failure to deliver this is not worth reporting.</summary>
+    private static async Task TryReplyAsync(Stream stream, HttpResponseData reply)
+    {
+        using var limit = new CancellationTokenSource(TimeoutReplyLimit);
+        try
+        {
+            await stream.WriteAsync(reply.ToBytes(), limit.Token).ConfigureAwait(false);
+            await stream.FlushAsync(limit.Token).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is IOException or OperationCanceledException or ObjectDisposedException
+                                       or InvalidOperationException)
+        {
+            // Includes a TLS stream left unusable by the read that was just cancelled.
         }
     }
 
     // ------------------------------------------------------------------- CONNECT
 
     private async Task HandleConnectAsync(
-        HttpRequestData connect, Stream clientStream, Socket clientSocket,
+        HttpRequestData connect, Stream clientStream, Socket clientSocket, ConnectionState state,
         string clientEndpoint, string processName, CancellationToken ct)
     {
         var (host, port) = SplitAuthority(connect.RequestTarget, defaultPort: 443);
@@ -254,21 +538,24 @@ public sealed class ProxyServer : IAsyncDisposable
             return;
         }
 
-        using var tlsReader = new HttpStreamReader(ssl);
+        var tunnel = new GuardedClientStream(ssl, _options.IdleTimeout);
+        using var tlsReader = new HttpStreamReader(tunnel);
         using var slot = new ConnectionSlot();
 
         try
         {
-            while (!ct.IsCancellationRequested)
+            for (var first = true; !ct.IsCancellationRequested; first = false)
             {
-                var request = await ReadRequestWithIdleTimeoutAsync(tlsReader, ct).ConfigureAwait(false);
+                var request = await ReadRequestAsync(
+                    tlsReader, tunnel, state, first, isHttps: true, r => BuildTunnelUrl(r, host, port), clientEndpoint, processName, ct)
+                    .ConfigureAwait(false);
                 if (request is null) break;
 
                 // Inside a tunnel the target is origin-form; rebuild the absolute URL as https.
                 request.Url = BuildTunnelUrl(request, host, port);
 
                 var keepAlive = await HandleRequestAsync(
-                    request, ssl, tlsReader, clientSocket, slot, clientEndpoint, processName, isHttps: true, ct).ConfigureAwait(false);
+                    request, tunnel, tlsReader, clientSocket, slot, clientEndpoint, processName, isHttps: true, ct).ConfigureAwait(false);
 
                 if (!keepAlive) break;
             }
