@@ -14,6 +14,7 @@
   <ItemGroup>
     <ProjectReference Include="..\..\src\Piper.App\Piper.App.csproj" />
     <ProjectReference Include="..\..\src\Piper.Core\Piper.Core.csproj" />
+    <Compile Include="..\..\src\Piper.App\WindowActivation.cs" Link="WindowActivation.cs" />
   </ItemGroup>
 
 </Project>

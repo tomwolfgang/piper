@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using Piper.App;
 using Piper.App.Controls;
 using Piper.App.Theme;
 using Piper.Core.Http;
@@ -90,6 +91,7 @@ internal static class Program
         });
 
         RunPanel("an AutoResponder rule whose pattern timed out is marked broken in the panel");
+        RunWindowActivation("a second launch restores the existing Piper window");
 
         Console.WriteLine(_failures == 0 ? "UI tests passed." : $"{_failures} UI check(s) failed.");
         return _failures == 0 ? 0 : 1;
@@ -300,6 +302,30 @@ internal static class Program
         SendMessage(control.Handle, WmLButtonUp, 0, position);
         SendMessage(control.Handle, WmLButtonDoubleClick, 1, position);
         SendMessage(control.Handle, WmLButtonUp, 0, position);
+    }
+
+    private static void RunWindowActivation(string name)
+    {
+        Console.WriteLine($"== {name}");
+        using var form = new Form
+        {
+            Width = 600,
+            Height = 400,
+            ShowInTaskbar = false,
+            StartPosition = FormStartPosition.Manual,
+            Location = new Point(0, 0),
+        };
+
+        form.Show();
+        form.WindowState = FormWindowState.Minimized;
+        Application.DoEvents();
+
+        WindowActivation.BringToFront(form);
+        Application.DoEvents();
+
+        Check(form.WindowState != FormWindowState.Minimized, "a minimized existing window is restored");
+        Check(form.ContainsFocus, "the restored window is activated");
+        form.Close();
     }
 
     /// <summary>A rule that was skipped for timing out says so in its Last match cell, until it is edited.</summary>

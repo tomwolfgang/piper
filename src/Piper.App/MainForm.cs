@@ -1005,9 +1005,7 @@ public sealed class MainForm : Form, IMessageFilter
             return;
         }
 
-        BringToFront();
-        if (WindowState == FormWindowState.Minimized) WindowState = FormWindowState.Normal;
-        Activate();
+        WindowActivation.BringToFront(this);
 
         var importedToComposer = false;
         // Full texts for the one dialog shown after the last file. The log gets a path-free line for
