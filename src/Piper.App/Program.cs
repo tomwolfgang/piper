@@ -46,8 +46,18 @@ internal static class Program
             using var form = new MainForm();
             using var relay = new SazFileRelay(files =>
             {
-                if (form.IsDisposed || files.Count == 0) return;
-                try { form.BeginInvoke(() => form.ImportSazFiles(files)); }
+                if (form.IsDisposed) return;
+                try
+                {
+                    form.BeginInvoke(() =>
+                    {
+                        if (form.IsDisposed) return;
+                        // An empty relay means Piper itself was launched again. ImportSazFiles
+                        // restores and activates the window as part of a file handoff.
+                        if (files.Count == 0) WindowActivation.BringToFront(form);
+                        else form.ImportSazFiles(files);
+                    });
+                }
                 catch (InvalidOperationException) { }
             });
             form.Shown += (_, _) => form.ImportSazFiles(startupFiles);
