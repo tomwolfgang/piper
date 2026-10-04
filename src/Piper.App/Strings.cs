@@ -1053,6 +1053,7 @@ internal static class Strings
 
         public static string InputAccessibleName => I18n.T("textWizard.inputAccessibleName");
         public static string OutputAccessibleName => I18n.T("textWizard.outputAccessibleName");
+        public static string JwtOutputAccessibleName => I18n.T("textWizard.jwtOutputAccessibleName");
         public static string TransformAccessibleName => I18n.T("textWizard.transformAccessibleName");
         public static string ViewBytesAccessibleName => I18n.T("textWizard.viewBytesAccessibleName");
         public static string StatusAccessibleName => I18n.T("textWizard.statusAccessibleName");
@@ -1072,6 +1073,7 @@ internal static class Strings
         public static string ToBase64 => I18n.T("textWizard.toBase64");
         public static string ToBase64Url => I18n.T("textWizard.toBase64Url");
         public static string FromBase64 => I18n.T("textWizard.fromBase64");
+        public static string InspectJwt => I18n.T("textWizard.inspectJwt");
         public static string UrlEncode => I18n.T("textWizard.urlEncode");
         public static string UrlDecode => I18n.T("textWizard.urlDecode");
         public static string HexEncode => I18n.T("textWizard.hexEncode");
@@ -1090,5 +1092,25 @@ internal static class Strings
         public static string ToSha256 => I18n.T("textWizard.toSha256");
         public static string ToSha384 => I18n.T("textWizard.toSha384");
         public static string ToSha512 => I18n.T("textWizard.toSha512");
+
+        public static string JwtNoneFound => I18n.T("textWizard.jwtNoneFound");
+        public static string JwtHeader => I18n.T("textWizard.jwtHeader");
+        public static string JwtPayload => I18n.T("textWizard.jwtPayload");
+        public static string JwtToken(int number) => I18n.T("textWizard.jwtToken", ("number", number));
+        public static string JwtHeaderInvalid(string reason) => I18n.T("textWizard.jwtHeaderInvalid", ("reason", reason));
+        public static string JwtPayloadInvalid(string reason) => I18n.T("textWizard.jwtPayloadInvalid", ("reason", reason));
+        public static string JwtMoreTokens(int limit) => I18n.T("textWizard.jwtMoreTokens", ("limit", limit));
+        public static string JwtTreeTruncated => I18n.T("textWizard.jwtTreeTruncated");
+
+        public static string JwtInvalidHeaderEncoding => I18n.T("textWizard.jwtInvalidHeaderEncoding");
+        public static string JwtInvalidHeaderJson => I18n.T("textWizard.jwtInvalidHeaderJson");
+        public static string JwtHeaderIsNotObject => I18n.T("textWizard.jwtHeaderIsNotObject");
+        public static string JwtMissingAlgorithm => I18n.T("textWizard.jwtMissingAlgorithm");
+        public static string JwtInvalidPayloadEncoding => I18n.T("textWizard.jwtInvalidPayloadEncoding");
+        public static string JwtInvalidPayloadJson => I18n.T("textWizard.jwtInvalidPayloadJson");
+        public static string JwtPayloadIsNotObject => I18n.T("textWizard.jwtPayloadIsNotObject");
+        public static string JwtInvalidSignatureEncoding => I18n.T("textWizard.jwtInvalidSignatureEncoding");
+        public static string JwtMissingSignature => I18n.T("textWizard.jwtMissingSignature");
+        public static string JwtUnexpectedSignature => I18n.T("textWizard.jwtUnexpectedSignature");
     }
 }

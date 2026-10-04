@@ -40,6 +40,7 @@ public static class TextTransformDetector
         // Ordered by how hard each shape is to mistake for another. A quoted literal, an HTML entity and a
         // percent escape are all but unambiguous; hex and base64 overlap with ordinary words, so they come
         // last and carry length floors.
+        if (JwtInspector.ContainsToken(trimmed)) return TextTransform.InspectJwt;
         if (LooksLikeJsString(trimmed)) return TextTransform.FromJsString;
         if (LooksLikeHtml(sample)) return TextTransform.HtmlDecode;
         if (LooksLikeUrlEncoded(sample)) return TextTransform.UrlDecode;
