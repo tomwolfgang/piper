@@ -200,6 +200,7 @@ public static class Palette
         switch (control)
         {
             case TextBox textBox:
+                TextBoxWordSelection.Configure(textBox);
                 textBox.BackColor = Surface;
                 textBox.ForeColor = Text;
                 textBox.BorderStyle = BorderStyle.FixedSingle;

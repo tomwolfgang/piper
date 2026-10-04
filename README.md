@@ -162,6 +162,10 @@ If Ctrl+MouseWheel gets in the way while scrolling, turn it off under
 **Tools > Configurations > General**. The menu and the keyboard shortcuts keep working, so the size
 is still reachable.
 
+In text boxes, URI and header punctuation is a word boundary: double-clicking a path component, or
+using `Ctrl+Shift+Left` / `Ctrl+Shift+Right`, selects that component rather than the whole path.
+`Ctrl+Left` / `Ctrl+Right` moves between those boundaries without selecting text.
+
 ## Testing
 
 ```bash
