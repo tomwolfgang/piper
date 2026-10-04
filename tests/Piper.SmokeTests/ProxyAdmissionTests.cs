@@ -14,7 +14,7 @@ using Piper.Core.Sessions;
 // idle eviction when the gate is full, the first-byte, head and body deadlines, the progress floor
 // on request bodies, the write deadline on client responses, the request head size cap, and the
 // validation of the options that drive them.
-internal static class ProxyAdmissionTests
+internal static partial class ProxyAdmissionTests
 {
     private static readonly TimeSpan Patience = TimeSpan.FromSeconds(8);
 
@@ -251,13 +251,14 @@ internal static class ProxyAdmissionTests
         await runner.RunAsync("a failing accept gives its slot back, so errors cannot starve the gate", async () =>
         {
             using var cts = new CancellationTokenSource();
-            var gate = new SemaphoreSlim(2, 2);
+            var admission = new ProxyServer.Admission(2);
+            var gate = admission.Gate;
             var calls = 0;
             var proxy = new ProxyServer(new ProxyOptions(), ca, new SessionStore());
 
             // Three failed accepts, then a Stop. With two slots, a slot kept per failure would have
             // starved the loop at the third.
-            await proxy.AcceptLoopAsync(gate, token =>
+            await proxy.AcceptLoopAsync(admission, token =>
             {
                 if (Interlocked.Increment(ref calls) < 4)
                     return ValueTask.FromException<TcpClient>(new SocketException((int)SocketError.TooManyOpenSockets));
@@ -272,7 +273,7 @@ internal static class ProxyAdmissionTests
             InvalidOperationException? escaped = null;
             try
             {
-                await proxy.AcceptLoopAsync(gate, _ => ValueTask.FromException<TcpClient>(surprise), () => false, CancellationToken.None);
+                await proxy.AcceptLoopAsync(admission, _ => ValueTask.FromException<TcpClient>(surprise), () => false, CancellationToken.None);
             }
             catch (InvalidOperationException ex) { escaped = ex; }
             runner.IsTrue(ReferenceEquals(escaped, surprise), "an unexpected failure ends the loop rather than being hidden");

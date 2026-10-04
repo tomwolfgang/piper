@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Net;
 
 namespace Piper.Core.Proxy;
@@ -108,8 +109,8 @@ public sealed class ProxyOptions
 
     /// <summary>
     /// How many client connections are served at once. A connection over the limit is not refused:
-    /// it waits, unserved, in the operating system's accept queue (at most 512 of them; beyond that
-    /// the system itself turns clients away) until a slot frees. When the limit is reached the
+    /// it waits, unserved, in the operating system's accept queue (Piper asks for a backlog of 512;
+    /// the system decides what it grants, and beyond that turns clients away) until a slot frees. When the limit is reached the
     /// connection that has been idle longest (waiting for a first byte, or between kept-alive
     /// requests) is closed to make room, so silent sockets cannot starve real clients. It bounds the
     /// number of connections, not what each may hold: a request body is still read into memory up to
@@ -212,6 +213,99 @@ public sealed class ProxyOptions
     /// alone would let an origin trickle a response for as long as it likes. A response that needs
     /// longer falls back to TCP, which streams it.</summary>
     public TimeSpan Http3MaxResponseTime { get; set; } = TimeSpan.FromMinutes(15);
+
+    /// <summary>Where the running <see cref="ProxyServer"/> is listening; null while none is. Set by
+    /// the server so that a connection made on its behalf can tell it would be dialling itself.</summary>
+    internal IPEndPoint? ListeningEndpoint
+    {
+        get => _listeningEndpoint;
+        set => _listeningEndpoint = value;
+    }
+
+    // Written when a run starts or ends and read on every connection thread.
+    private volatile IPEndPoint? _listeningEndpoint;
+
+    /// <summary>Whether the listening socket also accepts IPv4 clients while bound to an IPv6 address
+    /// (a dual-mode socket). Meaningful only with <see cref="ListeningEndpoint"/>.</summary>
+    internal bool ListeningDualMode
+    {
+        get => _listeningDualMode;
+        set => _listeningDualMode = value;
+    }
+
+    private volatile bool _listeningDualMode;
+
+    /// <summary>
+    /// True when connecting to <paramref name="address"/>:<paramref name="port"/> would reach the
+    /// running proxy itself. Such a request would be forwarded back into the proxy, each hop holding a
+    /// connection slot, until the cap is exhausted. The port is compared first, so the common case
+    /// costs nothing. Precise about address families: a listener on <c>0.0.0.0</c> is an IPv4 socket
+    /// and does not own <c>::1</c>, where the same port may belong to another service; a listener on
+    /// <c>::</c> owns IPv4 addresses only when its socket is dual-mode. An IPv4-mapped IPv6 address is
+    /// the IPv4 address it maps.
+    /// </summary>
+    internal bool IsOwnEndpoint(IPAddress address, int port)
+    {
+        if (ListeningEndpoint is not { } own || port != own.Port) return false;
+
+        if (address.IsIPv4MappedToIPv6) address = address.MapToIPv4();
+
+        var listensOnAnyV4 = own.Address.Equals(IPAddress.Any);
+        var listensOnAnyV6 = own.Address.Equals(IPAddress.IPv6Any);
+        if (!listensOnAnyV4 && !listensOnAnyV6) return address.Equals(own.Address);
+
+        var reachable = address.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork
+            ? listensOnAnyV4 || ListeningDualMode
+            : listensOnAnyV6;
+        if (!reachable) return false;
+
+        if (IPAddress.IsLoopback(address) || address.Equals(IPAddress.Any) || address.Equals(IPAddress.IPv6Any)) return true;
+        return LocalAddresses().Contains(address);
+    }
+
+    // The addresses of this machine's interfaces, as of the last time they were listed. Listing them
+    // is a heavy system call and a client picks how often the question is asked (a name with many
+    // addresses, on the proxy's port), so it is answered from a snapshot that is retaken after
+    // LocalAddressLifetime. An address acquired within that time is not known yet: a request for it
+    // on the proxy's port can loop, which the connection cap and idle eviction bound.
+    private sealed record LocalAddressSnapshot(HashSet<IPAddress> Addresses, long TakenAt);
+
+    private volatile LocalAddressSnapshot? _localAddresses;
+
+    /// <summary>How long a listing of the machine's addresses is trusted.</summary>
+    internal TimeSpan LocalAddressLifetime { get; set; } = TimeSpan.FromSeconds(30);
+
+    /// <summary>Test seam: where the machine's addresses come from. Null means its network interfaces.</summary>
+    internal Func<IEnumerable<IPAddress>>? LocalAddressSource { get; set; }
+
+    private HashSet<IPAddress> LocalAddresses()
+    {
+        var snapshot = _localAddresses;
+        if (snapshot is not null && Stopwatch.GetElapsedTime(snapshot.TakenAt) < LocalAddressLifetime)
+            return snapshot.Addresses;
+
+        HashSet<IPAddress> addresses;
+        try
+        {
+            addresses = [.. (LocalAddressSource ?? ListInterfaceAddresses)()];
+        }
+        catch (System.Net.NetworkInformation.NetworkInformationException)
+        {
+            // The system will not list its interfaces (a restricted or containerised host): no address
+            // is known to be ours, and that is remembered for the same time, not retried per request.
+            // If one was in fact our own, the connect that follows ends in the same loop that was
+            // always possible, bounded by the connection cap and eviction.
+            addresses = [];
+        }
+
+        _localAddresses = new LocalAddressSnapshot(addresses, Stopwatch.GetTimestamp());
+        return addresses;
+    }
+
+    private static IEnumerable<IPAddress> ListInterfaceAddresses() =>
+        System.Net.NetworkInformation.NetworkInterface.GetAllNetworkInterfaces()
+            .SelectMany(nic => nic.GetIPProperties().UnicastAddresses)
+            .Select(unicast => unicast.Address);
 
     public bool ShouldDecrypt(string host)
     {
