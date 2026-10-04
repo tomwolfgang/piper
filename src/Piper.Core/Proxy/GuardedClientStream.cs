@@ -23,12 +23,18 @@ internal sealed class GuardedClientStream(Stream inner, TimeSpan writeTimeout) :
     private long _minimum;
     private long _windowStart;
     private long _windowBytes;
+    private long _remaining;
 
     /// <summary>From now on, at least <paramref name="minimumBytes"/> must arrive in every
-    /// <paramref name="window"/>. A read that completes a window short of that throws
-    /// <see cref="HttpStalledException"/>, which the request reader already reports as a stalled
-    /// client.</summary>
-    public void ArmProgressFloor(TimeSpan window, long minimumBytes)
+    /// <paramref name="window"/>, or fewer when fewer are left to arrive. A read that completes a
+    /// window short of that throws <see cref="HttpStalledException"/>, which the request reader
+    /// already reports as a stalled client.</summary>
+    /// <param name="bodyLength">How many bytes the body has in all, or -1 when that is not known
+    /// (chunked). A body that is shorter than the minimum cannot be asked for more than it has, so a
+    /// small body that is slow is not cut for being small.</param>
+    /// <param name="alreadyBuffered">Body bytes that came in with the head and so were read before the
+    /// floor was armed; they count as progress made in the first window.</param>
+    public void ArmProgressFloor(TimeSpan window, long minimumBytes, long bodyLength = -1, long alreadyBuffered = 0)
     {
         if (window <= TimeSpan.Zero || window == Timeout.InfiniteTimeSpan || minimumBytes <= 0)
         {
@@ -38,8 +44,9 @@ internal sealed class GuardedClientStream(Stream inner, TimeSpan writeTimeout) :
 
         _window = window;
         _minimum = minimumBytes;
+        _remaining = bodyLength >= 0 ? bodyLength : long.MaxValue;
         _windowStart = Stopwatch.GetTimestamp();
-        _windowBytes = 0;
+        _windowBytes = Math.Max(0, alreadyBuffered);
         _floorArmed = true;
     }
 
@@ -58,12 +65,14 @@ internal sealed class GuardedClientStream(Stream inner, TimeSpan writeTimeout) :
         var elapsed = Stopwatch.GetElapsedTime(_windowStart);
         if (elapsed < _window) return;
 
-        if (_windowBytes < _minimum)
+        var required = Math.Min(_minimum, _remaining);
+        if (_windowBytes < required)
         {
             throw new HttpStalledException(
-                $"Only {_windowBytes} bytes arrived in {elapsed.TotalSeconds:0.#}s; the minimum is {_minimum} bytes per {_window.TotalSeconds:0.#}s.");
+                $"Only {_windowBytes} bytes arrived in {elapsed.TotalSeconds:0.#}s; the minimum is {required} bytes per {_window.TotalSeconds:0.#}s.");
         }
 
+        if (_remaining != long.MaxValue) _remaining = Math.Max(0, _remaining - _windowBytes);
         _windowStart = Stopwatch.GetTimestamp();
         _windowBytes = 0;
     }
@@ -120,5 +129,9 @@ internal sealed class GuardedClientStream(Stream inner, TimeSpan writeTimeout) :
         base.Dispose(disposing);
     }
 
-    public override ValueTask DisposeAsync() => inner.DisposeAsync();
+    public override async ValueTask DisposeAsync()
+    {
+        await inner.DisposeAsync().ConfigureAwait(false);
+        await base.DisposeAsync().ConfigureAwait(false);
+    }
 }

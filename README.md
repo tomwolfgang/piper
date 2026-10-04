@@ -219,16 +219,18 @@ targets, so `Invoke-WebRequest -Proxy` would never reach Piper.
   both sides close rather than until the first one does
 - Clients are limited, but a local proxy cannot treat them as fully trusted or fully hostile.
   What is bounded: at most `MaxConcurrentConnections` (default 1,024, clamped to 1..100,000) are
-  served at once, and the rest wait in the operating system's accept queue (which itself holds
-  at most 512). When that limit is reached the log says so once per episode (no host or address),
-  and each waiting client closes the connection that has been idle longest, meaning one waiting for
+  served at once, and the rest wait in the operating system's accept queue (Piper asks for a
+  backlog of 512 and the system decides what it grants; beyond that it turns clients away). When
+  that limit is reached the log says so once per episode (no host or address), naming the limit the
+  run started with, and each waiting client closes the connection that has been idle longest, meaning one waiting for
   its first byte or sitting between kept-alive requests; there is no per-address quota, because
   every local process connects from 127.0.0.1. A connection's first byte must arrive within
   `RequestHeadTimeout` (30 s); from that first byte, the request line and headers have a further
   `RequestHeadTimeout` in total (so dripping bytes does not help) and at most 64 KB. Only a
   connection reused for a further request waits `IdleTimeout` (120 s) for its next one. A body may
   pause for at most `IdleTimeout` and must deliver `MinRequestBodyBytesPerWindow` (1,024) bytes in
-  each such window, so a slow upload that keeps moving succeeds and a one-byte trickle does not.
+  each such window (or the rest of the body, when less is left, with whatever arrived along with the
+  headers counted), so a slow upload that keeps moving succeeds and a one-byte trickle does not.
   A client cut off in the middle of a head or body gets a `408` (best effort, especially over
   TLS), and a stalled body also leaves a failed session. A client that stops reading a response is
   cut after `IdleTimeout` per write. The timeouts are clamped to 1 ms..1 day. What is **not**
@@ -487,6 +489,18 @@ The TLS handshake has its own bound, `TlsHandshakeTimeout` (15 s), both with an 
 client of a decrypted HTTPS tunnel, so a peer that connects and then says nothing no longer holds a
 connection for ever. A timed-out handshake with an origin fails the request with a 502; with a client
 it is recorded as a failed tunnel session. Certificate validation is unchanged.
+
+A request that asks for Piper itself (`http://127.0.0.1:<proxy port>/`, a `CONNECT` to it, or an
+HTTP/2 stream for it) is never forwarded: it would come straight back in, once per hop, each hop
+holding a connection slot. Piper does not dial an address that is its own listener (the proxy's
+port on an address of this machine that the listening socket covers: a listener on `0.0.0.0` does
+not cover `::1`, where that port may belong to another service) and answers `508 Loop Detected`,
+naming only the `host:port` that was asked for. A name with another address that can be reached
+is still dialled there.
+
+If the accept loop fails unexpectedly, Piper logs it and reports itself as not running; stopping
+it still cleans up, and starting it again tells the old run's connections to stop first. A
+persistent accept error backs off (50 ms, doubling to 1 s) instead of spinning.
 
 ## Not implemented
 

@@ -28,16 +28,25 @@ internal static class HappyEyeballs
     /// The connect timed out or every attempt failed. The message names the host and port and, for a
     /// timeout, how long was waited; the inner exception is the most informative attempt's error.
     /// </exception>
+    /// <exception cref="ProxyLoopException">
+    /// Every address of the name is the running proxy itself (<see cref="ProxyOptions.IsOwnEndpoint"/>),
+    /// or the ones that are not could not be reached either. Addresses that are the proxy itself are
+    /// never dialled: forwarding a request to them would loop it back through this proxy, each hop
+    /// holding a connection slot.
+    /// </exception>
     /// <exception cref="OperationCanceledException"><paramref name="ct"/> was cancelled.</exception>
     public static Task<Socket> ConnectAsync(string host, int port, ProxyOptions options, CancellationToken ct) =>
         ConnectAsync(host, port, options.ConnectTimeout, options.ConnectionAttemptDelay,
-            ResolveAsync, ConnectOneAsync, ct);
+            ResolveAsync, ConnectOneAsync, ct, options.IsOwnEndpoint);
 
+    /// <param name="isOwn">Whether an address and port is the proxy itself; such addresses are dropped
+    /// from the attempt (null: none is).</param>
     internal static async Task<Socket> ConnectAsync(
         string host, int port, TimeSpan timeout, TimeSpan attemptDelay,
         Func<string, CancellationToken, Task<IPAddress[]>> resolve,
         Func<IPAddress, int, CancellationToken, Task<Socket>> connectOne,
-        CancellationToken ct)
+        CancellationToken ct,
+        Func<IPAddress, int, bool>? isOwn = null)
     {
         // Scoped to this call: the timer is gone as soon as the connection is made or has failed.
         using var budget = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -49,8 +58,23 @@ internal static class HappyEyeballs
                 ? [literal]
                 : await resolve(host, budget.Token).ConfigureAwait(false);
 
-            return await RaceAsync(Order(resolved), (address, token) => connectOne(address, port, token),
-                attemptDelay, MaxAttempts, budget.Token).ConfigureAwait(false);
+            // Precisely the addresses that are this proxy: an IPv4 wildcard listener does not own the
+            // IPv6 loopback, so a name that also has an address elsewhere is still dialled there.
+            var candidates = isOwn is null ? resolved : resolved.Where(a => !isOwn(a, port)).ToArray();
+            var droppedOwn = candidates.Length != resolved.Length;
+            if (droppedOwn && candidates.Length == 0) throw new ProxyLoopException(host, port);
+
+            try
+            {
+                return await RaceAsync(Order(candidates), (address, token) => connectOne(address, port, token),
+                    attemptDelay, MaxAttempts, budget.Token).ConfigureAwait(false);
+            }
+            catch (SocketException) when (droppedOwn)
+            {
+                // What was left is unreachable too. The request asked for this proxy, and that is the
+                // more useful thing to say than the refusal of an address nobody meant.
+                throw new ProxyLoopException(host, port);
+            }
         }
         catch (OperationCanceledException) when (budget.IsCancellationRequested && !ct.IsCancellationRequested)
         {
