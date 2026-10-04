@@ -9,8 +9,17 @@ using Piper.Core.Sessions;
 // Part of the admission tests (see ProxyAdmissionTests.cs, whose helpers it shares): the proxy
 // refusing to connect to itself, the accept loop failing and the proxy being started again, the
 // eviction bookkeeping, and the edges of the body progress floor.
+//
+// Registration: RunLoopAndRestartAsync is a test group of its own. The runner finds every
+// `public static Task Run*Async(TestRunner)` by reflection (TestDiscovery.Discover / IsGroup in
+// Program.cs), so nothing calls it, and ProxyAdmissionTests.RunAsync must NOT call it either, or its
+// tests would run twice. `Piper.SmokeTests --list` shows both groups.
 internal static partial class ProxyAdmissionTests
 {
+    /// <summary>
+    /// A discovered test group (see the note above the class): not called from
+    /// <see cref="RunAsync"/>, which is a separate group.
+    /// </summary>
     public static async Task RunLoopAndRestartAsync(TestRunner runner)
     {
         using var ca = CertificateAuthority.LoadOrCreate(
@@ -168,6 +177,45 @@ internal static partial class ProxyAdmissionTests
         });
 
         // ----------------------------------------------------- the accept loop failing and restarting
+
+        await runner.RunAsync("a normal stop is not an accept failure: nothing is logged as one and nothing backs off", async () =>
+        {
+            var lines = new System.Collections.Concurrent.ConcurrentQueue<string>();
+            var clock = Stopwatch.StartNew();
+            for (var i = 0; i < 20; i++)
+            {
+                // The listener is closed before the run's token is cancelled, so the pending accept ends
+                // in an error of its own; that is the stop and must not read as a fault.
+                var proxy = new ProxyServer(new ProxyOptions { Port = 0 }, ca, new SessionStore());
+                proxy.Log += (_, message) => lines.Enqueue(message);
+                proxy.Start();
+                await Task.Delay(20); // the loop is waiting in accept
+                await proxy.StopAsync();
+            }
+
+            runner.AreEqual(0, lines.Count(l => l.Contains("Accept failed", StringComparison.Ordinal)), "twenty stops log no accept failure");
+            runner.IsTrue(clock.Elapsed < TimeSpan.FromSeconds(10), $"and none waits out a backoff ({clock.ElapsedMilliseconds} ms)");
+
+            // The classification itself: a SocketException while the run is ending is the end, while
+            // the same error in a live run is logged and backed off.
+            var admission = new ProxyServer.Admission(2);
+            var probe = new ProxyServer(new ProxyOptions(), ca, new SessionStore());
+            var ending = new System.Collections.Concurrent.ConcurrentQueue<string>();
+            probe.Log += (_, message) => ending.Enqueue(message);
+            await probe.AcceptLoopAsync(admission,
+                _ => ValueTask.FromException<TcpClient>(new SocketException((int)SocketError.OperationAborted)),
+                () => false, CancellationToken.None, isEnding: () => true);
+            runner.AreEqual(0, ending.Count, "an error while the run is ending ends the loop quietly");
+            runner.AreEqual(2, admission.Gate.CurrentCount, "and gives its slot back");
+        });
+
+        await runner.RunAsync("this group and its sibling are both discovered by the runner, so neither is called from the other", () =>
+        {
+            var ids = TestDiscovery.Groups.Select(g => g.Id).ToList();
+            runner.IsTrue(ids.Contains("ProxyAdmissionTests.RunLoopAndRestartAsync"), "RunLoopAndRestartAsync is a discovered group");
+            runner.IsTrue(ids.Contains("ProxyAdmissionTests.RunAsync"), "and so is RunAsync");
+            return Task.CompletedTask;
+        });
 
         await runner.RunAsync("a failed accept loop is reported, the proxy stops claiming to run, and Start tells the old connections to go", async () =>
         {

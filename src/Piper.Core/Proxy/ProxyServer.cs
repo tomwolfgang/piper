@@ -214,6 +214,12 @@ public sealed class ProxyServer : IAsyncDisposable
         Log?.Invoke(this, "Proxy stopped.");
     }
 
+    /// <summary>True once the run owning <paramref name="ct"/> has been detached by a stop or a restart.</summary>
+    private bool IsDetached(CancellationToken ct)
+    {
+        lock (_runLock) return _cts is null || _cts.Token != ct;
+    }
+
     /// <summary>What one run of the proxy holds: enough to end it.</summary>
     private sealed record Run(CancellationTokenSource? Cts, TcpListener? Listener, Task? AcceptLoop);
 
@@ -274,7 +280,7 @@ public sealed class ProxyServer : IAsyncDisposable
         string? failure = null;
         try
         {
-            await AcceptLoopAsync(admission, accept, hasPending, ct).ConfigureAwait(false);
+            await AcceptLoopAsync(admission, accept, hasPending, ct, () => IsDetached(ct)).ConfigureAwait(false);
             failure = "the listener closed";
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -446,8 +452,12 @@ public sealed class ProxyServer : IAsyncDisposable
 
     /// <param name="accept">Where the next connection comes from: the listener, or a stand-in in a test.</param>
     /// <param name="hasPending">Whether a client is waiting to be accepted; asked only while the gate is full.</param>
+    /// <param name="isEnding">Whether the run is being ended (stopped or restarted) even though its
+    /// token may not have been cancelled yet: the listener is closed first and the connections are told
+    /// to stop afterwards, so an accept that fails in between is the stop, not a fault.</param>
     internal async Task AcceptLoopAsync(
-        Admission admission, Func<CancellationToken, ValueTask<TcpClient>> accept, Func<bool> hasPending, CancellationToken ct)
+        Admission admission, Func<CancellationToken, ValueTask<TcpClient>> accept, Func<bool> hasPending, CancellationToken ct,
+        Func<bool>? isEnding = null)
     {
         var gate = admission.Gate;
         var saturated = false;
@@ -505,6 +515,7 @@ public sealed class ProxyServer : IAsyncDisposable
             // A Stop that lands before the listener was accepting, which is how a stop racing the
             // start reaches this loop.
             catch (InvalidOperationException) when (ct.IsCancellationRequested) { break; }
+            catch (SocketException) when (isEnding?.Invoke() == true) { break; }
             catch (SocketException ex)
             {
                 Log?.Invoke(this, $"Accept failed: {ex.Message}");
