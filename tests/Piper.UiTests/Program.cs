@@ -154,7 +154,6 @@ internal static class Program
         textBox.Select(0, 0);
         DoubleClick(textBox, new Point(point.X + 1, point.Y + 1));
         Check(textBox.SelectedText == word, "double-click still works after the handle is recreated");
-        form.Close();
 
         using var multilineForm = new Form { Width = 600, Height = 120, ShowInTaskbar = false, StartPosition = FormStartPosition.Manual, Location = new Point(0, 0) };
         var multiline = new TextBox { Dock = DockStyle.Fill, Multiline = true, ReadOnly = true, Text = "GET /health HTTP/1.1\r\n" + text };
@@ -166,6 +165,67 @@ internal static class Program
         DoubleClick(multiline, new Point(multilinePoint.X + 1, multilinePoint.Y + 1));
         Check(multiline.SelectedText == word, "read-only multiline text boxes use the same boundaries");
         multilineForm.Close();
+
+        Console.WriteLine("== large and Unicode text-box selection");
+        using var largeForm = new Form { Width = 600, Height = 120, ShowInTaskbar = false, StartPosition = FormStartPosition.Manual, Location = new Point(0, 0) };
+        var largeText = new string('x', 65_536) + "\r\n" + text;
+        var large = new TextBox { Dock = DockStyle.Fill, Multiline = true, WordWrap = false, ScrollBars = ScrollBars.Both, MaxLength = 200_000, Text = largeText };
+        largeForm.Controls.Add(large);
+        Palette.Apply(largeForm);
+        largeForm.Show();
+        var largeWordStart = largeText.IndexOf(word, 65_536, StringComparison.Ordinal);
+        large.Select(largeWordStart + 2, 0);
+        large.ScrollToCaret();
+        var largePoint = large.GetPositionFromCharIndex(largeWordStart + 2);
+        Check(large.Text.Length > 65_536 && large.ClientRectangle.Contains(largePoint),
+            "setup: the target word past offset 65,536 is visible in a multiline text box");
+        DoubleClick(large, new Point(largePoint.X + 1, largePoint.Y + 1));
+        Check(large.SelectionStart == largeWordStart && large.SelectedText == word,
+            "double-click selects the correct URI component past offset 65,536");
+        large.Select(largeWordStart, 0);
+        PressWordKey(large, Keys.Right, shift: true);
+        Check(large.SelectionStart == largeWordStart && large.SelectedText == word,
+            "Ctrl+Shift+Right selects the same component past offset 65,536");
+        largeForm.Close();
+
+        const string astralLetter = "\U00010437";
+        var astralText = "GET /v1/" + astralLetter + "flag/path HTTP/1.1";
+        var astralWord = astralLetter + "flag";
+        var astralStart = astralText.IndexOf(astralWord, StringComparison.Ordinal);
+        textBox.Text = astralText;
+        var astralPoint = textBox.GetPositionFromCharIndex(astralStart);
+        DoubleClick(textBox, new Point(astralPoint.X + 1, astralPoint.Y + 1));
+        Check(textBox.SelectedText == astralWord, "double-click keeps a supplementary letter with its word");
+        textBox.Select(astralStart, 0);
+        PressWordKey(textBox, Keys.Right, shift: true);
+        Check(textBox.SelectedText == astralWord, "Ctrl+Shift+Right includes a supplementary letter");
+        textBox.Select(astralStart + astralWord.Length, 0);
+        PressWordKey(textBox, Keys.Left, shift: true);
+        Check(textBox.SelectedText == astralWord, "Ctrl+Shift+Left includes a supplementary letter");
+
+        textBox.Text = "x/\U0001F600/y";
+        var emojiPoint = textBox.GetPositionFromCharIndex(2);
+        DoubleClick(textBox, new Point(emojiPoint.X + 1, emojiPoint.Y + 1));
+        Check(textBox.SelectedText == "\U0001F600", "double-click never selects half a surrogate pair");
+        textBox.SelectedText = "Z";
+        Check(textBox.Text == "x/Z/y", "editing a selected surrogate pair leaves no orphaned code unit");
+
+        const string combinedWord = "cafe\u0301";
+        var combinedText = "GET /v1/" + combinedWord + "/path HTTP/1.1";
+        var combinedStart = combinedText.IndexOf(combinedWord, StringComparison.Ordinal);
+        textBox.Text = combinedText;
+        var combinedPoint = textBox.GetPositionFromCharIndex(combinedStart + 3);
+        DoubleClick(textBox, new Point(combinedPoint.X + 1, combinedPoint.Y + 1));
+        Check(textBox.SelectedText == combinedWord, "double-click keeps a combining mark with its word");
+        textBox.Select(combinedStart, 0);
+        PressWordKey(textBox, Keys.Right, shift: true);
+        Check(textBox.SelectedText == combinedWord, "Ctrl+Shift+Right includes the combining mark");
+        textBox.Select(combinedStart + combinedWord.Length, 0);
+        PressWordKey(textBox, Keys.Left, shift: true);
+        Check(textBox.SelectedText == combinedWord, "Ctrl+Shift+Left includes the combining mark");
+        textBox.SelectedText = "tea";
+        Check(textBox.Text == "GET /v1/tea/path HTTP/1.1", "editing a combined word leaves no detached mark");
+        form.Close();
     }
 
     private static void PressDirectionShortcut(TextBox textBox, Keys secondModifier)

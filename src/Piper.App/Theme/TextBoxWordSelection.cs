@@ -1,5 +1,7 @@
+using System.Globalization;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Windows.Forms;
 
 namespace Piper.App.Theme;
@@ -29,6 +31,8 @@ internal static class TextBoxWordSelection
         private const int WmKeyUp = 0x0101;
 
         private readonly TextBox _textBox;
+        private string? _cachedText;
+        private int _lastMouseDownCaret = -1;
         private int _anchor;
         private int _caret;
         private int _selectionStart;
@@ -41,7 +45,11 @@ internal static class TextBoxWordSelection
             _textBox = textBox;
             textBox.HandleCreated += OnHandleCreated;
             textBox.HandleDestroyed += OnHandleDestroyed;
-            textBox.TextChanged += (_, _) => _selectionIsOurs = false;
+            textBox.TextChanged += (_, _) =>
+            {
+                _cachedText = null;
+                _selectionIsOurs = false;
+            };
             if (textBox.IsHandleCreated) AssignHandle(textBox.Handle);
         }
 
@@ -49,13 +57,25 @@ internal static class TextBoxWordSelection
 
         private void OnHandleDestroyed(object? sender, EventArgs e)
         {
+            _cachedText = null;
+            _lastMouseDownCaret = -1;
             _selectionIsOurs = false;
             ReleaseHandle();
         }
 
+        private string CurrentText => _cachedText ??= _textBox.Text;
+
         protected override void WndProc(ref Message m)
         {
-            if (m.Msg == WmLButtonDown) _selectionIsOurs = false;
+            if (m.Msg == WmLButtonDown)
+            {
+                _selectionIsOurs = false;
+                base.WndProc(ref m);
+                // The native first click positions a full-width caret. EM_CHARFROMPOS, which
+                // GetCharIndexFromPosition uses, exposes only its low 16 index bits.
+                _lastMouseDownCaret = _textBox.SelectionStart;
+                return;
+            }
             if (m.Msg == EmSetSel && !_settingSelection) _selectionIsOurs = false;
 
             if (m.Msg == WmLButtonDoubleClick)
@@ -63,6 +83,7 @@ internal static class TextBoxWordSelection
                 var position = m.LParam.ToInt64();
                 var location = new Point(unchecked((short)position), unchecked((short)(position >> 16)));
                 SelectWordAt(location);
+                _lastMouseDownCaret = -1;
                 m.Result = 0;
                 return;
             }
@@ -109,16 +130,31 @@ internal static class TextBoxWordSelection
 
         private void SelectWordAt(Point location)
         {
-            var text = _textBox.Text;
+            var text = CurrentText;
+            if (!_textBox.ClientRectangle.Contains(location)) return;
             var index = _textBox.GetCharIndexFromPosition(location);
+            if (_lastMouseDownCaret >= 0)
+            {
+                // Reconstruct the index nearest the first click's 32-bit caret. The two clicks
+                // are within the system's double-click rectangle, even across a 64K boundary.
+                long fullIndex = ((long)_lastMouseDownCaret & ~0xffffL) | ((long)index & 0xffff);
+                if (fullIndex - _lastMouseDownCaret > 32_768) fullIndex -= 65_536;
+                if (_lastMouseDownCaret - fullIndex > 32_768) fullIndex += 65_536;
+                index = (int)Math.Clamp(fullIndex, 0, text.Length);
+            }
             if ((uint)index >= (uint)text.Length) return;
 
-            var start = index;
-            var end = index + 1;
-            if (IsWordCharacter(text[index]))
+            var start = ScalarStart(text, index);
+            var end = NextScalarEnd(text, start);
+            if (IsWordScalar(text, start))
             {
-                while (start > 0 && IsWordCharacter(text[start - 1])) start--;
-                while (end < text.Length && IsWordCharacter(text[end])) end++;
+                while (start > 0)
+                {
+                    var previous = PreviousScalarStart(text, start);
+                    if (!IsWordScalar(text, previous)) break;
+                    start = previous;
+                }
+                while (end < text.Length && IsWordScalar(text, end)) end = NextScalarEnd(text, end);
             }
 
             Select(start, end);
@@ -126,7 +162,7 @@ internal static class TextBoxWordSelection
 
         private void MoveWord(Keys direction, bool extendSelection)
         {
-            var text = _textBox.Text;
+            var text = CurrentText;
             var (anchor, caret) = SelectionEndpoints(text.Length);
             var next = direction == Keys.Left
                 ? FindPreviousWordBoundary(text, caret)
@@ -136,10 +172,9 @@ internal static class TextBoxWordSelection
 
         private void MoveCharacter(Keys direction)
         {
-            var text = _textBox.Text;
-            var next = direction == Keys.Left ? Math.Max(0, _caret - 1) : Math.Min(text.Length, _caret + 1);
-            if (direction == Keys.Left && next > 0 && char.IsLowSurrogate(text[next]) && char.IsHighSurrogate(text[next - 1])) next--;
-            if (direction == Keys.Right && next < text.Length && char.IsHighSurrogate(text[next - 1]) && char.IsLowSurrogate(text[next])) next++;
+            var text = CurrentText;
+            var next = direction == Keys.Left ? PreviousTextElementStart(text, _caret)
+                : _caret + StringInfo.GetNextTextElementLength(text.AsSpan(_caret));
             Select(_anchor, next);
         }
 
@@ -178,19 +213,53 @@ internal static class TextBoxWordSelection
 
     private static int FindPreviousWordBoundary(string text, int index)
     {
-        while (index > 0 && !IsWordCharacter(text[index - 1])) index--;
-        while (index > 0 && IsWordCharacter(text[index - 1])) index--;
+        while (index > 0)
+        {
+            var previous = PreviousScalarStart(text, index);
+            if (IsWordScalar(text, previous)) break;
+            index = previous;
+        }
+        while (index > 0)
+        {
+            var previous = PreviousScalarStart(text, index);
+            if (!IsWordScalar(text, previous)) break;
+            index = previous;
+        }
         return index;
     }
 
     private static int FindNextWordBoundary(string text, int index)
     {
-        while (index < text.Length && !IsWordCharacter(text[index])) index++;
-        while (index < text.Length && IsWordCharacter(text[index])) index++;
+        index = index < text.Length ? ScalarStart(text, index) : index;
+        while (index < text.Length && !IsWordScalar(text, index)) index = NextScalarEnd(text, index);
+        while (index < text.Length && IsWordScalar(text, index)) index = NextScalarEnd(text, index);
         return index;
     }
 
-    private static bool IsWordCharacter(char value) => char.IsLetterOrDigit(value) || value == '_';
+    private static int ScalarStart(string text, int index) => index > 0 && index < text.Length
+        && char.IsLowSurrogate(text[index]) && char.IsHighSurrogate(text[index - 1]) ? index - 1 : index;
+
+    private static int PreviousScalarStart(string text, int index) => ScalarStart(text, Math.Max(0, index - 1));
+
+    private static int NextScalarEnd(string text, int index) => index < text.Length - 1
+        && char.IsHighSurrogate(text[index]) && char.IsLowSurrogate(text[index + 1]) ? index + 2 : Math.Min(index + 1, text.Length);
+
+    private static int PreviousTextElementStart(string text, int index)
+    {
+        var start = PreviousScalarStart(text, index);
+        while (start > 0 && IsCombiningMark(text, start)) start = PreviousScalarStart(text, start);
+        return start;
+    }
+
+    private static bool IsWordScalar(string text, int index) => text[index] == '_' ||
+        Rune.TryGetRuneAt(text, index, out var rune) &&
+        (Rune.IsLetterOrDigit(rune) || IsCombiningMark(Rune.GetUnicodeCategory(rune)));
+
+    private static bool IsCombiningMark(string text, int index) =>
+        Rune.TryGetRuneAt(text, index, out var rune) && IsCombiningMark(Rune.GetUnicodeCategory(rune));
+
+    private static bool IsCombiningMark(UnicodeCategory category) => category is
+        UnicodeCategory.NonSpacingMark or UnicodeCategory.SpacingCombiningMark or UnicodeCategory.EnclosingMark;
 
     [DllImport("user32.dll")]
     private static extern nint SendMessage(nint hwnd, int message, nint wParam, nint lParam);
