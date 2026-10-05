@@ -17,7 +17,8 @@ public readonly record struct HttpStatusLine(string Version, int StatusCode, str
 /// response file): odd spacing, a made-up or missing version and trailing words are tolerated there
 /// because rejecting them would make a file unusable for no gain. It never relaxes the parts that
 /// feed the next hop: the method must be a token, the target and reason carry no control
-/// characters, and a status code is exactly three digits in 100-599.
+/// characters, and a status code is exactly three digits (100-999 on an HTTP/1 response, see
+/// <see cref="MaxHttp1StatusCode"/>; 100-599 on HTTP/2 and HTTP/3).
 /// </remarks>
 public static class HttpSyntax
 {
@@ -65,8 +66,16 @@ public static class HttpSyntax
         return true;
     }
 
-    /// <summary>A status code is exactly three ASCII digits, 100 to 599 (RFC 9110 15).</summary>
-    public static bool TryParseStatusCode(string? text, out int code)
+    /// <summary>The highest status an HTTP/1 response may carry. RFC 9110 15 defines 100-599, but real
+    /// origins send others (LinkedIn answers 999), and a debugging proxy that refused such a reply
+    /// would replace the one thing worth inspecting with its own 502. HTTP/1 responses (the proxy,
+    /// SAZ archives, response files) therefore take any three digits from 100 to 999 and show them as
+    /// sent; HTTP/2 and HTTP/3 keep the standard range, since their framing leaves no reason to.</summary>
+    public const int MaxHttp1StatusCode = 999;
+
+    /// <summary>A status code is exactly three ASCII digits, 100 to <paramref name="max"/> (599 unless
+    /// the caller asks for the HTTP/1 range, <see cref="MaxHttp1StatusCode"/>).</summary>
+    public static bool TryParseStatusCode(string? text, out int code, int max = 599)
     {
         code = 0;
         if (text is null || text.Length != 3) return false;
@@ -75,7 +84,7 @@ public static class HttpSyntax
             if (!char.IsAsciiDigit(c)) return false;
 
         code = (text[0] - '0') * 100 + (text[1] - '0') * 10 + (text[2] - '0');
-        if (code is >= 100 and <= 599) return true;
+        if (code >= 100 && code <= max) return true;
 
         code = 0;
         return false;
@@ -89,7 +98,8 @@ public static class HttpSyntax
         string line, bool lenient, string defaultVersion, out HttpRequestLine result, out string error)
     {
         result = default;
-        var parts = line.Split(' ', 3, StringSplitOptions.RemoveEmptyEntries);
+        // Trailing blanks are not part of the version (a client may well send "HTTP/1.1 ").
+        var parts = line.TrimEnd(' ', '\t').Split(' ', 3, StringSplitOptions.RemoveEmptyEntries);
         if (parts.Length < 2)
         {
             error = $"Malformed request line: '{Truncate(line)}'";
@@ -109,7 +119,18 @@ public static class HttpSyntax
         }
 
         var version = parts.Length > 2 ? parts[2] : defaultVersion;
-        if (!lenient && parts.Length > 2 && !IsHttp1Version(version))
+        if (lenient && parts.Length > 2)
+        {
+            // Whatever follows the first word is not the version: a typed "HTTP/1.1 extra" is "HTTP/1.1".
+            var space = version.IndexOfAny([' ', '\t']);
+            if (space >= 0) version = version[..space];
+            if (HasControlCharacter(version))
+            {
+                error = "Malformed request line: the version contains a control character.";
+                return false;
+            }
+        }
+        else if (!lenient && parts.Length > 2 && !IsHttp1Version(version))
         {
             error = $"Malformed request line: bad version '{Truncate(version)}'.";
             return false;
@@ -144,9 +165,9 @@ public static class HttpSyntax
             return false;
         }
 
-        if (!TryParseStatusCode(parts[1], out var status))
+        if (!TryParseStatusCode(parts[1], out var status, MaxHttp1StatusCode))
         {
-            error = $"Malformed status line: '{Truncate(parts[1])}' is not a status code from 100 to 599.";
+            error = $"Malformed status line: '{Truncate(parts[1])}' is not a status code from 100 to {MaxHttp1StatusCode}.";
             return false;
         }
 

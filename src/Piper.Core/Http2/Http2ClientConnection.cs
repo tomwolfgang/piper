@@ -554,7 +554,7 @@ public sealed class Http2ClientConnection(Stream stream, TimeSpan? idleTimeout =
         }
 
         var statusText = decoded.FirstOrDefault(f => f.Name == ":status").Value;
-        if (int.TryParse(statusText, out var status) && status is >= 100 and < 200)
+        if (HttpSyntax.TryParseStatusCode(statusText, out var status) && status is >= 100 and < 200)
         {
             if (++_interimResponses > MaxInterimResponses)
                 throw new Http2ProtocolException(Http2ErrorCode.EnhanceYourCalm, "Too many interim responses before the final one.");

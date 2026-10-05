@@ -459,6 +459,16 @@ internal static class Http3HardeningTests
                 Frame((long)Http3FrameType.Headers, QpackEncoder.Encode([("x-only", "1")])))));
             runner.IsTrue(noStatus.Failure is HttpParseException, $"a response with no :status (was: {Describe(noStatus.Failure)})");
 
+            // :status is three digits, 100-599: a 0, a 600, a padded 0000000200 or a signed one would
+            // otherwise land in the session, the rules and the downstream HTTP/1 status line.
+            foreach (var badStatus in new[] { "0", "99", "600", "999", "99999", "0000000200", "+200", "20x", "" })
+            {
+                var invalid = await ExchangeAsync(ca, Respond((s, ct) => SendAsync(s, ct, true,
+                    Frame((long)Http3FrameType.Headers, QpackEncoder.Encode([(":status", badStatus)])))));
+                runner.IsTrue(invalid.Failure is HttpParseException && invalid.Response is null,
+                    $"a response with :status '{badStatus}' is refused (was: {Describe(invalid.Failure)})");
+            }
+
             var noHeaders = await ExchangeAsync(ca, Respond((s, ct) => SendAsync(s, ct, true)));
             runner.IsTrue(noHeaders.Failure is HttpParseException, $"a stream that ends with no response (was: {Describe(noHeaders.Failure)})");
 

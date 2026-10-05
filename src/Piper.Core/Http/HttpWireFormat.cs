@@ -40,9 +40,9 @@ public static class HttpWireFormat
             return false;
         }
 
-        if (!HttpSyntax.TryParseStatusLine(lines[0], lenient: true, out var start, out _))
+        if (!HttpSyntax.TryParseStatusLine(lines[0], lenient: true, out var start, out var statusError))
         {
-            error = $"'{HttpParser.Truncate(lines[0])}' is not an HTTP status line";
+            error = $"'{HttpParser.Truncate(lines[0])}' is not an HTTP status line ({statusError})";
             return false;
         }
 

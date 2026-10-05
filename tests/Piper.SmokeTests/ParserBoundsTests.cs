@@ -206,6 +206,12 @@ internal static class ParserBoundsTests
             runner.AreEqual(1, fields.Count, "a multipart part with too many headers is skipped");
             runner.AreEqual("b", fields[0].Name, "and the others still read");
 
+            var hugeHead = $"--B\r\nContent-Disposition: form-data; name=a\r\nX-Pad: {new string('p', 300_000)}\r\n\r\nx\r\n"
+                         + "--B\r\nContent-Disposition: form-data; name=b\r\n\r\ny\r\n--B--\r\n";
+            var huge = new HttpRequestData { Body = Encoding.Latin1.GetBytes(hugeHead) };
+            huge.Headers.Add("Content-Type", "multipart/form-data; boundary=B");
+            runner.AreEqual(1, WebFormParser.Parse(huge).Count, "and so is a part whose head is past the size cap");
+
             return Task.CompletedTask;
         });
 
@@ -251,12 +257,32 @@ internal static class ParserBoundsTests
             // Appending each continuation to the previous value copied the whole value every time:
             // the work grew with the square of the line count.
             var folded = "X-Long: a\n" + string.Concat(Enumerable.Repeat(" a\n", 80_000));
-            var watch = Stopwatch.StartNew();
             var parsed = HeaderCollection.Parse(folded);
-            watch.Stop();
             runner.AreEqual(1, parsed.Count, "the folds join the one header");
             runner.AreEqual(1 + 2 * 80_000, parsed["X-Long"]!.Length, "and keep every line, separated by one space");
-            runner.IsTrue(watch.ElapsedMilliseconds < 1500, $"in linear time ({watch.ElapsedMilliseconds} ms)");
+
+            // Judged by how the time grows, not by a wall-clock limit that a slow machine would trip:
+            // four times the lines takes about four times as long when linear and about sixteen times
+            // as long when quadratic. The best of three runs each keeps a stray GC pause out of it.
+            static double BestMilliseconds(int lines)
+            {
+                var block = "X-Long: a\n" + string.Concat(Enumerable.Repeat(" a\n", lines));
+                var best = double.MaxValue;
+                for (var run = 0; run < 3; run++)
+                {
+                    var clock = Stopwatch.StartNew();
+                    HeaderCollection.Parse(block);
+                    best = Math.Min(best, clock.Elapsed.TotalMilliseconds);
+                }
+                return best;
+            }
+
+            var small = BestMilliseconds(20_000);
+            var large = BestMilliseconds(80_000);
+            runner.IsTrue(large < 9 * Math.Max(small, 5.0),
+                $"four times the folded lines takes about four times as long, not sixteen ({small:0.0} ms, then {large:0.0} ms)");
+
+            var watch = Stopwatch.StartNew();
 
             // A response head had no size bound at all: folds are not counted as headers, so an origin
             // could keep one header growing for ever. It is bounded like a request head now.
@@ -267,7 +293,7 @@ internal static class ParserBoundsTests
                 runner.AreEqual(1 + 2 * 60_000, response.Headers["X-Long"]!.Length, "a long folded response header within the cap is read");
             }
             watch.Stop();
-            runner.IsTrue(watch.ElapsedMilliseconds < 1500, $"in linear time ({watch.ElapsedMilliseconds} ms)");
+            runner.IsTrue(watch.ElapsedMilliseconds < 15_000, $"and in bounded time ({watch.ElapsedMilliseconds} ms)");
 
             runner.AreEqual("HttpParseException", await ExceptionNameAsync(async () =>
             {
@@ -287,9 +313,12 @@ internal static class ParserBoundsTests
 
         // ----------------------------------------------------------------- start lines
 
-        await runner.RunAsync("a status code outside 100-599 is refused by every response parser", async () =>
+        await runner.RunAsync("an HTTP/1 response status is any three digits from 100 to 999, and nothing else", async () =>
         {
-            foreach (var bad in new[] { "99", "20", "0", "000", "099", "600", "999", "1000", "2000", "+200", "-1", "2x0", "²²²", "0200" })
+            // 600-999 are not defined, but real origins send them (LinkedIn answers 999), and a debugging
+            // proxy that turned such a reply into a 502 would hide the one thing worth looking at. They
+            // are read, shown and relayed as the origin sent them; HTTP/2 and HTTP/3 stay at 100-599.
+            foreach (var bad in new[] { "99", "20", "0", "000", "099", "1000", "2000", "+200", "-1", "2x0", "²²²", "0200" })
             {
                 runner.AreEqual("HttpParseException", await ExceptionNameAsync(async () =>
                 {
@@ -300,9 +329,13 @@ internal static class ParserBoundsTests
                 runner.IsTrue(!HttpWireFormat.TryParseResponse(
                     Encoding.Latin1.GetBytes($"HTTP/1.1 {bad} Reason\r\n\r\nbody"), out _, out var error) && error.Length > 0,
                     $"a response file with status '{bad}' is refused with a reason");
+                runner.IsTrue(!HttpWireFormat.TryParseResponse(
+                    Encoding.Latin1.GetBytes($"HTTP/1.1 {bad} Reason\r\n\r\nbody"), out _, out var specific)
+                    && specific.Contains("status code", StringComparison.Ordinal),
+                    $"and the reason for '{bad}' names the status code, not a generic status-line failure (was: {specific})");
             }
 
-            foreach (var good in new[] { "200", "204", "299", "404", "500", "599" })
+            foreach (var good in new[] { "200", "204", "299", "404", "500", "599", "600", "700", "999" })
             {
                 using var reader = ReaderFor($"HTTP/1.1 {good} Reason\r\nContent-Length: 0\r\n\r\n");
                 var response = await HttpParser.ReadResponseAsync(reader, "GET", CancellationToken.None);
@@ -321,19 +354,21 @@ internal static class ParserBoundsTests
             var path = SazImportHardeningTests.Write(SazImportHardeningTests.Zip(archive =>
             {
                 var number = 0;
-                foreach (var bad in new[] { "99", "600", "99999", "0" })
+                foreach (var status in new[] { "99", "99999", "0", "1000", "600", "999" })
                 {
                     number++;
                     SazImportHardeningTests.Add(archive, $"raw/{number}_c.txt", "GET https://a.test/ HTTP/1.1\r\nHost: a.test\r\n\r\n");
-                    SazImportHardeningTests.Add(archive, $"raw/{number}_s.txt", $"HTTP/1.1 {bad} X\r\n\r\nok");
+                    SazImportHardeningTests.Add(archive, $"raw/{number}_s.txt", $"HTTP/1.1 {status} X\r\n\r\nok");
                 }
             }));
             try
             {
                 var result = SazImporter.Import(path);
-                runner.AreEqual(4, result.Sessions.Count, "every request still imports");
-                runner.IsTrue(result.Sessions.All(s => s.Response is null), "but no response with an out-of-range status is kept");
-                runner.AreEqual(4, result.Warnings.Count, "and each is reported");
+                runner.AreEqual(6, result.Sessions.Count, "every request still imports");
+                runner.AreEqual(2, result.Sessions.Count(s => s.Response is not null), "only 600 and 999 keep their response");
+                runner.AreEqual("600,999", string.Join(',', result.Sessions.Where(s => s.Response is not null).Select(s => s.Response!.StatusCode).Order()),
+                    "as the origin sent them");
+                runner.AreEqual(4, result.Warnings.Count, "and each response with a status outside 100-999 is reported");
             }
             finally { File.Delete(path); }
         });
@@ -410,6 +445,206 @@ internal static class ParserBoundsTests
                 runner.AreEqual(int.Parse(good), Http2MessageAdapter.ToResponse([(":status", good)]).StatusCode, $":status '{good}'");
 
             return Task.CompletedTask;
+        });
+    }
+
+    // ------------------------------------------------- what the proxy does with a refused message
+
+    public static async Task RunProxyReplyAsync(TestRunner runner)
+    {
+        using var ca = CertificateAuthority.LoadOrCreate(
+            Path.Combine(Path.GetTempPath(), "Piper-SmokeTest-ParserBounds-Certs"));
+
+        await runner.RunAsync("a request line with trailing whitespace is read; a malformed head is answered 400 and recorded", async () =>
+        {
+            // The old parser took "GET / HTTP/1.1 " (the version simply carried the space). The strict
+            // version check must not turn that into a refusal; it also must trim the Composer's lenient version.
+            foreach (var line in new[] { "GET / HTTP/1.1 ", "GET / HTTP/1.1\t", "GET / HTTP/1.1  \t ", "GET /  HTTP/1.1 " })
+            {
+                using var reader = ReaderFor(line + "\r\nHost: h\r\n\r\n");
+                var request = await HttpParser.ReadRequestAsync(reader, CancellationToken.None);
+                runner.AreEqual("HTTP/1.1", request?.HttpVersion, $"version of '{line.Replace("\t", "\\t")}'");
+                runner.AreEqual("/", request?.RequestTarget, $"target of '{line.Replace("\t", "\\t")}'");
+            }
+
+            runner.IsTrue(RequestExecutor.TryParseRaw("GET http://h.test/ HTTP/1.1 extra words\nHost: h.test", out var composed, out _)
+                          && composed.HttpVersion == "HTTP/1.1", "the Composer keeps only the first word as the version");
+            runner.IsTrue(!RequestExecutor.TryParseRaw("GET http://h.test/ HT\u0001TP\nHost: h.test", out _, out _),
+                "and refuses a version with a control character");
+
+            await using var origin = new TestRawOrigin(async (_, stream, ct) =>
+            {
+                await TestRawOrigin.WriteAsync(stream, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok", ct);
+                return true;
+            });
+            using var harness = new Harness(ca);
+
+            using (var good = await ConnectAsync(harness.Port))
+            {
+                await WriteAsync(good.GetStream(),
+                    $"GET http://127.0.0.1:{origin.Port}/ok HTTP/1.1 \r\nHost: 127.0.0.1:{origin.Port}\r\n\r\n");
+                var reply = await ReadAsync(good.GetStream(), "ok", Patience);
+                runner.IsTrue(reply.Text.Contains("200 OK", StringComparison.Ordinal),
+                    $"the proxy serves a request line with a trailing space (got: {FirstLine(reply.Text)})");
+            }
+
+            var bad = new[]
+            {
+                "GET /a b HTTP/1.1\r\nHost: h\r\n\r\n",
+                "G@T / HTTP/1.1\r\nHost: h\r\n\r\n",
+                "GET / HTTP/x\r\nHost: h\r\n\r\n",
+                "GET / HTTP/1.1\r\n" + HeaderBlock(Cap + 1) + "\r\n",
+            };
+            foreach (var wire in bad)
+            {
+                using var client = await ConnectAsync(harness.Port);
+                await WriteAsync(client.GetStream(), wire);
+                var reply = await ReadAsync(client.GetStream(), null, Patience);
+                runner.IsTrue(reply.Text.StartsWith("HTTP/1.1 400", StringComparison.Ordinal),
+                    $"'{Show(wire)}' is answered 400 (got: {FirstLine(reply.Text)})");
+                runner.IsTrue(reply.Eof, "and the connection is closed");
+            }
+
+            runner.IsTrue(await Poll.UntilAsync(() => harness.Store.Snapshot().Count(s => s.State == SessionState.Failed) == bad.Length),
+                "each malformed head is recorded as a failed session");
+            runner.IsTrue(harness.Store.Snapshot().Where(s => s.State == SessionState.Failed).All(s => s.Request is not null && s.Response?.StatusCode == 400),
+                "with the 400 that was sent");
+        });
+
+        await runner.RunAsync("an HTTP/1 origin's 999 reaches the client and the session list as sent", async () =>
+        {
+            await using var origin = new TestRawOrigin(async (_, stream, ct) =>
+            {
+                await TestRawOrigin.WriteAsync(stream, "HTTP/1.1 999 Request denied\r\nContent-Length: 2\r\n\r\nno", ct);
+                return true;
+            });
+            using var harness = new Harness(ca);
+            using var client = await ConnectAsync(harness.Port);
+            await WriteAsync(client.GetStream(), Get(origin.Port, "/linkedin"));
+            var reply = await ReadAsync(client.GetStream(), "no", Patience);
+            runner.IsTrue(reply.Text.StartsWith("HTTP/1.1 999", StringComparison.Ordinal), $"the client gets the 999 (got: {FirstLine(reply.Text)})");
+            runner.IsTrue(await Poll.UntilAsync(() => harness.Store.Snapshot().Any(s => s.State == SessionState.Complete && s.Response?.StatusCode == 999)),
+                "and the session shows it, complete, not a failed 502");
+        });
+
+        await runner.RunAsync("a client that disconnects mid-request gets no 400 and leaves no failed session", async () =>
+        {
+            // The peer is gone, so a 400 recorded for it would be a reply that was never delivered.
+            // Only a refusal of the framing itself (a bad chunk size, a conflicting length) earns one.
+            var cut = new[]
+            {
+                ("a length-framed body cut short", "Content-Length: 100\r\n\r\nshort"),
+                ("a chunked body cut inside a chunk", "Transfer-Encoding: chunked\r\n\r\n5\r\nhel"),
+                ("a chunked body cut between chunks", "Transfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n"),
+                ("a head cut in the headers", "X-Half: yes\r\n"),
+            };
+
+            foreach (var (what, rest) in cut)
+            {
+                var wire = $"POST /up HTTP/1.1\r\nHost: h\r\n{rest}";
+                runner.AreEqual("HttpPeerClosedException", await ExceptionNameAsync(async () =>
+                {
+                    using var reader = ReaderFor(wire);
+                    await HttpParser.ReadRequestAsync(reader, CancellationToken.None);
+                }), $"the parser names {what} as the peer closing");
+            }
+            runner.AreEqual("HttpParseException", await ExceptionNameAsync(async () =>
+            {
+                using var reader = ReaderFor("POST /up HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\nzz\r\n");
+                await HttpParser.ReadRequestAsync(reader, CancellationToken.None);
+            }), "while a bad chunk size is a refusal, not a closed peer");
+
+            var lines = new System.Collections.Concurrent.ConcurrentQueue<string>();
+            using var harness = new Harness(ca, lines);
+            foreach (var (what, rest) in cut)
+            {
+                using var client = await ConnectAsync(harness.Port);
+                var stream = client.GetStream();
+                await WriteAsync(stream, $"POST http://127.0.0.1:1/up HTTP/1.1\r\nHost: 127.0.0.1:1\r\n{rest}");
+                // The peer is gone as far as the proxy can tell, yet could still read a reply.
+                try { client.Client.Shutdown(SocketShutdown.Send); }
+                catch (Exception ex) when (ex is SocketException or InvalidOperationException) { /* already reset */ }
+                var reply = await ReadAsync(stream, null, Patience);
+                runner.AreEqual("", reply.Text, $"nothing is sent back for {what}");
+            }
+
+            runner.IsTrue(await Poll.UntilAsync(() => lines.Count(l => l.Contains("Protocol error", StringComparison.Ordinal)) >= cut.Length),
+                "each is logged, as before");
+            runner.AreEqual(0, harness.Store.Snapshot().Length, "and none is recorded as a session");
+        });
+
+        await runner.RunAsync("ambiguous request framing is refused, and never read as one request followed by another", async () =>
+        {
+            var ambiguous = new[]
+            {
+                ("differing duplicate Content-Length", "Content-Length: 5\r\nContent-Length: 40"),
+                ("a Content-Length repeating itself in a list", "Content-Length: 5, 5"),
+                ("a signed Content-Length", "Content-Length: +5"),
+                ("a negative Content-Length", "Content-Length: -5"),
+                ("a non-numeric Content-Length", "Content-Length: abc"),
+                ("an empty Content-Length", "Content-Length:"),
+                ("a Transfer-Encoding that is not chunked", "Transfer-Encoding: gzip"),
+                ("Content-Length and Transfer-Encoding","Content-Length: 5\r\nTransfer-Encoding: chunked"),
+                ("Transfer-Encoding and Content-Length", "Transfer-Encoding: chunked\r\nContent-Length: 5"),
+                ("a Transfer-Encoding list ending in chunked, with a Content-Length", "Transfer-Encoding: gzip, chunked\r\nContent-Length: 5"),
+            };
+
+            foreach (var (what, headers) in ambiguous)
+            {
+                runner.AreEqual("HttpParseException", ExceptionName(() => HttpParser.DescribeRequestBody(HeaderCollection.Parse(headers))),
+                    $"{what} is refused");
+                runner.AreEqual("HttpParseException", await ExceptionNameAsync(async () =>
+                {
+                    using var reader = ReaderFor($"POST /x HTTP/1.1\r\nHost: h\r\n{headers}\r\n\r\nhello");
+                    await HttpParser.ReadRequestAsync(reader, CancellationToken.None);
+                }), $"and a request carrying {what} is refused whole");
+            }
+
+            // Identical copies say one thing and are allowed (RFC 9112 6.3); the other framings are unchanged.
+            runner.AreEqual(5L, HttpParser.DescribeRequestBody(HeaderCollection.Parse("Content-Length: 5\r\nContent-Length: 5")).Length,
+                "two identical Content-Length headers are one length");
+            runner.AreEqual(HttpBodyFraming.Length, HttpParser.DescribeRequestBody(HeaderCollection.Parse("Content-Length: 0")).Framing, "Content-Length 0");
+            runner.AreEqual(HttpBodyFraming.Chunked, HttpParser.DescribeRequestBody(HeaderCollection.Parse("Transfer-Encoding: chunked")).Framing, "chunked alone");
+            runner.AreEqual(HttpBodyFraming.None, HttpParser.DescribeRequestBody(HeaderCollection.Parse("Host: h")).Framing, "no framing header");
+
+            // A "Transfer-Encoding" that is only the folded continuation of another header is part of that
+            // header's value, not a header: the Content-Length frames the body.
+            using (var reader = ReaderFor("POST /x HTTP/1.1\r\nHost: h\r\nX-Foo: a\r\n Transfer-Encoding: chunked\r\nContent-Length: 5\r\n\r\nhello"))
+            {
+                var request = await HttpParser.ReadRequestAsync(reader, CancellationToken.None);
+                runner.AreEqual("hello", Encoding.Latin1.GetString(request!.Body), "a folded Transfer-Encoding stays inert");
+                runner.IsTrue(!request.Headers.Contains("Transfer-Encoding"), "and is not a header of its own");
+            }
+
+            await using var origin = new TestRawOrigin(async (_, stream, ct) =>
+            {
+                await TestRawOrigin.WriteAsync(stream, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok", ct);
+                return true;
+            });
+            using var harness = new Harness(ca);
+            var attempts = new[]
+            {
+                "Content-Length: 5\r\nContent-Length: 40",
+                "Content-Length: +5",
+                "Content-Length: 5\r\nTransfer-Encoding: chunked",
+                "Content-Length: 999999999999",
+            };
+            foreach (var headers in attempts)
+            {
+                using var client = await ConnectAsync(harness.Port);
+                await WriteAsync(client.GetStream(),
+                    $"POST http://127.0.0.1:{origin.Port}/s HTTP/1.1\r\nHost: 127.0.0.1:{origin.Port}\r\n{headers}\r\n\r\nhello"
+                    + Get(origin.Port, "/smuggled"));
+                var reply = await ReadAsync(client.GetStream(), null, Patience);
+                runner.IsTrue(reply.Text.StartsWith("HTTP/1.1 400", StringComparison.Ordinal),
+                    $"'{headers.Replace("\r\n", " | ")}' is answered 400 (got: {FirstLine(reply.Text)})");
+                runner.IsTrue(reply.Eof && !reply.Text.Contains("200 OK", StringComparison.Ordinal),
+                    "the bytes after it are not served as a second request");
+            }
+
+            runner.IsTrue(await Poll.UntilAsync(() => harness.Store.Snapshot().Count(s => s.State == SessionState.Failed) == attempts.Length),
+                "each is recorded as a failed session");
+            runner.AreEqual(0, origin.ConnectionCount, "and nothing reached the origin");
         });
     }
 

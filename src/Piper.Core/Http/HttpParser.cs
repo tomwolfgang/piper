@@ -173,13 +173,34 @@ public static class HttpParser
     /// request with no framing headers has no body at all: a request can never be delimited by the
     /// connection closing, because the client still has to read the answer on it.
     /// </summary>
+    /// <exception cref="HttpParseException">
+    /// The framing is ambiguous, which for a request is refused outright (RFC 9112 6.3): a
+    /// Content-Length that is unreadable or repeated with different values, a Content-Length beside a
+    /// Transfer-Encoding, or a Transfer-Encoding that does not include chunked. Reading
+    /// such a request one way while its sender (or a proxy in front of Piper) reads it another
+    /// leaves the bytes between the two readings to be parsed as the next request on the connection.
+    /// Identical repeated Content-Length values are one length and are accepted.
+    /// </exception>
     public static HttpBodyDescriptor DescribeRequestBody(HeaderCollection headers)
     {
-        if (headers.HasToken("Transfer-Encoding", "chunked")) return HttpBodyDescriptor.Chunked;
+        var hasContentLength = headers.Contains("Content-Length");
 
-        if (TryReadContentLength(headers, out var length)) return HttpBodyDescriptor.OfLength(length);
+        if (headers.Contains("Transfer-Encoding"))
+        {
+            if (hasContentLength)
+                throw new HttpParseException("Request carries both Content-Length and Transfer-Encoding.");
+            if (!headers.HasToken("Transfer-Encoding", "chunked"))
+                throw new HttpParseException("Request Transfer-Encoding does not include chunked.");
+            return HttpBodyDescriptor.Chunked;
+        }
 
-        return HttpBodyDescriptor.None;
+        if (!hasContentLength) return HttpBodyDescriptor.None;
+
+        if (headers.GetValues("Content-Length").Distinct(StringComparer.Ordinal).Count() == 1
+            && TryReadContentLength(headers, out var length))
+            return HttpBodyDescriptor.OfLength(length);
+
+        throw new HttpParseException("Request has an invalid or conflicting Content-Length.");
     }
 
     /// <summary>
@@ -203,7 +224,7 @@ public static class HttpParser
         while (true)
         {
             var line = await reader.ReadLineAsync(ct).ConfigureAwait(false);
-            if (line is null) throw new HttpParseException("Connection closed inside the header block.");
+            if (line is null) throw new HttpPeerClosedException("Connection closed inside the header block.");
             if (line.Length == 0) return builder.Complete();
 
             budget -= line.Length + 2;
@@ -245,7 +266,7 @@ public static class HttpParser
         while (true)
         {
             var sizeLine = await reader.ReadLineAsync(ct).ConfigureAwait(false);
-            if (sizeLine is null) throw new HttpParseException("Connection closed inside a chunked body.");
+            if (sizeLine is null) throw new HttpPeerClosedException("Connection closed inside a chunked body.");
 
             if (!HttpSyntax.TryParseChunkSize(sizeLine, out var chunkSize))
                 throw new HttpParseException($"Bad chunk size: '{Truncate(sizeLine)}'");
@@ -266,8 +287,9 @@ public static class HttpParser
 
             // Each chunk is followed by its own CRLF, and by nothing else: a chunk that runs on
             // past its declared size means the two ends disagree about where it stops.
-            if (await reader.ReadLineAsync(ct).ConfigureAwait(false) is not "")
-                throw new HttpParseException("Chunk not terminated by CRLF.");
+            var chunkEnd = await reader.ReadLineAsync(ct).ConfigureAwait(false);
+            if (chunkEnd is null) throw new HttpPeerClosedException("Connection closed inside a chunked body.");
+            if (chunkEnd.Length != 0) throw new HttpParseException("Chunk not terminated by CRLF.");
         }
     }
 
