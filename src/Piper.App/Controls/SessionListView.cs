@@ -1398,8 +1398,10 @@ public sealed class SessionListView : UserControl
         try { CopyAsNotice?.Invoke(this, Strings.SessionList.CopyAsFailed(target)); }
         catch (Exception)
         {
-            // The failure line is the last report there is. A subscriber that throws on it leaves
-            // nobody to tell, and the task must still end without faulting.
+            // A broad catch is needed: CopyAsNotice is an event, so its subscribers are arbitrary code
+            // and any exception type can come out of them. This is the last report there is, a
+            // subscriber that throws on it leaves nobody to tell, and the fire-and-forget task must
+            // still end without faulting. Nothing here could be retried or recovered.
         }
     }
 

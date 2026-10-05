@@ -36,7 +36,8 @@ jobs:
       # package, and a missing tool fails under CI by design so the security evidence cannot silently
       # skip. Uses the runner image's preinstalled python.exe (the one the tests find on PATH); every
       # package is pinned to an exact version and hash (eng/ci-test-requirements.txt). This workflow
-      # has no secrets, and nothing here reaches release.yml or the shipped product.
+      # has no secrets, and nothing here reaches the shipped product. release.yml runs the same smoke
+      # tests and installs the same file with the same command; keep the two steps identical.
       - name: Install Python requests for the Copy as round trips
         shell: pwsh
         run: python -m pip install --disable-pip-version-check --no-input --require-hashes -r eng/ci-test-requirements.txt

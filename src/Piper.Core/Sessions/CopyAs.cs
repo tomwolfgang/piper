@@ -59,7 +59,7 @@ public enum CopyAsNote
     /// <summary>The cmd.exe command is longer than the prompt accepts.</summary>
     CommandTooLong,
 
-    /// <summary>The cmd.exe command passes values with an exclamation mark through a temporary file.</summary>
+    /// <summary>The cmd.exe command passes the request through a temporary file (an exclamation mark or non-ASCII text).</summary>
     CmdValuesInFile,
 
     /// <summary>Windows PowerShell 5.1 does not send a Cookie header passed to Invoke-WebRequest.</summary>
@@ -443,7 +443,7 @@ public static class CopyAs
         public const string CookieNeedsPowerShell7 = "Windows PowerShell 5.1 does not send a Cookie header given this way; PowerShell 7 does.";
         public const string CommandTooLong = "This command is longer than the 8191 characters cmd.exe accepts; use the PowerShell or bash variant.";
 
-        public const string CmdValuesInFile = "Values with an exclamation mark are passed to curl in a temporary file, because cmd.exe expands them when delayed expansion is on; the file is deleted when curl finishes.";
+        public const string CmdValuesInFile = "This request has values cmd.exe cannot carry safely (an exclamation mark, or text that is not plain ASCII), so the request, headers and credentials included, is passed to curl in a temporary file in your temp folder as plain text. It is deleted when curl finishes, and stays there if the paste is interrupted: delete the piper-* files in that folder then.";
 
         public static string BodyNotCaptured(long kept, long total) =>
             string.Create(CultureInfo.InvariantCulture, $"The request body is not included: only the first {kept} of {total} bytes were captured.");
@@ -469,6 +469,17 @@ public static class CopyAs
 
     private static string RenderCurlBash(Model m)
     {
+        // Under Git for Windows bash runs a native Windows curl.exe, and one built with an ANSI main gets
+        // its command line converted to the ANSI code page, where Windows maps some characters above
+        // ASCII to ASCII ones (U+FF02 becomes a double quote, which closes the quoted argument and lets
+        // the rest of a header become curl options). Bytes above ASCII therefore never go on the command
+        // line: the request goes to curl in a config file, whose bytes curl reads as they are.
+        var headerBytes = m.Headers.Select(h => (byte[])[.. Encoding.ASCII.GetBytes(HeaderPrefix(h.Name, h.Value.Bytes.Length)), .. h.Value.Bytes]).ToList();
+        if (m.HasBody && !m.HasHeader("Content-Type")) headerBytes.Add(Encoding.ASCII.GetBytes("Content-Type:"));
+        var bodyBytes = m.Kind == BodyKind.Text ? Encoding.UTF8.GetBytes(m.BodyText) : [];
+        if (headerBytes.Any(HasNonAscii) || HasNonAscii(bodyBytes) || HasNonAscii(Encoding.UTF8.GetBytes(m.Url + m.Method)))
+            return RenderCurlBashConfig(m, headerBytes, bodyBytes);
+
         var args = new List<string> { "curl " + BashQuote(m.Url), "--globoff" };
         AddCurlMethod(m, args, BashQuote);
         if (m.HasHeader("Accept-Encoding")) args.Add("--compressed");
@@ -488,6 +499,39 @@ public static class CopyAs
         }
 
         return CommentBlock(m, "# ", "\n") + prefix + string.Join(" \\\n  ", args);
+    }
+
+    private static bool HasNonAscii(byte[] bytes) => bytes.Any(b => b > 0x7e);
+
+    private static string RenderCurlBashConfig(Model m, List<byte[]> headers, byte[] body)
+    {
+        // Each character of this string stands for one byte (Latin-1), so the header bytes stay as they
+        // were captured; CurlConfigString only touches ASCII characters.
+        var latin1 = Encoding.Latin1;
+        var config = new StringBuilder();
+        config.Append("url = ").Append(CurlConfigString(m.Url)).Append('\n');
+        config.Append("globoff\n");
+        if (m.IsHead) config.Append("head\n");
+        else if (m.Method != "GET" || m.HasBody) config.Append("request = ").Append(CurlConfigString(m.Method)).Append('\n');
+        if (m.HasHeader("Accept-Encoding")) config.Append("compressed\n");
+        foreach (var header in headers) config.Append("header = ").Append(CurlConfigString(latin1.GetString(header))).Append('\n');
+        if (m.Kind == BodyKind.Text) config.Append("data-raw = ").Append(CurlConfigString(latin1.GetString(body))).Append('\n');
+        var word = BashQuote(latin1.GetBytes(config.ToString()));
+
+        // Without a binary body the config is piped to curl. A binary body needs curl's standard input
+        // for itself, so the config goes to a private temporary file that is removed afterwards.
+        string text;
+        if (m.Kind == BodyKind.Binary)
+        {
+            text = "piperConfig=$(mktemp \"${TMPDIR:-/tmp}/piper-XXXXXXXXXX\") && printf %s " + word + " > \"$piperConfig\" && "
+                + "printf %s " + BashQuote(Base64(m.Body)) + " | base64 -d | curl --config \"$piperConfig\" --data-binary @-; rm -f \"$piperConfig\"";
+        }
+        else
+        {
+            text = "printf %s " + word + " | curl --config -";
+        }
+
+        return CommentBlock(m, "# ", "\n") + text;
     }
 
     // curl sends "Name;" for a header with an empty value; "Name:" would remove the header instead.
@@ -543,36 +587,39 @@ public static class CopyAs
 
     // ---------------------------------------------------------------- curl, cmd.exe
 
+    // A character cmd.exe or a curl.exe built for the ANSI code page cannot be trusted with on a command
+    // line: an exclamation mark (cmd /v:on expands it, see CmdArg), and anything outside printable ASCII,
+    // which Windows can convert with a best-fit mapping to a different character (U+FF02 becomes a
+    // double quote in an ANSI argv, so it could close the quoted argument CmdArg wrote).
+    private static bool NeedsCmdFile(string text)
+    {
+        foreach (var c in text)
+            if (c is < ' ' or > '~' or '!') return true;
+        return false;
+    }
+
     private static string RenderCurlCmd(Model m)
     {
         const string NewLine = "\r\n";
 
-        // cmd.exe with delayed expansion on (cmd /v:on, or the DelayedExpansion registry value) expands
-        // !NAME! after it has read the carets, and no spelling of an exclamation mark survives both that
-        // and the default of delayed expansion off (see CmdArg). So a value that holds one never appears
-        // in the command: it goes to curl in a config file, written as base64 and decoded by certutil
-        // like a binary body, and the command itself holds no exclamation mark at all.
+        // Any value cmd.exe cannot carry safely (see NeedsCmdFile) is never put on the command line. When
+        // there is one, the whole request (URL, method, every header, the text body) goes to curl in a
+        // config file, written as base64 and decoded by certutil like a binary body. curl reads that file
+        // as bytes, so nothing is re-read through the console, cmd.exe or an ANSI code page, and nothing
+        // sensitive stays on the command line. The command is then pure printable ASCII.
         var headers = m.Headers.Select(h => HeaderPrefix(h.Name, h.Value.Bytes.Length) + h.Value.Text).ToList();
         if (m.HasBody && !m.HasHeader("Content-Type")) headers.Add("Content-Type:");
         var sendsMethod = !m.IsHead && (m.Method != "GET" || m.HasBody);
-        var urlInFile = m.Url.Contains('!');
-        var methodInFile = sendsMethod && m.Method.Contains('!');
-        var headersInFile = headers.Any(h => h.Contains('!'));
-        var bodyInFile = m.Kind == BodyKind.Text && m.BodyText.Contains('!');
+        var useFile = NeedsCmdFile(m.Url) || (sendsMethod && NeedsCmdFile(m.Method)) || headers.Any(NeedsCmdFile)
+            || (m.Kind == BodyKind.Text && NeedsCmdFile(m.BodyText));
 
-        var config = new StringBuilder();
-        if (urlInFile) config.Append("url = ").Append(CurlConfigString(m.Url)).Append('\n');
-        if (methodInFile) config.Append("request = ").Append(CurlConfigString(m.Method)).Append('\n');
-        if (headersInFile)
-            foreach (var header in headers) config.Append("header = ").Append(CurlConfigString(header)).Append('\n');
-        if (bodyInFile) config.Append("data-raw = ").Append(CurlConfigString(m.BodyText)).Append('\n');
-
+        // A name nobody can guess, so another user of a shared temporary directory cannot create the
+        // file first and have curl read their config instead.
+        var token = Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(8)).ToLowerInvariant();
         var before = new StringBuilder();
         var deleted = new List<string>();
         void WriteFile(string stem, string extension, byte[] bytes)
         {
-            // The file name comes from the content, so two copies of different content cannot collide
-            // and the snippet stays the same each time it is copied.
             var b64 = stem + ".b64";
             var file = stem + extension;
             var encoded = Base64(bytes);
@@ -582,44 +629,53 @@ public static class CopyAs
                 before.Append(i == 0 ? ">" : ">>").Append(" \"").Append(b64).Append("\" echo ").Append(chunk).Append(NewLine);
             }
             before.Append("certutil -f -decode \"").Append(b64).Append("\" \"").Append(file).Append("\" > nul").Append(NewLine);
-            deleted.Add(b64);
+
+            // The base64 copy is not needed once decoded, so it does not wait for curl to finish.
+            before.Append("del /q \"").Append(b64).Append('"').Append(NewLine);
             deleted.Add(file);
         }
 
         var args = new List<string> { "curl.exe" };
-        if (config.Length > 0)
+        if (useFile)
         {
-            var configBytes = Encoding.UTF8.GetBytes(config.ToString());
-            var stem = "%TEMP%\\piper-args-" + Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(configBytes))[..16].ToLowerInvariant();
-            WriteFile(stem, ".cfg", configBytes);
+            var config = new StringBuilder();
+            config.Append("url = ").Append(CurlConfigString(m.Url)).Append('\n');
+            config.Append("globoff\n");
+            if (m.IsHead) config.Append("head\n");
+            else if (sendsMethod) config.Append("request = ").Append(CurlConfigString(m.Method)).Append('\n');
+            if (m.HasHeader("Accept-Encoding")) config.Append("compressed\n");
+            foreach (var header in headers) config.Append("header = ").Append(CurlConfigString(header)).Append('\n');
+            if (m.Kind == BodyKind.Text) config.Append("data-raw = ").Append(CurlConfigString(m.BodyText)).Append('\n');
+
+            var stem = "%TEMP%\\piper-args-" + token;
+            WriteFile(stem, ".cfg", Encoding.UTF8.GetBytes(config.ToString()));
             args[0] += " --config \"" + stem + ".cfg\"";
             m.Note(CopyAsNote.CmdValuesInFile, Comments.CmdValuesInFile);
         }
-        if (!urlInFile) args[0] += " " + CmdArg(m.Url);
-        args.Add("--globoff");
-        if (m.IsHead) args.Add("--head");
-        else if (sendsMethod && !methodInFile) args.Add("--request " + CmdArg(m.Method));
-        if (m.HasHeader("Accept-Encoding")) args.Add("--compressed");
-        if (!headersInFile)
+        else
+        {
+            args[0] += " " + CmdArg(m.Url);
+            args.Add("--globoff");
+            AddCurlMethod(m, args, CmdArg);
+            if (m.HasHeader("Accept-Encoding")) args.Add("--compressed");
             foreach (var header in headers) args.Add("--header " + CmdArg(header));
+            if (m.Kind == BodyKind.Text) args.Add("--data-raw " + CmdArg(m.BodyText));
+        }
 
         if (m.Kind == BodyKind.Binary)
         {
             // cmd.exe has no way to hold a line break or arbitrary bytes in an argument, so the body is
             // written to a temporary file as base64 and decoded by certutil, which ships with Windows.
-            var stem = "%TEMP%\\piper-body-" + Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(m.Body))[..16].ToLowerInvariant();
+            var stem = "%TEMP%\\piper-body-" + token;
             WriteFile(stem, ".bin", m.Body);
             args.Add("--data-binary \"@" + stem + ".bin\"");
-        }
-        else if (m.Kind == BodyKind.Text && !bodyInFile)
-        {
-            args.Add("--data-raw " + CmdArg(m.BodyText));
         }
 
         if (string.Join(" ", args).Length > CmdLineWarningLength)
             m.Note(CopyAsNote.CommandTooLong, Comments.CommandTooLong);
 
-        var after = deleted.Count == 0 ? string.Empty : NewLine + "del /q " + string.Join(" ", deleted.Select(f => "\"" + f + "\""));
+        // The files go whether or not curl succeeded; only an interrupted paste can leave them behind.
+        var after = deleted.Count == 0 ? string.Empty : " & del /q " + string.Join(" ", deleted.Select(f => "\"" + f + "\""));
         return CommentBlock(m, "REM ", NewLine) + before + string.Join(" ^" + NewLine + "  ", args) + after;
     }
 
@@ -644,10 +700,17 @@ public static class CopyAs
     /// an environment variable to the request's host. The caller moves such a value out of the command
     /// line instead (see <c>RenderCurlCmd</c>). The same limit applies to a <c>%TEMP%</c> whose path holds
     /// an exclamation mark, which the temporary files of the snippet are named from.
+    /// <para>
+    /// Nor may it hold a character outside printable ASCII (a tab, a control character, or anything above
+    /// <c>~</c>). A program built with an ANSI <c>main</c> (Git for Windows' curl.exe is one) gets its
+    /// command line converted to the ANSI code page, where Windows maps some characters to ASCII ones
+    /// (U+FF02 becomes a double quote, U+FF3C and U+00A5 a backslash, on some code pages), and that would
+    /// undo the quoting written here. Such a value goes through the config file as well.
+    /// </para>
     /// </remarks>
     internal static string CmdArg(string text)
     {
-        if (text.Contains('!')) throw new ArgumentException("An exclamation mark cannot be quoted for cmd.exe.", nameof(text));
+        if (NeedsCmdFile(text)) throw new ArgumentException("An exclamation mark or a character outside printable ASCII cannot be quoted for cmd.exe.", nameof(text));
 
         var quoted = new StringBuilder(text.Length + 2).Append('"');
         for (var i = 0; i < text.Length; i++)

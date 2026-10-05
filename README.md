@@ -264,11 +264,22 @@ targets, so `Invoke-WebRequest -Proxy` would never reach Piper.
   The cmd variant is for the interactive prompt, not a batch file. It is correct whether or not the
   prompt has delayed expansion on (`cmd /v:on`, or the `DelayedExpansion` registry value; off by
   default): cmd.exe would expand `!NAME!` there and send that environment variable to the request's
-  host, and no caret spelling of `!` is right in both modes, so a URL, header or text body that holds
-  an exclamation mark is passed to curl in a temporary config file (written as base64, decoded with
-  `certutil`, deleted when curl finishes) and the pasted command has no `!` in it, with a REM line
-  saying so. The temporary files live in `%TEMP%`, so a `%TEMP%` path that itself holds `!` is the one
-  case this cannot cover
+  host, and no caret spelling of `!` is right in both modes. Non-ASCII text is a second hazard: a
+  curl.exe built for the ANSI code page (Git for Windows' is) has its command line converted by
+  Windows, which maps some characters to ASCII ones (U+FF02 becomes a double quote), so a header
+  could close its quoted argument and add curl options. So when a URL, header or text body holds an
+  exclamation mark or anything outside printable ASCII, the whole request is passed to curl in a
+  temporary config file and the pasted command is plain ASCII with no `!` in it (a REM line says so).
+  That file holds the headers, **Cookie and Authorization included, as plain text**, in your temp
+  folder with the folder's inherited permissions, under a random name (`%TEMP%\piper-args-<random>.cfg`;
+  a base64 copy, `.b64`, is deleted as soon as it is decoded). It is deleted when curl finishes,
+  whether or not curl succeeded, but an interrupted paste can leave it: delete `%TEMP%\piper-*`.
+  If certutil fails curl reads no file and sends nothing. A `%TEMP%` path that itself holds `!` is
+  not covered, and a `%TEMP%` with non-ASCII characters works with Windows' own curl.exe but not
+  with Git's curl.exe, which then cannot read the config and sends nothing. The bash variant does the
+  same for bytes above ASCII: it pipes a config to `curl --config -` (with a binary body, through a
+  `mktemp` file that is removed afterwards) so that Git for Windows' bash never hands them to an
+  ANSI curl.exe on its command line
 - Importing and exporting Fiddler SAZ session archives, by drag-and-drop or **File > Open SAZ
   capture...**; a request-only `.raz` capture is appended to the Composer's history (no responses
   to inspect, but readily reloaded and resent) rather than the main request list. That history

@@ -367,7 +367,7 @@
     "copyAsNoteHostHeaderDropped": "A Host header that differs from the URL was not copied.",
     "copyAsNoteNonAsciiMayChange": "Non-ASCII header text may be changed by the shell or runtime.",
     "copyAsNoteCommandTooLong": "The command is longer than cmd.exe accepts.",
-    "copyAsNoteCmdValuesInFile": "Values with an exclamation mark are passed to curl in a temporary file.",
+    "copyAsNoteCmdValuesInFile": "The request has values cmd.exe cannot carry safely, so it is passed to curl in a temporary file in your temp folder that holds the headers, credentials included, as plain text.",
     "copyAsClipboardFailed": "Could not copy the request as {{target}}: the clipboard is in use by another program. Try again.",
     "copyAsFailed": "Could not copy the request as {{target}}.",
     "copyAsNoteUpgradeDropped": "The Upgrade and Connection headers were not copied, so the request will not switch protocols.",
