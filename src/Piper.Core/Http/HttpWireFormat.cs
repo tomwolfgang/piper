@@ -40,20 +40,24 @@ public static class HttpWireFormat
             return false;
         }
 
-        var statusLine = lines[0].Split(' ', 3);
-        if (statusLine.Length < 2 || !statusLine[0].StartsWith("HTTP/", StringComparison.OrdinalIgnoreCase)
-            || !int.TryParse(statusLine[1], out var status))
+        if (!HttpSyntax.TryParseStatusLine(lines[0], lenient: true, out var start, out var statusError))
         {
-            error = $"'{lines[0]}' is not an HTTP status line";
+            error = $"'{HttpParser.Truncate(lines[0])}' is not an HTTP status line ({statusError})";
             return false;
         }
 
-        response.HttpVersion = statusLine[0];
-        response.StatusCode = status;
-        response.ReasonPhrase = statusLine.Length > 2 ? statusLine[2] : ReasonPhrases.ForOrClass(status);
-        response.Headers = lines.Length > 1
-            ? HeaderCollection.Parse(string.Join("\r\n", lines[1..]))
-            : new HeaderCollection();
+        response.HttpVersion = start.Version;
+        response.StatusCode = start.StatusCode;
+        response.ReasonPhrase = start.Reason ?? ReasonPhrases.ForOrClass(start.StatusCode);
+        if (lines.Length > 1)
+        {
+            if (!HeaderCollection.TryParse(string.Join("\r\n", lines[1..]), out var headers, out error)) return false;
+            response.Headers = headers;
+        }
+        else
+        {
+            response.Headers = new HeaderCollection();
+        }
         response.Body = raw[bodyStart..];
         return true;
     }

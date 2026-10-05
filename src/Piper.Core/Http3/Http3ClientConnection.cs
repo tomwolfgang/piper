@@ -339,8 +339,8 @@ public sealed class Http3ClientConnection : IAsyncDisposable
                     }
 
                     var status = decoded.FirstOrDefault(f => f.Name == ":status").Value;
-                    if (!int.TryParse(status, NumberStyles.None, CultureInfo.InvariantCulture, out var code))
-                        throw new HttpParseException("HTTP/3 response carries no valid :status.");
+                    if (!HttpSyntax.TryParseStatusCode(status, out var code))
+                        throw new HttpParseException("HTTP/3 response carries no valid :status (three digits, 100 to 599).");
 
                     // 1xx are interim (RFC 9114 §4.1.2): keep reading for the real response.
                     if (code is >= 100 and < 200)

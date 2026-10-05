@@ -112,29 +112,111 @@ public sealed class HeaderCollection : IEnumerable<HttpHeader>
         return sb.ToString();
     }
 
-    /// <summary>Parses a "Name: Value" block. Handles obs-fold continuation lines.</summary>
-    public static HeaderCollection Parse(string block)
+    /// <summary>The most header lines <see cref="Parse"/> accepts; the same cap the stream parser uses.</summary>
+    public const int MaxParsedHeaders = HttpSyntax.MaxHeaderCount;
+
+    /// <summary>The longest block, in characters, <see cref="Parse"/> accepts. Matches the largest head
+    /// the stream parser reads, so no caller sees a block the proxy itself would have refused.</summary>
+    public const int MaxParsedBlockLength = HttpParser.MaxResponseHeadBytes;
+
+    /// <summary>
+    /// Parses a "Name: Value" block, tolerating what a hand-edited or archived block contains: blank
+    /// lines, lines with no colon (skipped) and obsolete line folding. Throws
+    /// <see cref="HttpParseException"/> past <see cref="MaxParsedHeaders"/> headers or
+    /// <see cref="MaxParsedBlockLength"/> characters. The input is a SAZ archive, a multipart part, a
+    /// file or text the user pasted, so it is bounded like anything else a peer sends.
+    /// </summary>
+    public static HeaderCollection Parse(string block) =>
+        TryParse(block, out var headers, out var error) ? headers : throw new HttpParseException(error);
+
+    /// <summary><see cref="Parse"/> that reports why instead of throwing.</summary>
+    public static bool TryParse(string block, out HeaderCollection headers, out string error)
     {
-        var result = new HeaderCollection();
-        var lines = block.Replace("\r\n", "\n").Split('\n');
-        foreach (var line in lines)
+        headers = new HeaderCollection();
+        error = string.Empty;
+
+        if (block.Length > MaxParsedBlockLength)
+        {
+            error = $"The header block is larger than {MaxParsedBlockLength} characters.";
+            return false;
+        }
+
+        var builder = new HeaderBlockBuilder(lenient: true);
+        foreach (var line in block.Replace("\r\n", "\n").Split('\n'))
         {
             if (line.Length == 0) continue;
-            if ((line[0] == ' ' || line[0] == '\t') && result.Count > 0)
+            if (builder.AddLine(line) is { } problem)
             {
-                // Obsolete line folding: append to the previous value.
-                var prev = result._items[^1];
-                result._items[^1] = prev with { Value = prev.Value + " " + line.Trim() };
-                continue;
+                error = problem;
+                return false;
             }
-            var colon = line.IndexOf(':');
-            if (colon <= 0) continue;
-            result.Add(line[..colon].Trim(), line[(colon + 1)..].Trim());
         }
-        return result;
+
+        headers = builder.Complete();
+        return true;
     }
 
     public IEnumerator<HttpHeader> GetEnumerator() => _items.GetEnumerator();
 
     IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
+}
+
+/// <summary>
+/// Builds a <see cref="HeaderCollection"/> from header lines one at a time, so the stream parser
+/// (which reads lines off a socket) and <see cref="HeaderCollection.Parse"/> (which has a whole
+/// block) share one set of rules and one header cap.
+/// </summary>
+/// <remarks>
+/// A header is held back until the next one starts, so that obsolete line folding appends each
+/// continuation to a <see cref="StringBuilder"/> rather than rebuilding the value as a new string
+/// every time, which took time proportional to the square of the number of folded lines.
+/// </remarks>
+internal sealed class HeaderBlockBuilder(bool lenient)
+{
+    private readonly HeaderCollection _headers = new();
+    private string? _name;
+    private string _value = string.Empty;
+    private StringBuilder? _folded;
+
+    /// <summary>Takes one non-blank line. Returns null, or the reason the block must be refused.</summary>
+    public string? AddLine(string line)
+    {
+        if (line[0] is ' ' or '\t' && _name is not null)
+        {
+            // Obsolete line folding (RFC 9112 5.2): the line continues the previous value.
+            _folded ??= new StringBuilder(_value);
+            _folded.Append(' ').Append(line.AsSpan().Trim());
+            return null;
+        }
+
+        if (line[0] is ' ' or '\t' && !lenient) return "Header block starts with a folded line.";
+
+        var colon = line.IndexOf(':');
+        if (colon <= 0)
+            return lenient ? null : $"Malformed header line: '{HttpParser.Truncate(line)}'";
+
+        Flush();
+        if (_headers.Count >= HttpSyntax.MaxHeaderCount) return "Too many headers.";
+
+        _name = lenient ? line[..colon].Trim() : line[..colon].TrimEnd();
+        _value = line[(colon + 1)..].Trim();
+        return null;
+    }
+
+    /// <summary>Ends the block and returns what was read.</summary>
+    public HeaderCollection Complete()
+    {
+        Flush();
+        return _headers;
+    }
+
+    private void Flush()
+    {
+        if (_name is null) return;
+
+        _headers.Add(_name, _folded?.ToString() ?? _value);
+        _name = null;
+        _value = string.Empty;
+        _folded = null;
+    }
 }

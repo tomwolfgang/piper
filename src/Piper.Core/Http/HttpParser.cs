@@ -11,6 +11,12 @@ public static class HttpParser
     /// count were already capped, which on their own allowed hundreds of megabytes of headers.</summary>
     private const int MaxRequestHeadBytes = 64 * 1024;
 
+    /// <summary>The most a status line and its headers may add up to. Larger than a request's, as
+    /// responses carry more (cookies, CSP, link headers) and browsers allow about this much, but not
+    /// unbounded: a folded line is not counted as a header, so without a byte cap one header could
+    /// grow for ever.</summary>
+    internal const int MaxResponseHeadBytes = 256 * 1024;
+
     /// <summary>
     /// How many interim (1xx) responses may precede the real one before the exchange is treated as
     /// hostile. RFC 9112 puts no limit on them, so without a cap an origin can hold a connection
@@ -49,18 +55,17 @@ public static class HttpParser
             if (consumed > MaxRequestHeadBytes) throw new HttpParseException($"Request head exceeded {MaxRequestHeadBytes} bytes.");
         } while (line.Length == 0);
 
-        var parts = line.Split(' ', 3, StringSplitOptions.RemoveEmptyEntries);
-        if (parts.Length < 2)
-            throw new HttpParseException($"Malformed request line: '{Truncate(line)}'");
+        if (!HttpSyntax.TryParseRequestLine(line, lenient: false, "HTTP/1.0", out var start, out var startError))
+            throw new HttpParseException(startError);
 
         var request = new HttpRequestData
         {
-            Method = parts[0],
-            RequestTarget = parts[1],
-            HttpVersion = parts.Length > 2 ? parts[2] : "HTTP/1.0",
+            Method = start.Method,
+            RequestTarget = start.Target,
+            HttpVersion = start.Version,
         };
 
-        request.Headers = await ReadHeadersAsync(reader, ct, MaxRequestHeadBytes - consumed).ConfigureAwait(false);
+        request.Headers = await ReadHeadersAsync(reader, ct, MaxRequestHeadBytes - consumed, "Request").ConfigureAwait(false);
         request.Url = ResolveUrl(request);
         return request;
     }
@@ -98,18 +103,19 @@ public static class HttpParser
                 if (line is null) throw new HttpParseException("Connection closed before a response was received.");
             } while (line.Length == 0);
 
-            var parts = line.Split(' ', 3);
-            if (parts.Length < 2 || !int.TryParse(parts[1], NumberStyles.None, CultureInfo.InvariantCulture, out var status))
-                throw new HttpParseException($"Malformed status line: '{Truncate(line)}'");
+            if (!HttpSyntax.TryParseStatusLine(line, lenient: false, out var start, out var startError))
+                throw new HttpParseException(startError);
+            var status = start.StatusCode;
 
             var response = new HttpResponseData
             {
-                HttpVersion = parts[0],
+                HttpVersion = start.Version,
                 StatusCode = status,
-                ReasonPhrase = parts.Length > 2 ? parts[2] : string.Empty,
+                ReasonPhrase = start.Reason ?? string.Empty,
             };
 
-            response.Headers = await ReadHeadersAsync(reader, ct).ConfigureAwait(false);
+            response.Headers = await ReadHeadersAsync(
+                reader, ct, MaxResponseHeadBytes - line.Length - 2, "Response").ConfigureAwait(false);
 
             // 1xx are interim: consume and read the real response that follows. 101 is the
             // exception -- it shares the 1xx range but is final, because it hands the connection
@@ -167,13 +173,34 @@ public static class HttpParser
     /// request with no framing headers has no body at all: a request can never be delimited by the
     /// connection closing, because the client still has to read the answer on it.
     /// </summary>
+    /// <exception cref="HttpParseException">
+    /// The framing is ambiguous, which for a request is refused outright (RFC 9112 6.3): a
+    /// Content-Length that is unreadable or repeated with different values, a Content-Length beside a
+    /// Transfer-Encoding, or a Transfer-Encoding that does not include chunked. Reading
+    /// such a request one way while its sender (or a proxy in front of Piper) reads it another
+    /// leaves the bytes between the two readings to be parsed as the next request on the connection.
+    /// Identical repeated Content-Length values are one length and are accepted.
+    /// </exception>
     public static HttpBodyDescriptor DescribeRequestBody(HeaderCollection headers)
     {
-        if (headers.HasToken("Transfer-Encoding", "chunked")) return HttpBodyDescriptor.Chunked;
+        var hasContentLength = headers.Contains("Content-Length");
 
-        if (TryReadContentLength(headers, out var length)) return HttpBodyDescriptor.OfLength(length);
+        if (headers.Contains("Transfer-Encoding"))
+        {
+            if (hasContentLength)
+                throw new HttpParseException("Request carries both Content-Length and Transfer-Encoding.");
+            if (!headers.HasToken("Transfer-Encoding", "chunked"))
+                throw new HttpParseException("Request Transfer-Encoding does not include chunked.");
+            return HttpBodyDescriptor.Chunked;
+        }
 
-        return HttpBodyDescriptor.None;
+        if (!hasContentLength) return HttpBodyDescriptor.None;
+
+        if (headers.GetValues("Content-Length").Distinct(StringComparer.Ordinal).Count() == 1
+            && TryReadContentLength(headers, out var length))
+            return HttpBodyDescriptor.OfLength(length);
+
+        throw new HttpParseException("Request has an invalid or conflicting Content-Length.");
     }
 
     /// <summary>
@@ -188,32 +215,22 @@ public static class HttpParser
                && long.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out length);
     }
 
+    /// <summary>Reads header lines up to the blank line, within <paramref name="budget"/> bytes in
+    /// total (folded lines included) and <see cref="HttpSyntax.MaxHeaderCount"/> headers.</summary>
     private static async Task<HeaderCollection> ReadHeadersAsync(
-        HttpStreamReader reader, CancellationToken ct, long budget = long.MaxValue)
+        HttpStreamReader reader, CancellationToken ct, long budget, string what)
     {
-        var headers = new HeaderCollection();
+        var builder = new HeaderBlockBuilder(lenient: false);
         while (true)
         {
             var line = await reader.ReadLineAsync(ct).ConfigureAwait(false);
-            if (line is null) throw new HttpParseException("Connection closed inside the header block.");
-            if (line.Length == 0) return headers;
+            if (line is null) throw new HttpPeerClosedException("Connection closed inside the header block.");
+            if (line.Length == 0) return builder.Complete();
 
             budget -= line.Length + 2;
-            if (budget < 0) throw new HttpParseException($"Request head exceeded {MaxRequestHeadBytes} bytes.");
+            if (budget < 0) throw new HttpParseException($"{what} head exceeded its size limit.");
 
-            if (line[0] == ' ' || line[0] == '\t')
-            {
-                if (headers.Count == 0) throw new HttpParseException("Header block starts with a folded line.");
-                var last = headers.Count - 1;
-                headers[last] = headers[last] with { Value = headers[last].Value + " " + line.Trim() };
-                continue;
-            }
-
-            var colon = line.IndexOf(':');
-            if (colon <= 0) throw new HttpParseException($"Malformed header line: '{Truncate(line)}'");
-            headers.Add(line[..colon].TrimEnd(), line[(colon + 1)..].Trim());
-
-            if (headers.Count > 200) throw new HttpParseException("Too many headers.");
+            if (builder.AddLine(line) is { } problem) throw new HttpParseException(problem);
         }
     }
 
@@ -249,14 +266,10 @@ public static class HttpParser
         while (true)
         {
             var sizeLine = await reader.ReadLineAsync(ct).ConfigureAwait(false);
-            if (sizeLine is null) throw new HttpParseException("Connection closed inside a chunked body.");
+            if (sizeLine is null) throw new HttpPeerClosedException("Connection closed inside a chunked body.");
 
-            // Strip any chunk extensions after ';'.
-            var semi = sizeLine.IndexOf(';');
-            var sizeText = (semi >= 0 ? sizeLine[..semi] : sizeLine).Trim();
-
-            if (!int.TryParse(sizeText, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var chunkSize))
-                throw new HttpParseException($"Bad chunk size: '{Truncate(sizeText)}'");
+            if (!HttpSyntax.TryParseChunkSize(sizeLine, out var chunkSize))
+                throw new HttpParseException($"Bad chunk size: '{Truncate(sizeLine)}'");
 
             if (chunkSize == 0)
             {
@@ -268,13 +281,15 @@ public static class HttpParser
             if (body.Length + chunkSize > MaxBodyBytes)
                 throw new HttpParseException("Chunked body exceeded the size cap.");
 
-            var chunk = await reader.ReadExactlyAsync(chunkSize, ct).ConfigureAwait(false);
+            // chunkSize is within MaxBodyBytes here (checked above), so it fits an int.
+            var chunk = await reader.ReadExactlyAsync((int)chunkSize, ct).ConfigureAwait(false);
             body.Write(chunk, 0, chunk.Length);
 
             // Each chunk is followed by its own CRLF, and by nothing else: a chunk that runs on
             // past its declared size means the two ends disagree about where it stops.
-            if (await reader.ReadLineAsync(ct).ConfigureAwait(false) is not "")
-                throw new HttpParseException("Chunk not terminated by CRLF.");
+            var chunkEnd = await reader.ReadLineAsync(ct).ConfigureAwait(false);
+            if (chunkEnd is null) throw new HttpPeerClosedException("Connection closed inside a chunked body.");
+            if (chunkEnd.Length != 0) throw new HttpParseException("Chunk not terminated by CRLF.");
         }
     }
 

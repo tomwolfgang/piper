@@ -159,6 +159,24 @@ internal static class Http2ClientHardeningTests
             var failure = await FailureOfAsync(many, null, Get());
             runner.IsTrue(failure is Http2ProtocolException, $"an endless run of 1xx responses is refused (was: {Describe(failure)})");
         });
+
+        await runner.RunAsync("h2 client: a :status that is not three digits in 100-599 is refused, not read as an interim response", async () =>
+        {
+            // "0150" was read (culture-sensitively) as 150 and skipped as an interim response; the shared
+            // parser says it is not a status at all.
+            foreach (var badStatus in new[] { "0150", "+150", "0", "99", "600", "999", "20x", "" })
+            {
+                await using var peer = new Peer(async p =>
+                {
+                    await p.WaitForRequestHeadAsync();
+                    await p.SendHeaderBlockAsync(HpackEncoder.Encode([(":status", badStatus)]), Http2FrameFlags.None);
+                    await p.SendHeaderBlockAsync(HpackEncoder.Encode([(":status", "200")]), Http2FrameFlags.EndStream);
+                });
+                var failure = await FailureOfAsync(peer, null, Get());
+                runner.IsTrue(failure is HttpParseException or Http2ProtocolException,
+                    $":status '{badStatus}' is refused (was: {Describe(failure)})");
+            }
+        });
     }
 
     // ------------------------------------------------------------------ frame sequencing
