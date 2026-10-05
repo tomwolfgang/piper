@@ -144,6 +144,7 @@ public sealed class HttpStreamReader : IDisposable
     /// <summary>Reads exactly <paramref name="count"/> bytes, throwing if the stream ends early.</summary>
     public async ValueTask<byte[]> ReadExactlyAsync(int count, CancellationToken ct)
     {
+        ArgumentOutOfRangeException.ThrowIfNegative(count);
         if (count == 0) return [];
         var result = new byte[count];
         var offset = 0;

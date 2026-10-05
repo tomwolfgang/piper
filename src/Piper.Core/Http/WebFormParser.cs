@@ -103,7 +103,8 @@ public static class WebFormParser
         }
         if (split < 0) return;
 
-        var headers = HeaderCollection.Parse(Encoding.Latin1.GetString(part[..split]));
+        // A part whose own headers are past the cap is skipped like any other part that is not a field.
+        if (!HeaderCollection.TryParse(Encoding.Latin1.GetString(part[..split]), out var headers, out _)) return;
         var disposition = headers["Content-Disposition"];
         if (disposition is null || !TryGetParameter(disposition, "name", out var name)) return;
 

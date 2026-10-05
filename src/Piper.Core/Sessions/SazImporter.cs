@@ -224,14 +224,14 @@ public static partial class SazImporter
     {
         var (head, body) = SplitWireMessage(raw, limits);
         var lines = head.Replace("\r\n", "\n").Split('\n');
-        var parts = lines[0].Split(' ', 3, StringSplitOptions.RemoveEmptyEntries);
-        if (parts.Length < 2) throw new HttpParseException("Malformed request line.");
+        if (!HttpSyntax.TryParseRequestLine(lines[0], lenient: true, "HTTP/1.0", out var start, out var startError))
+            throw new HttpParseException(startError);
 
         var request = new HttpRequestData
         {
-            Method = parts[0],
-            RequestTarget = parts[1],
-            HttpVersion = parts.Length > 2 ? parts[2] : "HTTP/1.0",
+            Method = start.Method,
+            RequestTarget = start.Target,
+            HttpVersion = start.Version,
             Headers = HeaderCollection.Parse(string.Join('\n', lines.Skip(1))),
             Body = body,
         };
@@ -243,15 +243,14 @@ public static partial class SazImporter
     {
         var (head, body) = SplitWireMessage(raw, limits);
         var lines = head.Replace("\r\n", "\n").Split('\n');
-        var parts = lines[0].Split(' ', 3, StringSplitOptions.RemoveEmptyEntries);
-        if (parts.Length < 2 || !int.TryParse(parts[1], out var status))
-            throw new HttpParseException("Malformed response line.");
+        if (!HttpSyntax.TryParseStatusLine(lines[0], lenient: true, out var start, out var startError))
+            throw new HttpParseException(startError);
 
         return new HttpResponseData
         {
-            HttpVersion = parts[0],
-            StatusCode = status,
-            ReasonPhrase = parts.Length > 2 ? parts[2] : string.Empty,
+            HttpVersion = start.Version,
+            StatusCode = start.StatusCode,
+            ReasonPhrase = start.Reason ?? string.Empty,
             Headers = HeaderCollection.Parse(string.Join('\n', lines.Skip(1))),
             Body = body,
         };

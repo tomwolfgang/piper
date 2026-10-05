@@ -173,8 +173,8 @@ public static class Http2MessageAdapter
         {
             if (string.Equals(name, ":status", StringComparison.Ordinal))
             {
-                if (value.Length != 3 || !value.All(char.IsAsciiDigit)) throw Malformed(":status is not three digits");
-                response.StatusCode = int.Parse(value, CultureInfo.InvariantCulture);
+                if (!HttpSyntax.TryParseStatusCode(value, out var status)) throw Malformed(":status is not a status code from 100 to 599");
+                response.StatusCode = status;
                 response.ReasonPhrase = ReasonPhraseFor(response.StatusCode);
             }
             else if (name.Length > 0 && name[0] == ':')

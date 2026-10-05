@@ -536,8 +536,11 @@ public sealed class ComposerPanel : UserControl
         {
             Method = _method.Text.Trim().ToUpperInvariant(),
             HttpVersion = "HTTP/1.1",
-            Headers = HeaderCollection.Parse(_headers.Text),
         };
+
+        // Past the shared header cap, Parse would throw out of this button handler.
+        if (!HeaderCollection.TryParse(_headers.Text, out var headers, out error)) return false;
+        request.Headers = headers;
 
         error = string.Empty;
         var url = _url.Text.Trim();

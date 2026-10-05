@@ -153,12 +153,8 @@ public static class HttpBodyRelay
             var sizeLine = await source.ReadLineAsync(ct).ConfigureAwait(false);
             if (sizeLine is null) throw new HttpParseException("Connection closed inside a chunked body.");
 
-            var semi = sizeLine.IndexOf(';');
-            var sizeText = (semi >= 0 ? sizeLine[..semi] : sizeLine).Trim();
-
-            if (!int.TryParse(sizeText, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var chunkSize)
-                || chunkSize < 0)
-                throw new HttpParseException($"Bad chunk size: '{HttpParser.Truncate(sizeText)}'");
+            if (!HttpSyntax.TryParseChunkSize(sizeLine, out var chunkSize))
+                throw new HttpParseException($"Bad chunk size: '{HttpParser.Truncate(sizeLine)}'");
 
             if (chunkSize == 0)
             {
@@ -172,7 +168,7 @@ public static class HttpBodyRelay
             var remaining = chunkSize;
             while (remaining > 0)
             {
-                var want = Math.Min(buffer.Length, remaining);
+                var want = (int)Math.Min(buffer.Length, remaining);
                 var read = await source.ReadAsync(buffer.AsMemory(0, want), ct).ConfigureAwait(false);
                 if (read == 0)
                     throw new HttpParseException($"Connection closed {remaining} bytes into a chunk.");
