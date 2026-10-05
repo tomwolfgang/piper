@@ -144,13 +144,14 @@ public sealed class HttpStreamReader : IDisposable
     /// <summary>Reads exactly <paramref name="count"/> bytes, throwing if the stream ends early.</summary>
     public async ValueTask<byte[]> ReadExactlyAsync(int count, CancellationToken ct)
     {
+        ArgumentOutOfRangeException.ThrowIfNegative(count);
         if (count == 0) return [];
         var result = new byte[count];
         var offset = 0;
         while (offset < count)
         {
             var n = await ReadAsync(result.AsMemory(offset, count - offset), ct).ConfigureAwait(false);
-            if (n == 0) throw new HttpParseException($"Stream ended after {offset} of {count} expected body bytes.");
+            if (n == 0) throw new HttpPeerClosedException($"Stream ended after {offset} of {count} expected body bytes.");
             offset += n;
         }
         return result;
@@ -244,3 +245,11 @@ public class HttpParseException : Exception
 /// is a type of its own so that a caller can tell a silent peer from a malformed message.
 /// </summary>
 public sealed class HttpStalledException(string message) : HttpParseException(message);
+
+/// <summary>
+/// The peer closed the connection in the middle of a message. A <see cref="HttpParseException"/>, so
+/// every existing handler still treats it as a failed read; a type of its own so that a proxy can
+/// tell a peer that left (nobody to answer, nothing worth a 400) from one that sent framing it
+/// refuses.
+/// </summary>
+public sealed class HttpPeerClosedException(string message) : HttpParseException(message);

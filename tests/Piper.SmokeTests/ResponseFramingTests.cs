@@ -69,9 +69,12 @@ internal static class ResponseFramingTests
             {
                 runner.IsTrue(Rejects($"Content-Length: {bad}"),
                     $"a response with Content-Length '{bad}' is rejected");
-                runner.AreEqual(HttpBodyFraming.None,
-                    HttpParser.DescribeRequestBody(HeaderCollection.Parse($"Content-Length: {bad}")).Framing,
-                    $"a request with Content-Length '{bad}' carries no body");
+                // Not "no body": a request read as bodiless while its sender believes it has one leaves
+                // the body to be parsed as the next request. It is refused (see ParserBoundsTests).
+                var refused = false;
+                try { HttpParser.DescribeRequestBody(HeaderCollection.Parse($"Content-Length: {bad}")); }
+                catch (HttpParseException) { refused = true; }
+                runner.IsTrue(refused, $"a request with Content-Length '{bad}' is refused");
             }
 
             // A value too large for Int64 is likewise not a length.

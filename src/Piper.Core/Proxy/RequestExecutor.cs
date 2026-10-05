@@ -194,17 +194,16 @@ public sealed class RequestExecutor(ProxyOptions options, SessionStore store)
             return false;
         }
 
-        var parts = startLine.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-        if (parts.Length < 2)
-        {
-            error = $"Malformed request line: '{startLine}'";
+        if (!HttpSyntax.TryParseRequestLine(startLine, lenient: true, "HTTP/1.1", out var start, out error))
             return false;
-        }
 
-        request.Method = parts[0].ToUpperInvariant();
-        request.RequestTarget = parts[1];
-        request.HttpVersion = parts.Length > 2 ? parts[2] : "HTTP/1.1";
-        request.Headers = HeaderCollection.Parse(string.Join("\n", lines.Skip(1)));
+        if (!HeaderCollection.TryParse(string.Join("\n", lines.Skip(1)), out var headers, out error))
+            return false;
+
+        request.Method = start.Method.ToUpperInvariant();
+        request.RequestTarget = start.Target;
+        request.HttpVersion = start.Version;
+        request.Headers = headers;
         request.Body = body.Length > 0 ? Encoding.UTF8.GetBytes(body) : [];
 
         request.Url = HttpParser.ResolveUrl(request);

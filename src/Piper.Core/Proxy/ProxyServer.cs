@@ -677,12 +677,32 @@ public sealed class ProxyServer : IAsyncDisposable
                 await TryReplyAsync(clientStream, RequestTimeout("The request head was not received in time.")).ConfigureAwait(false);
                 return null;
             }
+            catch (HttpParseException ex) when (ex is not HttpPeerClosedException and not HttpStalledException)
+            {
+                // A head the grammar refuses (a bad request line, too many headers, a head over its
+                // cap). There is no request to show, so the session carries a placeholder.
+                await FailRequestAsync(
+                    new HttpRequestData { Method = "-", RequestTarget = "(malformed request head)" },
+                    BadRequest(ex), $"The request head is malformed: {ex.Message}").ConfigureAwait(false);
+                return null;
+            }
         }
 
         if (request is null) return null;
 
         reader.IdleTimeout = _options.IdleTimeout;
-        var body = HttpParser.DescribeRequestBody(request.Headers);
+        HttpBodyDescriptor body;
+        try
+        {
+            body = HttpParser.DescribeRequestBody(request.Headers);
+        }
+        catch (HttpParseException ex)
+        {
+            // Ambiguous framing. Reading it either way would leave the client's idea of where the body
+            // ends and ours to disagree, and what lies between them would be parsed as the next request.
+            await FailRequestAsync(request, BadRequest(ex), $"The request framing is ambiguous: {ex.Message}").ConfigureAwait(false);
+            return null;
+        }
 
         // A body is asked for no more than it has, and what came in with the head already counts: a
         // small body, or one whose first bytes arrived with its headers, must not be cut for being slow.
@@ -697,24 +717,44 @@ public sealed class ProxyServer : IAsyncDisposable
         catch (HttpStalledException ex)
         {
             clientStream.DisarmProgressFloor();
-            var reply = RequestTimeout("The request body stopped arriving.");
-            request.Url = locate?.Invoke(request) ?? request.Url;
+            await FailRequestAsync(
+                request, RequestTimeout("The request body stopped arriving."),
+                $"The client stopped sending the request body: {ex.Message}").ConfigureAwait(false);
+            return null;
+        }
+        catch (HttpParseException ex) when (ex is not HttpPeerClosedException)
+        {
+            // A body the framing rules refuse (a bad or oversized chunk size, a chunk that does not
+            // end where it said, a length past the cap). The client is the one at fault, so it gets
+            // a 400, and the session is recorded: the request is there to show, and a connection
+            // that just vanished would leave nothing to explain it. A client that merely left
+            // (HttpPeerClosedException) is not answered and not recorded: it propagates as before.
+            clientStream.DisarmProgressFloor();
+            await FailRequestAsync(request, BadRequest(ex), $"The request body is malformed: {ex.Message}").ConfigureAwait(false);
+            return null;
+        }
+
+        return request;
+
+        static HttpResponseData BadRequest(HttpParseException ex) =>
+            HttpResponseData.Simple(400, "Bad Request", $"Piper closed this connection: {ex.Message}");
+
+        async Task FailRequestAsync(HttpRequestData failedRequest, HttpResponseData reply, string error)
+        {
+            failedRequest.Url = locate?.Invoke(failedRequest) ?? failedRequest.Url;
             _store.Add(new Session
             {
-                Request = request,
+                Request = failedRequest,
                 Response = reply,
                 IsHttps = isHttps,
                 ClientEndpoint = clientEndpoint,
                 ProcessName = processName,
                 State = SessionState.Failed,
-                Error = $"The client stopped sending the request body: {ex.Message}",
+                Error = error,
                 Completed = DateTimeOffset.Now,
             });
             await TryReplyAsync(clientStream, reply).ConfigureAwait(false);
-            return null;
         }
-
-        return request;
     }
 
     private static HttpResponseData RequestTimeout(string reason) =>
