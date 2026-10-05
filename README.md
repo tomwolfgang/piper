@@ -27,7 +27,7 @@ keeping familiar workflows and file formats.
 | HTTPS debugging proxy | Capture, inspect, filter, replay, compose, and mock HTTP/HTTPS traffic |
 | Fiddler Classic migration | Import and export Fiddler SAZ archives (`.saz` full sessions, `.raz` request-only); Fiddler-compatible AutoResponder rules |
 | Protocols | HTTP/1.1, HTTP/2, and upstream HTTP/3 |
-| Developer tools | Composer, AutoResponder, search, and Copy as curl |
+| Developer tools | Composer, AutoResponder, search, and Copy as (curl for bash, cmd and PowerShell, Invoke-WebRequest, fetch, Python requests, C# HttpClient) |
 
 ## Why this exists
 
@@ -251,7 +251,16 @@ targets, so `Invoke-WebRequest -Proxy` would never reach Piper.
 - Composer history grouped into collapsible hosts, repeat sends folded into one counted row, and
   the response to the last send inspectable without leaving the Composer. Which hosts you have
   collapsed is remembered across restarts; a host you have not seen before starts expanded
-- Copy as curl, per-host filtering, dark theme
+- Copy as curl and other languages, per-host filtering, dark theme
+- **Copy as** in the session grid's context menu writes the selected request as curl for bash, for
+  cmd or for PowerShell, as PowerShell `Invoke-WebRequest`, JavaScript `fetch`, Python `requests` or
+  C# `HttpClient`. Every captured value is hostile input to the shell it is pasted into, so each
+  target has its own escaper (`$()`, backticks, `%`, `^`, `!`, quotes and non-ASCII are neutralised),
+  and a header whose name or value cannot be written safely (a CR, LF or NUL) is left out and
+  reported in the Log. The body is the decoded one, without Content-Encoding; a binary body is written
+  as base64, and one that is too large, incomplete or cut while decoding is left out with a comment.
+  Cookies and Authorization are copied exactly as captured, so treat the copied text as a secret.
+  The cmd variant is for the interactive prompt, not a batch file
 - Importing and exporting Fiddler SAZ session archives, by drag-and-drop or **File > Open SAZ
   capture...**; a request-only `.raz` capture is appended to the Composer's history (no responses
   to inspect, but readily reloaded and resent) rather than the main request list. That history
