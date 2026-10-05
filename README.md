@@ -259,7 +259,8 @@ targets, so `Invoke-WebRequest -Proxy` would never reach Piper.
   and a header whose name or value cannot be written safely (a CR, LF or NUL) is left out and
   reported in the Log. The body is the decoded one, without Content-Encoding; a binary body is written
   as base64, and one that is too large, incomplete or cut while decoding is left out with a comment.
-  Cookies and Authorization are copied exactly as captured, so treat the copied text as a secret.
+  Cookies and Authorization are copied exactly as captured (repeated Cookie headers are joined with
+  `; `), so treat the copied text as a secret; for that reason a replay never follows a redirect.
   The cmd variant is for the interactive prompt, not a batch file
 - Importing and exporting Fiddler SAZ session archives, by drag-and-drop or **File > Open SAZ
   capture...**; a request-only `.raz` capture is appended to the Composer's history (no responses

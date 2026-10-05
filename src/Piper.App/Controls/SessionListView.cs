@@ -1366,14 +1366,28 @@ public sealed class SessionListView : UserControl
 
     private async Task CopyRequestAsAsync(Piper.Core.Http.HttpRequestData request, CopyAsTarget target)
     {
-        // Decoding a body can take a moment on a large one, so it is not done on the UI thread.
-        var result = await Task.Run(() => CopyAs.Build(request, target));
+        CopyAsResult? result;
+        try
+        {
+            // Decoding a body can take a moment on a large one, so it is not done on the UI thread.
+            result = await Task.Run(() => CopyAs.Build(request, target));
+        }
+        catch (Exception)
+        {
+            // Nothing in a copy is worth taking the capture down for, and the exception text can carry
+            // captured data, so the Log gets a fixed line instead of it.
+            if (!IsDisposed) CopyAsNotice?.Invoke(this, Strings.SessionList.CopyAsFailed(target));
+            return;
+        }
+
         if (IsDisposed) return;
 
         if (result is null)
             CopyAsNotice?.Invoke(this, Strings.SessionList.CopyAsUnavailable(target));
         else if (ClipboardText.TrySet(result.Text))
             CopyAsNotice?.Invoke(this, Strings.SessionList.CopyAsDone(target, result.Notes));
+        else
+            CopyAsNotice?.Invoke(this, Strings.SessionList.CopyAsClipboardFailed(target));
     }
 
     private void RemoveSelected()

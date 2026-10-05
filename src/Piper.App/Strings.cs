@@ -506,6 +506,12 @@ internal static class Strings
         private static string CopyAsTargetName(CopyAsTarget target) =>
             CopyAsTargetMenu(target).Replace("&", string.Empty, StringComparison.Ordinal);
 
+        public static string CopyAsClipboardFailed(CopyAsTarget target) =>
+            I18n.T("sessionList.copyAsClipboardFailed", ("target", CopyAsTargetName(target)));
+
+        public static string CopyAsFailed(CopyAsTarget target) =>
+            I18n.T("sessionList.copyAsFailed", ("target", CopyAsTargetName(target)));
+
         public static string CopyAsUnavailable(CopyAsTarget target) =>
             I18n.T("sessionList.copyAsUnavailable", ("target", CopyAsTargetName(target)));
 
@@ -525,6 +531,7 @@ internal static class Strings
             CopyAsNote.NonAsciiMayChange => I18n.T("sessionList.copyAsNoteNonAsciiMayChange"),
             CopyAsNote.CommandTooLong => I18n.T("sessionList.copyAsNoteCommandTooLong"),
             CopyAsNote.CookieNeedsPowerShell7 => I18n.T("sessionList.copyAsNoteCookieNeedsPowerShell7"),
+            CopyAsNote.UpgradeDropped => I18n.T("sessionList.copyAsNoteUpgradeDropped"),
             _ => throw new ArgumentOutOfRangeException(nameof(note)),
         };
         public static string CopyFullSession => I18n.T("sessionList.copyFullSession");

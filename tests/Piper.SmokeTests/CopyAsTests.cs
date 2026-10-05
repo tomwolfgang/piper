@@ -45,11 +45,11 @@ internal static class CopyAsTests
                 """,
         [CopyAsTarget.CurlCmd] = """
                 REM The request body is binary or not safe to paste as text, so it is written as base64 and decoded here.
-                REM Non-ASCII header text may be re-encoded by the shell it is pasted into.
+                REM Non-ASCII header text may be re-encoded by the shell it is pasted into, or by the runtime that sends it.
                 REM Headers with a name or value that cannot be written safely were left out.
-                > "%TEMP%\piper-body.b64" echo eyJxIjoiJChpZCkgYHhgICd5JyAlUEFUSCUgXCJ6XCIiLCJ1Ijoiw6kifQ==
-                certutil -f -decode "%TEMP%\piper-body.b64" "%TEMP%\piper-body.bin" > nul
-                curl.exe ^"https://api.example.test/v1/it's?q=$^(id^)^&b=^%60x^%60^&p=100^%25^" ^
+                > "%TEMP%\piper-body-1bcf5579bf16b3da.b64" echo eyJxIjoiJChpZCkgYHhgICd5JyAlUEFUSCUgXCJ6XCIiLCJ1Ijoiw6kifQ==
+                certutil -f -decode "%TEMP%\piper-body-1bcf5579bf16b3da.b64" "%TEMP%\piper-body-1bcf5579bf16b3da.bin" > nul
+                curl.exe ^"https://api.example.test/v1/it's?q=$^(id^)^&b=%^60x%^60^&p=100%^25^" ^
                   --globoff ^
                   --request ^"POST^" ^
                   --compressed ^
@@ -58,17 +58,17 @@ internal static class CopyAsTests
                   --header ^"Authorization: Bearer abc$def`x`^" ^
                   --header ^"X-Dollar: $^(touch /tmp/pwn^) ${HOME} `id`^" ^
                   --header ^"X-Quotes: it's \^"quoted\^" \ back\\^" ^
-                  --header ^"X-Cmd: 100^% ^%PATH^% a^&b^|c^<d^>e^^f^!g ^(h^)^" ^
+                  --header ^"X-Cmd: 100%^ %^PATH%^ a^&b^|c^<d^>e^^f^!g ^(h^)^" ^
                   --header ^"X-Empty;^" ^
                   --header ^"X-Uni: café ’ 😀^" ^
                   --header ^"X-Dup: 1^" ^
                   --header ^"X-Dup: 2^" ^
-                  --data-binary "@%TEMP%\piper-body.bin"
-                del /q "%TEMP%\piper-body.b64" "%TEMP%\piper-body.bin"
+                  --data-binary "@%TEMP%\piper-body-1bcf5579bf16b3da.bin"
+                del /q "%TEMP%\piper-body-1bcf5579bf16b3da.b64" "%TEMP%\piper-body-1bcf5579bf16b3da.bin"
                 """,
         [CopyAsTarget.CurlPowerShell] = """
                 # The request body is binary or not safe to paste as text, so it is written as base64 and decoded here.
-                # Non-ASCII header text may be re-encoded by the shell it is pasted into.
+                # Non-ASCII header text may be re-encoded by the shell it is pasted into, or by the runtime that sends it.
                 # Headers with a name or value that cannot be written safely were left out.
                 $piperBody = [IO.Path]::GetTempFileName()
                 [IO.File]::WriteAllBytes($piperBody, [Convert]::FromBase64String('eyJxIjoiJChpZCkgYHhgICd5JyAlUEFUSCUgXCJ6XCIiLCJ1Ijoiw6kifQ=='))
@@ -91,12 +91,14 @@ internal static class CopyAsTests
                 Remove-Item -LiteralPath $piperBody
                 """,
         [CopyAsTarget.PowerShellWebRequest] = """
+                # Non-ASCII header text may be re-encoded by the shell it is pasted into, or by the runtime that sends it.
                 # Headers with a name or value that cannot be written safely were left out.
                 # Repeated headers were merged into one value because this tool cannot repeat a header.
                 $params = @{
                     Uri = 'https://api.example.test/v1/it''s?q=$(id)&b=%60x%60&p=100%25'
                     Method = 'POST'
                     UseBasicParsing = $true
+                    MaximumRedirection = 0
                     ContentType = 'application/json'
                     Headers = @{
                         'Accept-Encoding' = 'gzip, br'
@@ -105,7 +107,7 @@ internal static class CopyAsTests
                         'X-Quotes' = 'it''s "quoted" \ back\'
                         'X-Cmd' = '100% %PATH% a&b|c<d>e^f!g (h)'
                         'X-Empty' = ''
-                        'X-Uni' = ('café ' + [char]0x2019 + ' ' + [char]0xd83d + [char]0xde00)
+                        'X-Uni' = ('cafÃ© â' + [char]0x0080 + [char]0x0099 + ' ð' + [char]0x009f + [char]0x0098 + [char]0x0080)
                         'X-Dup' = '1, 2'
                     }
                     Body = [Text.Encoding]::UTF8.GetBytes('{"q":"$(id) `x` ''y'' %PATH% \"z\"","u":"é"}')
@@ -116,6 +118,7 @@ internal static class CopyAsTests
                 // Headers with a name or value that cannot be written safely were left out.
                 await fetch("https://api.example.test/v1/it's?q=$(id)&b=%60x%60&p=100%25", {
                   method: "POST",
+                  redirect: "manual",
                   headers: [
                     ["Content-Type", "application/json"],
                     ["Accept-Encoding", "gzip, br"],
@@ -124,7 +127,7 @@ internal static class CopyAsTests
                     ["X-Quotes", "it's \"quoted\" \\ back\\"],
                     ["X-Cmd", "100% %PATH% a&b|c<d>e^f!g (h)"],
                     ["X-Empty", ""],
-                    ["X-Uni", "caf\u00e9 \u2019 \ud83d\ude00"],
+                    ["X-Uni", "caf\u00c3\u00a9 \u00e2\u0080\u0099 \u00f0\u009f\u0098\u0080"],
                     ["X-Dup", "1"],
                     ["X-Dup", "2"],
                   ],
@@ -139,6 +142,7 @@ internal static class CopyAsTests
                 response = requests.request(
                     "POST",
                     "https://api.example.test/v1/it's?q=$(id)&b=%60x%60&p=100%25",
+                    allow_redirects=False,
                     headers={
                         "Content-Type": "application/json",
                         "Accept-Encoding": "gzip, br",
@@ -147,7 +151,7 @@ internal static class CopyAsTests
                         "X-Quotes": "it's \"quoted\" \\ back\\",
                         "X-Cmd": "100% %PATH% a&b|c<d>e^f!g (h)",
                         "X-Empty": "",
-                        "X-Uni": "caf\u00e9 \u2019 \U0001f600",
+                        "X-Uni": b"caf\xc3\xa9 \xe2\x80\x99 \xf0\x9f\x98\x80",
                         "X-Dup": "1, 2",
                     },
                     data="{\"q\":\"$(id) `x` 'y' %PATH% \\\"z\\\"\",\"u\":\"\u00e9\"}".encode("utf-8"),
@@ -159,10 +163,12 @@ internal static class CopyAsTests
                 using System.Net.Http;
                 using System.Text;
 
-                using var client = new HttpClient(new HttpClientHandler
+                using var client = new HttpClient(new SocketsHttpHandler
                 {
                     AutomaticDecompression = DecompressionMethods.All,
                     UseCookies = false,
+                    AllowAutoRedirect = false,
+                    RequestHeaderEncodingSelector = (_, _) => Encoding.Latin1,
                 });
                 using var request = new HttpRequestMessage(new HttpMethod("POST"), "https://api.example.test/v1/it's?q=$(id)&b=%60x%60&p=100%25");
                 request.Content = new ByteArrayContent(Encoding.UTF8.GetBytes("{\"q\":\"$(id) `x` 'y' %PATH% \\\"z\\\"\",\"u\":\"\u00e9\"}"));
@@ -172,7 +178,7 @@ internal static class CopyAsTests
                 request.Headers.TryAddWithoutValidation("X-Quotes", "it's \"quoted\" \\ back\\");
                 request.Headers.TryAddWithoutValidation("X-Cmd", "100% %PATH% a&b|c<d>e^f!g (h)");
                 request.Headers.TryAddWithoutValidation("X-Empty", "");
-                request.Headers.TryAddWithoutValidation("X-Uni", "caf\u00e9 \u2019 \ud83d\ude00");
+                request.Headers.TryAddWithoutValidation("X-Uni", "caf\u00c3\u00a9 \u00e2\u0080\u0099 \u00f0\u009f\u0098\u0080");
                 request.Headers.TryAddWithoutValidation("X-Dup", "1");
                 request.Headers.TryAddWithoutValidation("X-Dup", "2");
                 using var response = await client.SendAsync(request);
@@ -204,7 +210,11 @@ internal static class CopyAsTests
 
             runner.AreEqual("^\"^\"", CopyAs.CmdArg(""), "cmd: empty is an empty argument");
             runner.AreEqual("^\"a^&b^|c^<d^>e^^f^!g^(h^)^\"", CopyAs.CmdArg("a&b|c<d>e^f!g(h)"), "cmd: every metacharacter is caret-escaped");
-            runner.AreEqual("^\"100^%^\"", CopyAs.CmdArg("100%"), "cmd: a percent sign is caret-escaped");
+            runner.AreEqual("^\"100%^\"", CopyAs.CmdArg("100%"), "cmd: a percent sign is followed by the caret that closing quote brings");
+            runner.AreEqual("^\"%^FOO:ZZ=%^\"", CopyAs.CmdArg("%FOO:ZZ=%"), "cmd: a variable name after a percent sign starts with a caret, so nothing expands");
+            runner.AreEqual("^\"%^%^\"", CopyAs.CmdArg("%%"), "cmd: so does the second of two percent signs");
+            runner.AreEqual("^\"%^&^\"", CopyAs.CmdArg("%&"), "cmd: and a percent sign before a metacharacter shares its caret");
+            runner.AreEqual("^\"a%^b^\"", CopyAs.CmdArg("a%b"), "cmd: and one before an ordinary character gets its own");
             runner.AreEqual("^\"say \\^\"hi\\^\"^\"", CopyAs.CmdArg("say \"hi\""), "cmd: a quote is a backslash-escaped quote, caret-escaped");
             runner.AreEqual("^\"C:\\dir\\\\^\"", CopyAs.CmdArg("C:\\dir\\"), "cmd: a trailing backslash is doubled so it cannot escape the closing quote");
             runner.AreEqual("^\"a\\\\\\^\"b^\"", CopyAs.CmdArg("a\\\"b"), "cmd: backslashes before a quote are doubled");
@@ -288,7 +298,7 @@ internal static class CopyAsTests
             invisible.Headers.Add("X-Bidi", "a\u202eb");
             runner.IsTrue(CopyAs.Build(invisible, CopyAsTarget.CurlCmd)!.Notes.Contains(CopyAsNote.HeadersSkipped), "cmd: a direction override is left out");
             runner.IsTrue(CopyAs.Build(invisible, CopyAsTarget.CurlPowerShell)!.Notes.Contains(CopyAsNote.HeadersSkipped), "PowerShell curl: a direction override is left out");
-            runner.IsTrue(CopyAs.Build(invisible, CopyAsTarget.JavaScriptFetch)!.Text.Contains("\\u202e"), "JavaScript: it is written as an escape instead");
+            runner.IsTrue(CopyAs.Build(invisible, CopyAsTarget.JavaScriptFetch)!.Text.Contains("\\u00e2\\u0080\\u00ae"), "JavaScript: its three wire bytes are written as escapes instead");
             return Task.CompletedTask;
         });
 
@@ -390,7 +400,7 @@ internal static class CopyAsTests
             runner.AreEqual("curl 'http://h.test/' \\\n  --globoff \\\n  --request 'DELETE'", CopyAs.Build(Plain("DELETE", "http://h.test/", []), CopyAsTarget.CurlBash)!.Text, "bash: other methods are named");
             var withBody = CopyAs.Build(Plain("GET", "http://h.test/", Encoding.UTF8.GetBytes("x")), CopyAsTarget.CurlBash)!.Text;
             runner.IsTrue(withBody.Contains("--request 'GET'") && withBody.Contains("--header 'Content-Type:'"), "bash: GET with a body is named, and curl's own Content-Type is switched off");
-            runner.IsTrue(CopyAs.Build(Plain("GET", "http://h.test/", []), CopyAsTarget.JavaScriptFetch)!.Text == "await fetch(\"http://h.test/\", {\n});", "fetch: GET has no method line");
+            runner.IsTrue(CopyAs.Build(Plain("GET", "http://h.test/", []), CopyAsTarget.JavaScriptFetch)!.Text == "await fetch(\"http://h.test/\", {\n  redirect: \"manual\",\n});", "fetch: GET has no method line");
             runner.IsTrue(CopyAs.Build(Plain("PUT", "http://[::1]:8080/a b", []), CopyAsTarget.PythonRequests)!.Text.Contains("\"http://[::1]:8080/a%20b\""), "an IPv6 URL with a space is written escaped");
             return Task.CompletedTask;
         });
@@ -402,6 +412,23 @@ internal static class CopyAsTests
             request.Headers.Add("cookie", "b=2");
             request.Headers.Add("X-Dup", "1");
             request.Headers.Add("x-dup", "2");
+            foreach (var target in AllTargets)
+            {
+                var all = CopyAs.Build(request, target)!;
+                runner.IsTrue(all.Text.Contains("a=1; b=2") && !all.Text.Contains("\"b=2\"") && !all.Text.Contains(": b=2"), $"{target}: repeated Cookie headers are always one, joined with a semicolon");
+            }
+
+            var http2 = Plain("GET", "https://h.test/", []);
+            http2.Headers.Add("cookie", "a=1");
+            http2.Headers.Add("cookie", "b=2");
+            http2.Headers.Add("cookie", "c=3");
+            foreach (var target in AllTargets)
+            {
+                var result = CopyAs.Build(http2, target)!;
+                runner.IsTrue(result.Text.Contains("a=1; b=2; c=3"), $"{target}: HTTP/2 cookie crumbs are rejoined");
+                runner.IsTrue(!result.Notes.Contains(CopyAsNote.DuplicateHeadersMerged), $"{target}: and that is not reported as a lossy merge");
+            }
+
             foreach (var target in new[] { CopyAsTarget.PythonRequests, CopyAsTarget.PowerShellWebRequest })
             {
                 var result = CopyAs.Build(request, target)!;
@@ -410,6 +437,63 @@ internal static class CopyAsTests
             }
             runner.AreEqual(2, System.Text.RegularExpressions.Regex.Matches(CopyAs.Build(request, CopyAsTarget.CurlBash)!.Text, "x-dup:", System.Text.RegularExpressions.RegexOptions.IgnoreCase).Count, "curl keeps both");
             runner.IsTrue(!CopyAs.Build(request, CopyAsTarget.CurlBash)!.Notes.Contains(CopyAsNote.DuplicateHeadersMerged), "and says nothing");
+            return Task.CompletedTask;
+        });
+
+        await runner.RunAsync("Copy as: replays do not follow redirects, so credentials stay with the captured host", () =>
+        {
+            var request = Plain("GET", "https://h.test/", []);
+            request.Headers.Add("Cookie", "sid=1");
+            runner.IsTrue(CopyAs.Build(request, CopyAsTarget.PythonRequests)!.Text.Contains("allow_redirects=False,"), "requests");
+            runner.IsTrue(CopyAs.Build(request, CopyAsTarget.JavaScriptFetch)!.Text.Contains("redirect: \"manual\","), "fetch");
+            runner.IsTrue(CopyAs.Build(request, CopyAsTarget.CSharpHttpClient)!.Text.Contains("AllowAutoRedirect = false,"), "HttpClient");
+            runner.IsTrue(CopyAs.Build(request, CopyAsTarget.PowerShellWebRequest)!.Text.Contains("MaximumRedirection = 0"), "Invoke-WebRequest");
+            foreach (var target in new[] { CopyAsTarget.CurlBash, CopyAsTarget.CurlCmd, CopyAsTarget.CurlPowerShell })
+                runner.IsTrue(!CopyAs.Build(request, target)!.Text.Contains("location", StringComparison.OrdinalIgnoreCase), $"{target}: curl follows none unless told to");
+            return Task.CompletedTask;
+        });
+
+        await runner.RunAsync("Copy as: pseudo-headers, upgrades and non-ASCII values", () =>
+        {
+            var request = Plain("GET", "https://h.test/", []);
+            request.Headers.Add(":authority", "h.test");
+            request.Headers.Add(":path", "/");
+            request.Headers.Add("X-Ok", "1");
+            foreach (var target in AllTargets)
+            {
+                var result = CopyAs.Build(request, target)!;
+                runner.IsTrue(!result.Text.Contains(":authority") && !result.Notes.Contains(CopyAsNote.HeadersSkipped), $"{target}: an HTTP/2 pseudo-header is ignored without a complaint");
+            }
+
+            var upgrade = Plain("GET", "https://h.test/chat", []);
+            upgrade.Headers.Add("Connection", "Upgrade");
+            upgrade.Headers.Add("Upgrade", "websocket");
+            upgrade.Headers.Add("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==");
+            foreach (var target in AllTargets)
+            {
+                var result = CopyAs.Build(upgrade, target)!;
+                runner.IsTrue(result.Notes.Contains(CopyAsNote.UpgradeDropped) && result.Text.Contains("will not switch protocols"), $"{target}: the dropped upgrade is reported");
+                runner.IsTrue(!result.Text.Contains("websocket\"") && !result.Text.Contains("websocket'") && !result.Text.Contains("Upgrade:"), $"{target}: and not copied");
+            }
+
+            var unicode = Plain("GET", "https://h.test/", []);
+            unicode.Headers.Add("X-Uni", Latin1Unicode);
+            runner.IsTrue(CopyAs.Build(unicode, CopyAsTarget.PythonRequests)!.Text.Contains("b\"caf\\xc3\\xa9 \\xe2\\x80\\x99 \\xf0\\x9f\\x98\\x80\""), "requests: a non-ASCII value is the bytes that crossed the wire");
+            runner.IsTrue(CopyAs.Build(unicode, CopyAsTarget.JavaScriptFetch)!.Text.Contains("\"caf\\u00c3\\u00a9 \\u00e2\\u0080\\u0099 \\u00f0\\u009f\\u0098\\u0080\""), "fetch: a ByteString, one character per wire byte");
+            var csharp = CopyAs.Build(unicode, CopyAsTarget.CSharpHttpClient)!.Text;
+            runner.IsTrue(csharp.Contains("RequestHeaderEncodingSelector = (_, _) => Encoding.Latin1,") && csharp.Contains("\"caf\\u00c3\\u00a9"), "HttpClient: Latin-1 encoding and one character per wire byte");
+            runner.IsTrue(!CopyAs.Build(Plain("GET", "https://h.test/", []), CopyAsTarget.CSharpHttpClient)!.Text.Contains("RequestHeaderEncodingSelector"), "HttpClient: not asked for when every header is ASCII");
+            return Task.CompletedTask;
+        });
+
+        await runner.RunAsync("Copy as: the cmd temporary file is named after its body", () =>
+        {
+            var a = CopyAs.Build(Plain("POST", "https://h.test/", [1, 2, 3]), CopyAsTarget.CurlCmd)!.Text;
+            var b = CopyAs.Build(Plain("POST", "https://h.test/", [1, 2, 4]), CopyAsTarget.CurlCmd)!.Text;
+            var again = CopyAs.Build(Plain("POST", "https://h.test/", [1, 2, 3]), CopyAsTarget.CurlCmd)!.Text;
+            var name = System.Text.RegularExpressions.Regex.Match(a, @"piper-body-[0-9a-f]{16}\.bin").Value;
+            runner.IsTrue(name.Length > 0 && !b.Contains(name), "a different body gets a different file");
+            runner.AreEqual(a, again, "and the same body the same text");
             return Task.CompletedTask;
         });
 
@@ -438,11 +522,36 @@ internal static class CopyAsTests
         ("X-Empty", ""),
         ("Authorization", "Bearer abc$def`x`"),
         ("Cookie", "a=1; b=\"2\""),
+
+        // Environment references of every shell. The child process holds a secret variable of each
+        // name; none of these may be expanded, or the secret would travel to the origin.
+        ("X-Env-Cmd", "%PIPER_COPYAS_SECRET% %PIPER_COPYAS_SECRET:ZZ=% %PIPER_COPYAS_SECRET:*x=% %PIPER_COPYAS_SECRET:~0,3% %PIPER_COPYAS_SECRET:s=A% %% %^ ^% %PATH%"),
+        ("X-Env-Other", "$PIPER_COPYAS_SECRET ${PIPER_COPYAS_SECRET} $env:PIPER_COPYAS_SECRET ${env:PIPER_COPYAS_SECRET} $(echo $PIPER_COPYAS_SECRET) !PIPER_COPYAS_SECRET! `$env:PIPER_COPYAS_SECRET"),
+        ("X-Env-End", "100%"),
+        ("X-Env-Pair", "%PIPER_COPYAS_SECRET:ZZ=%\""),
+    ];
+
+    private const string Secret = "s3cr3t-LEAK-7f3a";
+
+    // Values that would run a second command if they broke out of their argument; each would create
+    // the marker file. {0} is the marker path.
+    private static readonly string[] BreakOutValues =
+    [
+        "%\" & echo ran> \"{0}\" & \"",
+        "x%\"&echo ran>\"{0}\"&\"",
+        "\"; echo ran > '{0}'; \"",
+        "'; echo ran > '{0}'; '",
+        "$(echo ran > '{0}') `echo ran > '{0}'`",
+        "$(Set-Content -LiteralPath '{0}' ran) `$(Set-Content -LiteralPath '{0}' ran)",
+        "\"; Set-Content -LiteralPath '{0}' ran; \"",
+        "' ; Set-Content -LiteralPath '{0}' ran ; '",
+        "^\" & echo ran> \"{0}\"",
     ];
 
     private static readonly (string Name, byte[] Bytes, string ContentType)[] RoundTripBodies =
     [
         ("hostile text", Encoding.UTF8.GetBytes("line1 \"q\" $(id) `x`\n'x' %PATH% ^& !\r\nend\\"), "text/plain"),
+        ("single-line hostile text", Encoding.ASCII.GetBytes("x=%PIPER_COPYAS_SECRET% %PIPER_COPYAS_SECRET:ZZ=% %PIPER_COPYAS_SECRET:~0,3% $PIPER_COPYAS_SECRET $env:PIPER_COPYAS_SECRET ${env:PIPER_COPYAS_SECRET} $(echo $PIPER_COPYAS_SECRET) 100% \"q\" & echo ran | more ^ !"), "text/plain"),
         ("every byte value", [.. Enumerable.Range(0, 256).Select(i => (byte)i)], "application/octet-stream"),
         ("non-ASCII text", Encoding.UTF8.GetBytes("h\u00e9llo \u2019 \ud83d\ude00"), "text/plain; charset=utf-8"),
     ];
@@ -474,6 +583,12 @@ internal static class CopyAsTests
             }
             return output.ToString();
         });
+
+        // The same text typed at the prompt: cmd reads it line by line from stdin, which is where a
+        // caret at the end of a line continues the command. A quote left open by a bad escape would
+        // end that continuation and run the following lines as commands of their own.
+        await RoundTripAsync(runner, "cmd.exe, typed at the prompt", CopyAsTarget.CurlCmd, File.Exists(curl) ? null : "curl.exe is not installed",
+            (text, _) => ExecuteAsync(Path.Combine(system, "cmd.exe"), "/d", text + "\r\nexit\r\n"));
 
         await RoundTripAsync(runner, "PowerShell, curl.exe", CopyAsTarget.CurlPowerShell,
             File.Exists(curl) && File.Exists(powershell) ? null : "curl.exe or powershell.exe is not installed",
@@ -546,16 +661,24 @@ internal static class CopyAsTests
                 if (target == CopyAsTarget.CurlBash && body.Name == "non-ASCII text") continue;
 
                 using var origin = new CaptureOrigin();
+                var dir = Path.Combine(Path.GetTempPath(), "copyas-" + Guid.NewGuid().ToString("N"));
+                Directory.CreateDirectory(dir);
+                var marker = Path.Combine(dir, "ran.txt");
+
                 var request = new HttpRequestData
                 {
                     Method = "POST",
                     Url = new Uri(origin.Url + "p/it's?q=$(id)&r=%25&s=`x`"),
                     Body = body.Bytes,
                 };
-                foreach (var (name, value) in RoundTripHeaders) request.Headers.Add(name, value);
-                request.Headers.Add("Content-Type", body.ContentType);
-
                 var expected = RoundTripHeaders.Append(("Content-Type", body.ContentType)).ToList();
+                for (var i = 0; i < BreakOutValues.Length; i++)
+                    expected.Add(("X-Break-" + i, string.Format(BreakOutValues[i], marker)));
+
+                // The runtimes that can carry bytes above 127 in a header must deliver them exactly.
+                if (target is CopyAsTarget.PythonRequests or CopyAsTarget.JavaScriptFetch or CopyAsTarget.PowerShellWebRequest)
+                    expected.Add(("X-Uni", Latin1Unicode));
+                foreach (var (name, value) in expected) request.Headers.Add(name, value);
 
                 // Windows PowerShell 5.1 does not send a Cookie header given to Invoke-WebRequest; the
                 // snippet says so, and this pins that it does.
@@ -566,11 +689,15 @@ internal static class CopyAsTests
                 }
 
                 var text = CopyAs.Build(request, target)!.Text;
-                var dir = Path.Combine(Path.GetTempPath(), "copyas-" + Guid.NewGuid().ToString("N"));
-                Directory.CreateDirectory(dir);
                 string diagnostics;
-                try { diagnostics = await run(text, dir); }
+                bool ran;
+                try
+                {
+                    diagnostics = await run(text, dir);
+                    ran = File.Exists(marker);
+                }
                 finally { try { Directory.Delete(dir, recursive: true); } catch (IOException) { } }
+                runner.IsTrue(!ran, $"{shell}, {body.Name}: no second command ran");
 
                 var seen = await origin.WaitAsync(TimeSpan.FromSeconds(20));
                 runner.IsTrue(seen is not null, $"{shell}, {body.Name}: the origin received a request" + (seen is null ? "; output: " + diagnostics : string.Empty));
@@ -583,6 +710,8 @@ internal static class CopyAsTests
                     runner.IsTrue(got.Contains(value), $"{shell}, {body.Name}: {name} arrives verbatim (got: {string.Join(" | ", got)})");
                 }
                 runner.IsTrue(!seen.Headers.Any(h => h.Name.Equals("pwn", StringComparison.OrdinalIgnoreCase)), $"{shell}, {body.Name}: nothing was injected");
+                var everything = seen.RequestLine + "\n" + string.Join("\n", seen.Headers.Select(h => h.Name + ": " + h.Value)) + "\n" + Encoding.Latin1.GetString(seen.Body);
+                runner.IsTrue(!everything.Contains(Secret), $"{shell}, {body.Name}: an environment variable's value never reaches the origin");
                 runner.IsTrue(body.Bytes.SequenceEqual(seen.Body),
                     $"{shell}, {body.Name}: the body arrives byte for byte ({seen.Body.Length} of {body.Bytes.Length} bytes)");
             }
@@ -615,6 +744,8 @@ internal static class CopyAsTests
         start.Environment["NO_PROXY"] = "*";
         start.Environment["no_proxy"] = "*";
         start.Environment["MSYS_NO_PATHCONV"] = "1";
+        // A secret every shell above could expand if a pasted value were let through.
+        start.Environment["PIPER_COPYAS_SECRET"] = Secret;
 
         using var process = Process.Start(start)!;
         var output = process.StandardOutput.ReadToEndAsync();

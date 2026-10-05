@@ -61,6 +61,9 @@ public enum CopyAsNote
 
     /// <summary>Windows PowerShell 5.1 does not send a Cookie header passed to Invoke-WebRequest.</summary>
     CookieNeedsPowerShell7,
+
+    /// <summary>An Upgrade header (a WebSocket handshake, say) was not copied, so the replay will not upgrade.</summary>
+    UpgradeDropped,
 }
 
 /// <summary>The text to put on the clipboard, and what a person should be told about it.</summary>
@@ -182,6 +185,10 @@ public static class CopyAs
         foreach (var header in request.Headers)
         {
             var name = header.Name;
+
+            // An HTTP/2 pseudo-header (:authority and friends) is the transport's, not a header to send.
+            if (name.StartsWith(':')) continue;
+
             if (!IsToken(name) || !TryNormalise(header.Value ?? string.Empty, out var value))
             {
                 model.Note(CopyAsNote.HeadersSkipped, Comments.HeadersSkipped);
@@ -199,8 +206,10 @@ public static class CopyAs
                     continue;
                 }
             }
-            else if (ManagedHeaders.Contains(name) || name[0] == ':')
+            else if (ManagedHeaders.Contains(name))
             {
+                if (name.Equals("Upgrade", StringComparison.OrdinalIgnoreCase))
+                    model.Note(CopyAsNote.UpgradeDropped, Comments.UpgradeDropped);
                 continue;
             }
             else if (name.Equals("Content-Encoding", StringComparison.OrdinalIgnoreCase) && bodyWasDecoded)
@@ -219,7 +228,9 @@ public static class CopyAs
                 continue;
             }
 
-            if (curlConfigShell && value.Text.Any(c => c > '~'))
+            // PowerShell 7 was not probed: Windows PowerShell 5.1 sends the bytes of such a value as they
+            // are, another PowerShell may not.
+            if ((curlConfigShell || target == CopyAsTarget.PowerShellWebRequest) && value.Text.Any(c => c > '~'))
                 model.Note(CopyAsNote.NonAsciiMayChange, Comments.NonAsciiMayChange);
 
             if (target == CopyAsTarget.PowerShellWebRequest && name.Equals("Cookie", StringComparison.OrdinalIgnoreCase))
@@ -228,9 +239,11 @@ public static class CopyAs
             model.Headers.Add((name, value));
         }
 
-        // Targets that take a header dictionary cannot repeat a header.
-        if (target is CopyAsTarget.PowerShellWebRequest or CopyAsTarget.PythonRequests)
-            MergeDuplicates(model);
+        // RFC 9113 8.2.3: a client may split the Cookie header into one field per crumb on HTTP/2, and a
+        // Cookie header is one header with "; " between crumbs on HTTP/1.1, so it is always joined. No
+        // tool joins repeated Cookie headers, and fetch joins repeated headers with ", ", which corrupts it.
+        // Targets that take a header dictionary cannot repeat any other header either.
+        MergeDuplicates(model, allHeaders: target is CopyAsTarget.PowerShellWebRequest or CopyAsTarget.PythonRequests);
 
         return model;
     }
@@ -281,30 +294,37 @@ public static class CopyAs
         return wasDecoded;
     }
 
-    private static void MergeDuplicates(Model model)
+    /// <summary>
+    /// Joins repeated headers into the first of them: Cookie with "; ", always; any other header with
+    /// ", " only when <paramref name="allHeaders"/> (the target cannot repeat a header), and then says so.
+    /// </summary>
+    private static void MergeDuplicates(Model model, bool allHeaders)
     {
         var merged = new List<(string Name, HeaderValue Value)>();
         var changed = false;
+        var mergedOther = false;
         foreach (var (name, value) in model.Headers)
         {
-            var index = merged.FindIndex(h => h.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
+            var isCookie = name.Equals("Cookie", StringComparison.OrdinalIgnoreCase);
+            var index = isCookie || allHeaders ? merged.FindIndex(h => h.Name.Equals(name, StringComparison.OrdinalIgnoreCase)) : -1;
             if (index < 0)
             {
                 merged.Add((name, value));
                 continue;
             }
 
-            var separator = name.Equals("Cookie", StringComparison.OrdinalIgnoreCase) ? "; " : ", ";
+            var separator = isCookie ? "; " : ", ";
             var existing = merged[index];
             merged[index] = (existing.Name, new HeaderValue(existing.Value.Text + separator + value.Text,
                 [.. existing.Value.Bytes, .. Encoding.ASCII.GetBytes(separator), .. value.Bytes]));
             changed = true;
+            mergedOther |= !isCookie;
         }
 
         if (!changed) return;
         model.Headers.Clear();
         model.Headers.AddRange(merged);
-        model.Note(CopyAsNote.DuplicateHeadersMerged, Comments.DuplicateHeadersMerged);
+        if (mergedOther) model.Note(CopyAsNote.DuplicateHeadersMerged, Comments.DuplicateHeadersMerged);
     }
 
     /// <summary>RFC 9110 token: what a method or a header name may be.</summary>
@@ -413,9 +433,10 @@ public static class CopyAs
         public const string HeadersSkipped = "Headers with a name or value that cannot be written safely were left out.";
         public const string HostHeaderDropped = "The captured Host header differs from the URL and was not copied.";
         public const string DuplicateHeadersMerged = "Repeated headers were merged into one value because this tool cannot repeat a header.";
-        public const string NonAsciiMayChange = "Non-ASCII header text may be re-encoded by the shell it is pasted into.";
+        public const string NonAsciiMayChange = "Non-ASCII header text may be re-encoded by the shell it is pasted into, or by the runtime that sends it.";
         public const string BodyDecodeCut = "The request body is not included: decoding it stopped at a size limit or a corrupt stream, so only part of it is known.";
         public const string BodyAsBase64 = "The request body is binary or not safe to paste as text, so it is written as base64 and decoded here.";
+        public const string UpgradeDropped = "The Upgrade and Connection headers were not copied, so this request will not switch protocols (a WebSocket handshake, for example).";
         public const string CookieNeedsPowerShell7 = "Windows PowerShell 5.1 does not send a Cookie header given this way; PowerShell 7 does.";
         public const string CommandTooLong = "This command is longer than the 8191 characters cmd.exe accepts; use the PowerShell or bash variant.";
 
@@ -433,6 +454,9 @@ public static class CopyAs
         foreach (var comment in model.Comments) sb.Append(prefix).Append(comment).Append(newline);
         return sb.ToString();
     }
+
+    // One character per byte that crossed the wire: what fetch and HttpClient's Latin-1 encoder send.
+    private static string WireText(HeaderValue value) => Encoding.Latin1.GetString(value.Bytes);
 
     private static string Base64(byte[] bytes) => Convert.ToBase64String(bytes);
 
@@ -530,8 +554,11 @@ public static class CopyAs
         {
             // cmd.exe has no way to hold a line break or arbitrary bytes in an argument, so the body is
             // written to a temporary file as base64 and decoded by certutil, which ships with Windows.
-            const string B64 = "%TEMP%\\piper-body.b64";
-            const string Bin = "%TEMP%\\piper-body.bin";
+            // The file name comes from the body, so two copies of different bodies cannot collide
+            // and the snippet stays the same each time it is copied.
+            var stem = "%TEMP%\\piper-body-" + Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(m.Body))[..16].ToLowerInvariant();
+            var B64 = stem + ".b64";
+            var Bin = stem + ".bin";
             var encoded = Base64(m.Body);
             for (var i = 0; i < encoded.Length; i += Base64LineLength)
             {
@@ -559,9 +586,10 @@ public static class CopyAs
     /// in double quotes, with <c>"</c> as <c>\"</c> and backslashes doubled where they precede a quote.
     /// Then every character cmd.exe itself treats specially, the quotes included, is escaped with a
     /// caret, so cmd.exe never sees a quoted region at all and hands the program exactly the quoted
-    /// text. A <c>%</c> is caret-escaped too: that stops the pair <c>%name%</c> being read as a
-    /// variable, because every <c>%</c> is then preceded by a caret and no variable is named that way.
-    /// For the interactive prompt and <c>cmd /c</c>; a batch file would need <c>%%</c>. The text must
+    /// text. A <c>%</c> is the exception: cmd.exe expands <c>%name%</c> and <c>%name:x=y%</c> before it
+    /// reads a caret (so <c>^%FOO:x=^%</c> still leaks FOO), and the only thing that stops it is a
+    /// name that begins with a caret. Every <c>%</c> is therefore followed by a caret, which no variable
+    /// name starts with. For the interactive prompt and <c>cmd /c</c>; a batch file would need <c>%%</c>. The text must
     /// not hold a line break, which cmd.exe cannot carry in an argument.
     /// </summary>
     internal static string CmdArg(string text)
@@ -583,14 +611,33 @@ public static class CopyAs
         }
         quoted.Append('"');
 
-        var sb = new StringBuilder(quoted.Length + 8);
-        foreach (var c in quoted.ToString())
+        var text2 = quoted.ToString();
+        var sb = new StringBuilder(text2.Length + 8);
+        for (var i = 0; i < text2.Length; i++)
         {
-            if ("()%!^\"<>&|".Contains(c)) sb.Append('^');
+            var c = text2[i];
+            if (c == '%')
+            {
+                // cmd.exe expands %name%, %name:old=new% and %name:~0,3% before it reads a caret, so a
+                // caret in front of the percent sign does not stop it (and a caret is accepted inside
+                // the substitution text): "^%FOO:x=^%" expands to the value of FOO. What stops it is a
+                // variable name that starts with a caret, which no variable has, so every percent sign
+                // is followed by a caret. That caret then escapes whatever comes next, which is
+                // harmless for an ordinary character, and when the next character is one that is
+                // caret-escaped below its own caret already follows the percent sign.
+                sb.Append('%');
+                if (i + 1 >= text2.Length || !IsCmdMetacharacter(text2[i + 1]) || text2[i + 1] == '%') sb.Append('^');
+                continue;
+            }
+
+            if (IsCmdMetacharacter(c)) sb.Append('^');
             sb.Append(c);
         }
         return sb.ToString();
     }
+
+    // Every character cmd.exe treats specially outside quotes; the percent sign is dealt with apart.
+    private static bool IsCmdMetacharacter(char c) => "()%!^\"<>&|".Contains(c);
 
     // ---------------------------------------------------------------- curl, PowerShell
 
@@ -656,13 +703,17 @@ public static class CopyAs
         sb.Append("    Method = ").Append(PsString(m.Method)).Append('\n');
         sb.Append("    UseBasicParsing = $true\n");
 
+        // A redirect is not followed: a server that answers with one could otherwise send the copied
+        // Cookie and other credentials on to a host the capture never contacted.
+        sb.Append("    MaximumRedirection = 0\n");
+
         var other = new List<(string Name, HeaderValue Value)>();
         foreach (var header in m.Headers)
         {
             if (header.Name.Equals("Content-Type", StringComparison.OrdinalIgnoreCase))
-                sb.Append("    ContentType = ").Append(PsString(header.Value.Text)).Append('\n');
+                sb.Append("    ContentType = ").Append(PsString(WireText(header.Value))).Append('\n');
             else if (header.Name.Equals("User-Agent", StringComparison.OrdinalIgnoreCase))
-                sb.Append("    UserAgent = ").Append(PsString(header.Value.Text)).Append('\n');
+                sb.Append("    UserAgent = ").Append(PsString(WireText(header.Value))).Append('\n');
             else
                 other.Add(header);
         }
@@ -671,7 +722,7 @@ public static class CopyAs
         {
             sb.Append("    Headers = @{\n");
             foreach (var (name, value) in other)
-                sb.Append("        ").Append(PsString(name)).Append(" = ").Append(PsString(value.Text)).Append('\n');
+                sb.Append("        ").Append(PsString(name)).Append(" = ").Append(PsString(WireText(value))).Append('\n');
             sb.Append("    }\n");
         }
 
@@ -744,12 +795,17 @@ public static class CopyAs
         var sb = new StringBuilder(CommentBlock(m, "// ", "\n"));
         sb.Append("await fetch(").Append(JsString(m.Url)).Append(", {\n");
         if (m.Method != "GET") sb.Append("  method: ").Append(JsString(m.Method)).Append(",\n");
+
+        // A redirect is not followed: a server that answers with one could otherwise send the copied
+        // Cookie and other credentials on to a host the capture never contacted.
+        sb.Append("  redirect: \"manual\",\n");
         if (m.Headers.Count > 0)
         {
-            // An array of pairs keeps the order and the repeats a plain object would lose.
+            // An array of pairs keeps the order and the repeats a plain object would lose. A value is a
+            // ByteString: one character per byte that crossed the wire, which is all fetch can send.
             sb.Append("  headers: [\n");
             foreach (var (name, value) in m.Headers)
-                sb.Append("    [").Append(JsString(name)).Append(", ").Append(JsString(value.Text)).Append("],\n");
+                sb.Append("    [").Append(JsString(name)).Append(", ").Append(JsString(WireText(value))).Append("],\n");
             sb.Append("  ],\n");
         }
 
@@ -792,11 +848,16 @@ public static class CopyAs
         sb.Append("\nresponse = requests.request(\n");
         sb.Append("    ").Append(PyString(m.Method)).Append(",\n");
         sb.Append("    ").Append(PyString(m.Url)).Append(",\n");
+
+        // A redirect is not followed: a server that answers with one could otherwise send the copied
+        // Cookie and other credentials on to a host the capture never contacted.
+        sb.Append("    allow_redirects=False,\n");
         if (m.Headers.Count > 0)
         {
             sb.Append("    headers={\n");
             foreach (var (name, value) in m.Headers)
-                sb.Append("        ").Append(PyString(name)).Append(": ").Append(PyString(value.Text)).Append(",\n");
+                sb.Append("        ").Append(PyString(name)).Append(": ")
+                  .Append(value.Bytes.All(b => b < 0x80) ? PyString(value.Text) : PyBytes(value.Bytes)).Append(",\n");
             sb.Append("    },\n");
         }
 
@@ -807,6 +868,26 @@ public static class CopyAs
 
         sb.Append(')');
         return sb.ToString();
+    }
+
+    /// <summary>
+    /// A Python bytes literal for exactly <paramref name="bytes"/>. A header value that is not ASCII is
+    /// written this way because requests would otherwise encode the text as Latin-1 (or refuse it).
+    /// </summary>
+    internal static string PyBytes(byte[] bytes)
+    {
+        var sb = new StringBuilder(bytes.Length + 3).Append("b\"");
+        foreach (var b in bytes)
+        {
+            switch (b)
+            {
+                case (byte)'\\': sb.Append("\\\\"); break;
+                case (byte)'"': sb.Append("\\\""); break;
+                case >= (byte)' ' and <= (byte)'~': sb.Append((char)b); break;
+                default: sb.Append("\\x").Append(b.ToString("x2", CultureInfo.InvariantCulture)); break;
+            }
+        }
+        return sb.Append('"').ToString();
     }
 
     /// <summary>A Python double-quoted literal; only printable ASCII appears unescaped.</summary>
@@ -836,8 +917,17 @@ public static class CopyAs
     {
         var sb = new StringBuilder(CommentBlock(m, "// ", "\n"));
         sb.Append("using System.Net;\nusing System.Net.Http;\nusing System.Text;\n\n");
-        sb.Append("using var client = new HttpClient(new HttpClientHandler\n{\n");
-        sb.Append("    AutomaticDecompression = DecompressionMethods.All,\n    UseCookies = false,\n});\n");
+        sb.Append("using var client = new HttpClient(new SocketsHttpHandler\n{\n");
+        sb.Append("    AutomaticDecompression = DecompressionMethods.All,\n    UseCookies = false,\n");
+
+        // A redirect is not followed: a server that answers with one could otherwise send the copied
+        // Cookie and other credentials on to a host the capture never contacted.
+        sb.Append("    AllowAutoRedirect = false,\n");
+
+        // Header values are written one character per wire byte; the default encoding refuses them.
+        if (m.Headers.Any(h => h.Value.Bytes.Any(b => b >= 0x80)))
+            sb.Append("    RequestHeaderEncodingSelector = (_, _) => Encoding.Latin1,\n");
+        sb.Append("});\n");
         sb.Append("using var request = new HttpRequestMessage(new HttpMethod(").Append(CSharpString(m.Method))
           .Append("), ").Append(CSharpString(m.Url)).Append(");\n");
 
@@ -853,7 +943,7 @@ public static class CopyAs
         {
             var owner = IsContentHeader(name) ? "request.Content.Headers" : "request.Headers";
             sb.Append(owner).Append(".TryAddWithoutValidation(").Append(CSharpString(name)).Append(", ")
-              .Append(CSharpString(value.Text)).Append(");\n");
+              .Append(CSharpString(WireText(value))).Append(");\n");
         }
 
         sb.Append("using var response = await client.SendAsync(request);");
