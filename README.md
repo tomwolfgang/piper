@@ -261,7 +261,14 @@ targets, so `Invoke-WebRequest -Proxy` would never reach Piper.
   as base64, and one that is too large, incomplete or cut while decoding is left out with a comment.
   Cookies and Authorization are copied exactly as captured (repeated Cookie headers are joined with
   `; `), so treat the copied text as a secret; for that reason a replay never follows a redirect.
-  The cmd variant is for the interactive prompt, not a batch file
+  The cmd variant is for the interactive prompt, not a batch file. It is correct whether or not the
+  prompt has delayed expansion on (`cmd /v:on`, or the `DelayedExpansion` registry value; off by
+  default): cmd.exe would expand `!NAME!` there and send that environment variable to the request's
+  host, and no caret spelling of `!` is right in both modes, so a URL, header or text body that holds
+  an exclamation mark is passed to curl in a temporary config file (written as base64, decoded with
+  `certutil`, deleted when curl finishes) and the pasted command has no `!` in it, with a REM line
+  saying so. The temporary files live in `%TEMP%`, so a `%TEMP%` path that itself holds `!` is the one
+  case this cannot cover
 - Importing and exporting Fiddler SAZ session archives, by drag-and-drop or **File > Open SAZ
   capture...**; a request-only `.raz` capture is appended to the Composer's history (no responses
   to inspect, but readily reloaded and resent) rather than the main request list. That history

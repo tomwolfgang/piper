@@ -530,6 +530,7 @@ internal static class Strings
             CopyAsNote.HostHeaderDropped => I18n.T("sessionList.copyAsNoteHostHeaderDropped"),
             CopyAsNote.NonAsciiMayChange => I18n.T("sessionList.copyAsNoteNonAsciiMayChange"),
             CopyAsNote.CommandTooLong => I18n.T("sessionList.copyAsNoteCommandTooLong"),
+            CopyAsNote.CmdValuesInFile => I18n.T("sessionList.copyAsNoteCmdValuesInFile"),
             CopyAsNote.CookieNeedsPowerShell7 => I18n.T("sessionList.copyAsNoteCookieNeedsPowerShell7"),
             CopyAsNote.UpgradeDropped => I18n.T("sessionList.copyAsNoteUpgradeDropped"),
             _ => throw new ArgumentOutOfRangeException(nameof(note)),

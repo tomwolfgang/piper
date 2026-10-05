@@ -1366,28 +1366,41 @@ public sealed class SessionListView : UserControl
 
     private async Task CopyRequestAsAsync(Piper.Core.Http.HttpRequestData request, CopyAsTarget target)
     {
-        CopyAsResult? result;
         try
         {
             // Decoding a body can take a moment on a large one, so it is not done on the UI thread.
-            result = await Task.Run(() => CopyAs.Build(request, target));
+            var result = await Task.Run(() => CopyAs.Build(request, target));
+
+            if (IsDisposed) return;
+
+            if (result is null)
+                CopyAsNotice?.Invoke(this, Strings.SessionList.CopyAsUnavailable(target));
+            else if (ClipboardText.TrySet(result.Text))
+                CopyAsNotice?.Invoke(this, Strings.SessionList.CopyAsDone(target, result.Notes));
+            else
+                CopyAsNotice?.Invoke(this, Strings.SessionList.CopyAsClipboardFailed(target));
         }
         catch (Exception)
         {
-            // Nothing in a copy is worth taking the capture down for, and the exception text can carry
-            // captured data, so the Log gets a fixed line instead of it.
-            if (!IsDisposed) CopyAsNotice?.Invoke(this, Strings.SessionList.CopyAsFailed(target));
-            return;
+            // A broad catch is needed here because this is a fire-and-forget boundary (CopyRequestAs
+            // discards the task): a throw from the build, the clipboard or a CopyAsNotice subscriber
+            // would otherwise be an unobserved faulted task that nobody reports. Nothing in a copy is
+            // worth taking the capture down for, and the exception text can carry captured data, so
+            // the Log gets a fixed line instead of it.
+            ReportCopyAsFailed(target);
         }
+    }
 
+    private void ReportCopyAsFailed(CopyAsTarget target)
+    {
         if (IsDisposed) return;
 
-        if (result is null)
-            CopyAsNotice?.Invoke(this, Strings.SessionList.CopyAsUnavailable(target));
-        else if (ClipboardText.TrySet(result.Text))
-            CopyAsNotice?.Invoke(this, Strings.SessionList.CopyAsDone(target, result.Notes));
-        else
-            CopyAsNotice?.Invoke(this, Strings.SessionList.CopyAsClipboardFailed(target));
+        try { CopyAsNotice?.Invoke(this, Strings.SessionList.CopyAsFailed(target)); }
+        catch (Exception)
+        {
+            // The failure line is the last report there is. A subscriber that throws on it leaves
+            // nobody to tell, and the task must still end without faulting.
+        }
     }
 
     private void RemoveSelected()

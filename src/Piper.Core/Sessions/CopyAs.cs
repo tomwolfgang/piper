@@ -59,6 +59,9 @@ public enum CopyAsNote
     /// <summary>The cmd.exe command is longer than the prompt accepts.</summary>
     CommandTooLong,
 
+    /// <summary>The cmd.exe command passes values with an exclamation mark through a temporary file.</summary>
+    CmdValuesInFile,
+
     /// <summary>Windows PowerShell 5.1 does not send a Cookie header passed to Invoke-WebRequest.</summary>
     CookieNeedsPowerShell7,
 
@@ -440,6 +443,8 @@ public static class CopyAs
         public const string CookieNeedsPowerShell7 = "Windows PowerShell 5.1 does not send a Cookie header given this way; PowerShell 7 does.";
         public const string CommandTooLong = "This command is longer than the 8191 characters cmd.exe accepts; use the PowerShell or bash variant.";
 
+        public const string CmdValuesInFile = "Values with an exclamation mark are passed to curl in a temporary file, because cmd.exe expands them when delayed expansion is on; the file is deleted when curl finishes.";
+
         public static string BodyNotCaptured(long kept, long total) =>
             string.Create(CultureInfo.InvariantCulture, $"The request body is not included: only the first {kept} of {total} bytes were captured.");
 
@@ -541,35 +546,72 @@ public static class CopyAs
     private static string RenderCurlCmd(Model m)
     {
         const string NewLine = "\r\n";
-        var args = new List<string> { "curl.exe " + CmdArg(m.Url), "--globoff" };
-        AddCurlMethod(m, args, CmdArg);
-        if (m.HasHeader("Accept-Encoding")) args.Add("--compressed");
-        foreach (var (name, value) in m.Headers)
-            args.Add("--header " + CmdArg(HeaderPrefix(name, value.Bytes.Length) + value.Text));
-        if (m.HasBody && !m.HasHeader("Content-Type")) args.Add("--header " + CmdArg("Content-Type:"));
+
+        // cmd.exe with delayed expansion on (cmd /v:on, or the DelayedExpansion registry value) expands
+        // !NAME! after it has read the carets, and no spelling of an exclamation mark survives both that
+        // and the default of delayed expansion off (see CmdArg). So a value that holds one never appears
+        // in the command: it goes to curl in a config file, written as base64 and decoded by certutil
+        // like a binary body, and the command itself holds no exclamation mark at all.
+        var headers = m.Headers.Select(h => HeaderPrefix(h.Name, h.Value.Bytes.Length) + h.Value.Text).ToList();
+        if (m.HasBody && !m.HasHeader("Content-Type")) headers.Add("Content-Type:");
+        var sendsMethod = !m.IsHead && (m.Method != "GET" || m.HasBody);
+        var urlInFile = m.Url.Contains('!');
+        var methodInFile = sendsMethod && m.Method.Contains('!');
+        var headersInFile = headers.Any(h => h.Contains('!'));
+        var bodyInFile = m.Kind == BodyKind.Text && m.BodyText.Contains('!');
+
+        var config = new StringBuilder();
+        if (urlInFile) config.Append("url = ").Append(CurlConfigString(m.Url)).Append('\n');
+        if (methodInFile) config.Append("request = ").Append(CurlConfigString(m.Method)).Append('\n');
+        if (headersInFile)
+            foreach (var header in headers) config.Append("header = ").Append(CurlConfigString(header)).Append('\n');
+        if (bodyInFile) config.Append("data-raw = ").Append(CurlConfigString(m.BodyText)).Append('\n');
 
         var before = new StringBuilder();
-        var after = string.Empty;
+        var deleted = new List<string>();
+        void WriteFile(string stem, string extension, byte[] bytes)
+        {
+            // The file name comes from the content, so two copies of different content cannot collide
+            // and the snippet stays the same each time it is copied.
+            var b64 = stem + ".b64";
+            var file = stem + extension;
+            var encoded = Base64(bytes);
+            for (var i = 0; i < encoded.Length; i += Base64LineLength)
+            {
+                var chunk = encoded.AsSpan(i, Math.Min(Base64LineLength, encoded.Length - i));
+                before.Append(i == 0 ? ">" : ">>").Append(" \"").Append(b64).Append("\" echo ").Append(chunk).Append(NewLine);
+            }
+            before.Append("certutil -f -decode \"").Append(b64).Append("\" \"").Append(file).Append("\" > nul").Append(NewLine);
+            deleted.Add(b64);
+            deleted.Add(file);
+        }
+
+        var args = new List<string> { "curl.exe" };
+        if (config.Length > 0)
+        {
+            var configBytes = Encoding.UTF8.GetBytes(config.ToString());
+            var stem = "%TEMP%\\piper-args-" + Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(configBytes))[..16].ToLowerInvariant();
+            WriteFile(stem, ".cfg", configBytes);
+            args[0] += " --config \"" + stem + ".cfg\"";
+            m.Note(CopyAsNote.CmdValuesInFile, Comments.CmdValuesInFile);
+        }
+        if (!urlInFile) args[0] += " " + CmdArg(m.Url);
+        args.Add("--globoff");
+        if (m.IsHead) args.Add("--head");
+        else if (sendsMethod && !methodInFile) args.Add("--request " + CmdArg(m.Method));
+        if (m.HasHeader("Accept-Encoding")) args.Add("--compressed");
+        if (!headersInFile)
+            foreach (var header in headers) args.Add("--header " + CmdArg(header));
+
         if (m.Kind == BodyKind.Binary)
         {
             // cmd.exe has no way to hold a line break or arbitrary bytes in an argument, so the body is
             // written to a temporary file as base64 and decoded by certutil, which ships with Windows.
-            // The file name comes from the body, so two copies of different bodies cannot collide
-            // and the snippet stays the same each time it is copied.
             var stem = "%TEMP%\\piper-body-" + Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(m.Body))[..16].ToLowerInvariant();
-            var B64 = stem + ".b64";
-            var Bin = stem + ".bin";
-            var encoded = Base64(m.Body);
-            for (var i = 0; i < encoded.Length; i += Base64LineLength)
-            {
-                var chunk = encoded.AsSpan(i, Math.Min(Base64LineLength, encoded.Length - i));
-                before.Append(i == 0 ? ">" : ">>").Append(" \"").Append(B64).Append("\" echo ").Append(chunk).Append(NewLine);
-            }
-            before.Append("certutil -f -decode \"").Append(B64).Append("\" \"").Append(Bin).Append("\" > nul").Append(NewLine);
-            args.Add("--data-binary \"@" + Bin + "\"");
-            after = NewLine + "del /q \"" + B64 + "\" \"" + Bin + "\"";
+            WriteFile(stem, ".bin", m.Body);
+            args.Add("--data-binary \"@" + stem + ".bin\"");
         }
-        else if (m.Kind == BodyKind.Text)
+        else if (m.Kind == BodyKind.Text && !bodyInFile)
         {
             args.Add("--data-raw " + CmdArg(m.BodyText));
         }
@@ -577,6 +619,7 @@ public static class CopyAs
         if (string.Join(" ", args).Length > CmdLineWarningLength)
             m.Note(CopyAsNote.CommandTooLong, Comments.CommandTooLong);
 
+        var after = deleted.Count == 0 ? string.Empty : NewLine + "del /q " + string.Join(" ", deleted.Select(f => "\"" + f + "\""));
         return CommentBlock(m, "REM ", NewLine) + before + string.Join(" ^" + NewLine + "  ", args) + after;
     }
 
@@ -592,8 +635,20 @@ public static class CopyAs
     /// name starts with. For the interactive prompt and <c>cmd /c</c>; a batch file would need <c>%%</c>. The text must
     /// not hold a line break, which cmd.exe cannot carry in an argument.
     /// </summary>
+    /// <remarks>
+    /// The text must not hold an exclamation mark either, and the method throws if it does. With delayed
+    /// expansion on (<c>cmd /v:on</c>, or the DelayedExpansion registry value, both off by default) cmd.exe
+    /// replaces <c>!NAME!</c> with the variable's value after it has read the carets, and a second pass
+    /// removes carets from any line that still has a <c>!</c>. <c>^!</c> is right only with it off and
+    /// <c>^^^!</c> only with it on, so there is no spelling that is right for both, and a leak would send
+    /// an environment variable to the request's host. The caller moves such a value out of the command
+    /// line instead (see <c>RenderCurlCmd</c>). The same limit applies to a <c>%TEMP%</c> whose path holds
+    /// an exclamation mark, which the temporary files of the snippet are named from.
+    /// </remarks>
     internal static string CmdArg(string text)
     {
+        if (text.Contains('!')) throw new ArgumentException("An exclamation mark cannot be quoted for cmd.exe.", nameof(text));
+
         var quoted = new StringBuilder(text.Length + 2).Append('"');
         for (var i = 0; i < text.Length; i++)
         {
@@ -636,8 +691,9 @@ public static class CopyAs
         return sb.ToString();
     }
 
-    // Every character cmd.exe treats specially outside quotes; the percent sign is dealt with apart.
-    private static bool IsCmdMetacharacter(char c) => "()%!^\"<>&|".Contains(c);
+    // Every character cmd.exe treats specially outside quotes; the percent sign is dealt with apart, and
+    // the exclamation mark is never quoted (see CmdArg).
+    private static bool IsCmdMetacharacter(char c) => "()%^\"<>&|".Contains(c);
 
     // ---------------------------------------------------------------- curl, PowerShell
 
