@@ -10,6 +10,12 @@ public enum CopyAsTarget
     /// <summary><c>curl</c> typed into bash or zsh.</summary>
     CurlBash,
 
+    /// <summary><c>curl.exe</c> typed into PowerShell, where <c>curl</c> alone is an alias for something else.</summary>
+    CurlPowerShell,
+
+    /// <summary><c>Invoke-WebRequest</c> in PowerShell.</summary>
+    PowerShellWebRequest,
+
     /// <summary>The JavaScript <c>fetch</c> function.</summary>
     JavaScriptFetch,
 
@@ -43,6 +49,12 @@ public enum CopyAsNote
 
     /// <summary>A Host header that differs from the URL could not be carried to the target.</summary>
     HostHeaderDropped,
+
+    /// <summary>Non-ASCII header text may be re-encoded by the shell it is pasted into.</summary>
+    NonAsciiMayChange,
+
+    /// <summary>Windows PowerShell 5.1 does not send a Cookie header passed to Invoke-WebRequest.</summary>
+    CookieNeedsPowerShell7,
 
     /// <summary>An Upgrade header (a WebSocket handshake, say) was not copied, so the replay will not upgrade.</summary>
     UpgradeDropped,
@@ -98,6 +110,8 @@ public static class CopyAs
         var text = target switch
         {
             CopyAsTarget.CurlBash => RenderCurlBash(model),
+            CopyAsTarget.CurlPowerShell => RenderCurlPowerShell(model),
+            CopyAsTarget.PowerShellWebRequest => RenderPowerShellWebRequest(model),
             CopyAsTarget.JavaScriptFetch => RenderJavaScript(model),
             CopyAsTarget.PythonRequests => RenderPython(model),
             CopyAsTarget.CSharpHttpClient => RenderCSharp(model),
@@ -147,7 +161,8 @@ public static class CopyAs
             if (c is < ' ' or > '~') return null;
 
         var model = new Model(target, request.Method, url);
-        var isCurl = target == CopyAsTarget.CurlBash;
+        var isCurl = target is CopyAsTarget.CurlBash or CopyAsTarget.CurlPowerShell;
+        var curlConfigShell = target == CopyAsTarget.CurlPowerShell;
 
         var bodyWasDecoded = PrepareBody(request, model);
 
@@ -191,6 +206,20 @@ public static class CopyAs
                 continue;
             }
 
+            if (curlConfigShell && HasInvisibleCharacter(value.Text))
+            {
+                model.Note(CopyAsNote.HeadersSkipped, Comments.HeadersSkipped);
+                continue;
+            }
+
+            // PowerShell 7 was not probed: Windows PowerShell 5.1 sends the bytes of such a value as they
+            // are, another PowerShell may not.
+            if ((curlConfigShell || target == CopyAsTarget.PowerShellWebRequest) && value.Text.Any(c => c > '~'))
+                model.Note(CopyAsNote.NonAsciiMayChange, Comments.NonAsciiMayChange);
+
+            if (target == CopyAsTarget.PowerShellWebRequest && name.Equals("Cookie", StringComparison.OrdinalIgnoreCase))
+                model.Note(CopyAsNote.CookieNeedsPowerShell7, Comments.CookieNeedsPowerShell7);
+
             model.Headers.Add((name, value));
         }
 
@@ -198,7 +227,7 @@ public static class CopyAs
         // Cookie header is one header with "; " between crumbs on HTTP/1.1, so it is always joined. No
         // tool joins repeated Cookie headers, and fetch joins repeated headers with ", ", which corrupts it.
         // Targets that take a header dictionary cannot repeat any other header either.
-        MergeDuplicates(model, allHeaders: target == CopyAsTarget.PythonRequests);
+        MergeDuplicates(model, allHeaders: target is CopyAsTarget.PowerShellWebRequest or CopyAsTarget.PythonRequests);
 
         return model;
     }
@@ -232,8 +261,10 @@ public static class CopyAs
         }
 
         model.Body = decoded.Bytes;
+        var target = model.Target;
+        var asciiOnly = target == CopyAsTarget.CurlPowerShell;
 
-        if (TryInlineText(decoded.Bytes, request.ContentType, asciiOnly: false, singleLine: false, out var text))
+        if (TryInlineText(decoded.Bytes, request.ContentType, asciiOnly, singleLine: false, out var text))
         {
             model.Kind = BodyKind.Text;
             model.BodyText = text;
@@ -326,6 +357,25 @@ public static class CopyAs
         return true;
     }
 
+    private static bool HasInvisibleCharacter(string text)
+    {
+        foreach (var rune in text.EnumerateRunes())
+        {
+            if (rune == Rune.ReplacementChar) return true;
+            switch (Rune.GetUnicodeCategory(rune))
+            {
+                case UnicodeCategory.Control when rune.Value != '\t':
+                case UnicodeCategory.Format:
+                case UnicodeCategory.LineSeparator:
+                case UnicodeCategory.ParagraphSeparator:
+                case UnicodeCategory.PrivateUse:
+                case UnicodeCategory.OtherNotAssigned:
+                    return true;
+            }
+        }
+        return false;
+    }
+
     private static bool SameAuthority(string host, Uri uri)
     {
         host = host.Trim();
@@ -365,9 +415,11 @@ public static class CopyAs
         public const string HeadersSkipped = "Headers with a name or value that cannot be written safely were left out.";
         public const string HostHeaderDropped = "The captured Host header differs from the URL and was not copied.";
         public const string DuplicateHeadersMerged = "Repeated headers were merged into one value because this tool cannot repeat a header.";
+        public const string NonAsciiMayChange = "Non-ASCII header text may be re-encoded by the shell it is pasted into, or by the runtime that sends it.";
         public const string BodyDecodeCut = "The request body is not included: decoding it stopped at a size limit or a corrupt stream, so only part of it is known.";
         public const string BodyAsBase64 = "The request body is binary or not safe to paste as text, so it is written as base64 and decoded here.";
         public const string UpgradeDropped = "The Upgrade and Connection headers were not copied, so this request will not switch protocols (a WebSocket handshake, for example).";
+        public const string CookieNeedsPowerShell7 = "Windows PowerShell 5.1 does not send a Cookie header given this way; PowerShell 7 does.";
 
         public static string BodyNotCaptured(long kept, long total) =>
             string.Create(CultureInfo.InvariantCulture, $"The request body is not included: only the first {kept} of {total} bytes were captured.");
@@ -520,6 +572,41 @@ public static class CopyAs
 
     internal static string BashQuote(string text) => BashQuote(Encoding.UTF8.GetBytes(text));
 
+    // ---------------------------------------------------------------- curl, PowerShell
+
+    private static string RenderCurlPowerShell(Model m)
+    {
+        // The arguments go in a curl config read from stdin rather than on the command line. How
+        // PowerShell hands double quotes to a native program differs between Windows PowerShell 5.1
+        // and PowerShell 7, so any quoting of them would be right in only one. A literal here-string
+        // is not interpreted at all, and curl's own config escapes are the same everywhere.
+        var config = new StringBuilder();
+        config.Append("url = ").Append(CurlConfigString(m.Url)).Append('\n');
+        config.Append("globoff\n");
+        if (m.IsHead) config.Append("head\n");
+        else if (m.Method != "GET" || m.HasBody) config.Append("request = ").Append(CurlConfigString(m.Method)).Append('\n');
+        if (m.HasHeader("Accept-Encoding")) config.Append("compressed\n");
+        foreach (var (name, value) in m.Headers)
+            config.Append("header = ").Append(CurlConfigString(HeaderPrefix(name, value.Bytes.Length) + value.Text)).Append('\n');
+        if (m.HasBody && !m.HasHeader("Content-Type")) config.Append("header = \"Content-Type:\"\n");
+        if (m.Kind == BodyKind.Text) config.Append("data-raw = ").Append(CurlConfigString(m.BodyText)).Append('\n');
+
+        var sb = new StringBuilder(CommentBlock(m, "# ", "\n"));
+        var tail = " | curl.exe --config -";
+        var cleanup = string.Empty;
+        if (m.Kind == BodyKind.Binary)
+        {
+            sb.Append("$piperBody = [IO.Path]::GetTempFileName()\n");
+            sb.Append("[IO.File]::WriteAllBytes($piperBody, [Convert]::FromBase64String('").Append(Base64(m.Body)).Append("'))\n");
+            tail = " | curl.exe --config - --data-binary \"@$piperBody\"";
+            cleanup = "\nRemove-Item -LiteralPath $piperBody";
+        }
+
+        // Every config line starts with a keyword, so none can be the "'@" that ends a here-string.
+        sb.Append("@'\n").Append(config).Append("'@").Append(tail).Append(cleanup);
+        return sb.ToString();
+    }
+
     /// <summary>One curl config value in double quotes, with the escapes curl's config parser defines.</summary>
     internal static string CurlConfigString(string text)
     {
@@ -537,6 +624,101 @@ public static class CopyAs
             }
         }
         return sb.Append('"').ToString();
+    }
+
+    // ---------------------------------------------------------------- PowerShell Invoke-WebRequest
+
+    private static string RenderPowerShellWebRequest(Model m)
+    {
+        var sb = new StringBuilder(CommentBlock(m, "# ", "\n"));
+        sb.Append("$params = @{\n");
+        sb.Append("    Uri = ").Append(PsString(m.Url)).Append('\n');
+        sb.Append("    Method = ").Append(PsString(m.Method)).Append('\n');
+        sb.Append("    UseBasicParsing = $true\n");
+
+        // A redirect is not followed: a server that answers with one could otherwise send the copied
+        // Cookie and other credentials on to a host the capture never contacted.
+        sb.Append("    MaximumRedirection = 0\n");
+
+        var other = new List<(string Name, HeaderValue Value)>();
+        foreach (var header in m.Headers)
+        {
+            if (header.Name.Equals("Content-Type", StringComparison.OrdinalIgnoreCase))
+                sb.Append("    ContentType = ").Append(PsString(WireText(header.Value))).Append('\n');
+            else if (header.Name.Equals("User-Agent", StringComparison.OrdinalIgnoreCase))
+                sb.Append("    UserAgent = ").Append(PsString(WireText(header.Value))).Append('\n');
+            else
+                other.Add(header);
+        }
+
+        if (other.Count > 0)
+        {
+            sb.Append("    Headers = @{\n");
+            foreach (var (name, value) in other)
+                sb.Append("        ").Append(PsString(name)).Append(" = ").Append(PsString(WireText(value))).Append('\n');
+            sb.Append("    }\n");
+        }
+
+        if (m.Kind == BodyKind.Binary)
+            sb.Append("    Body = [Convert]::FromBase64String(").Append(PsString(Base64(m.Body))).Append(")\n");
+        else if (m.Kind == BodyKind.Text)
+        {
+            var literal = PsString(m.BodyText);
+            sb.Append("    Body = ").Append(m.BodyText.All(c => c <= '\u007f')
+                ? literal
+                : "[Text.Encoding]::UTF8.GetBytes(" + literal + ")").Append('\n');
+        }
+
+        sb.Append("}\nInvoke-WebRequest @params");
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// A PowerShell expression that is exactly <paramref name="text"/>. Printable characters sit in a
+    /// single-quoted literal with <c>'</c> doubled; everything else, line breaks, control and format
+    /// characters, and the typographic quotes PowerShell reads as single quotes, is a <c>[char]</c>
+    /// joined on, so no character can end the literal or be reinterpreted.
+    /// </summary>
+    internal static string PsString(string text)
+    {
+        var parts = new List<string>();
+        var literal = new StringBuilder();
+
+        void Flush()
+        {
+            if (literal.Length == 0) return;
+            parts.Add("'" + literal + "'");
+            literal.Clear();
+        }
+
+        foreach (var c in text)
+        {
+            if (c == '\'') literal.Append("''");
+            else if (IsPlainPowerShellChar(c)) literal.Append(c);
+            else
+            {
+                Flush();
+                parts.Add("[char]0x" + ((int)c).ToString("x4", CultureInfo.InvariantCulture));
+            }
+        }
+        Flush();
+
+        if (parts.Count == 0) return "''";
+
+        // The left operand decides the type of a +, so an expression that starts with a character must
+        // be turned into a string first.
+        if (parts[0].StartsWith('[')) parts[0] = "[string]" + parts[0];
+        return parts.Count == 1 ? parts[0] : "(" + string.Join(" + ", parts) + ")";
+    }
+
+    private static bool IsPlainPowerShellChar(char c)
+    {
+        if (c is >= ' ' and <= '~') return true;
+        if (c is '‘' or '’' or '‚' or '‛') return false;
+        if (char.IsSurrogate(c)) return false;
+        return char.GetUnicodeCategory(c) is not (UnicodeCategory.Control or UnicodeCategory.Format
+            or UnicodeCategory.LineSeparator or UnicodeCategory.ParagraphSeparator
+            or UnicodeCategory.PrivateUse or UnicodeCategory.OtherNotAssigned);
     }
 
     // ---------------------------------------------------------------- JavaScript fetch

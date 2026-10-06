@@ -51,6 +51,54 @@ internal static class CopyAsTests
                 # Headers with a name or value that cannot be written safely were left out.
                 printf %s {CopyAs.BashQuote(Encoding.Latin1.GetBytes(HostileBashConfig))} | curl --config -
                 """,
+        [CopyAsTarget.CurlPowerShell] = """
+                # The request body is binary or not safe to paste as text, so it is written as base64 and decoded here.
+                # Non-ASCII header text may be re-encoded by the shell it is pasted into, or by the runtime that sends it.
+                # Headers with a name or value that cannot be written safely were left out.
+                $piperBody = [IO.Path]::GetTempFileName()
+                [IO.File]::WriteAllBytes($piperBody, [Convert]::FromBase64String('eyJxIjoiJChpZCkgYHhgICd5JyAlUEFUSCUgXCJ6XCIiLCJ1Ijoiw6kifQ=='))
+                @'
+                url = "https://api.example.test/v1/it's?q=$(id)&b=%60x%60&p=100%25"
+                globoff
+                request = "POST"
+                compressed
+                header = "Content-Type: application/json"
+                header = "Accept-Encoding: gzip, br"
+                header = "Authorization: Bearer abc$def`x`"
+                header = "X-Dollar: $(touch /tmp/pwn) ${HOME} `id`"
+                header = "X-Quotes: it's \"quoted\" \\ back\\"
+                header = "X-Cmd: 100% %PATH% a&b|c<d>e^f!g (h)"
+                header = "X-Empty;"
+                header = "X-Uni: café ’ 😀"
+                header = "X-Dup: 1"
+                header = "X-Dup: 2"
+                '@ | curl.exe --config - --data-binary "@$piperBody"
+                Remove-Item -LiteralPath $piperBody
+                """,
+        [CopyAsTarget.PowerShellWebRequest] = """
+                # Non-ASCII header text may be re-encoded by the shell it is pasted into, or by the runtime that sends it.
+                # Headers with a name or value that cannot be written safely were left out.
+                # Repeated headers were merged into one value because this tool cannot repeat a header.
+                $params = @{
+                    Uri = 'https://api.example.test/v1/it''s?q=$(id)&b=%60x%60&p=100%25'
+                    Method = 'POST'
+                    UseBasicParsing = $true
+                    MaximumRedirection = 0
+                    ContentType = 'application/json'
+                    Headers = @{
+                        'Accept-Encoding' = 'gzip, br'
+                        'Authorization' = 'Bearer abc$def`x`'
+                        'X-Dollar' = '$(touch /tmp/pwn) ${HOME} `id`'
+                        'X-Quotes' = 'it''s "quoted" \ back\'
+                        'X-Cmd' = '100% %PATH% a&b|c<d>e^f!g (h)'
+                        'X-Empty' = ''
+                        'X-Uni' = ('cafÃ© â' + [char]0x0080 + [char]0x0099 + ' ð' + [char]0x009f + [char]0x0098 + [char]0x0080)
+                        'X-Dup' = '1, 2'
+                    }
+                    Body = [Text.Encoding]::UTF8.GetBytes('{"q":"$(id) `x` ''y'' %PATH% \"z\"","u":"é"}')
+                }
+                Invoke-WebRequest @params
+                """,
         [CopyAsTarget.JavaScriptFetch] = """
                 // Headers with a name or value that cannot be written safely were left out.
                 await fetch("https://api.example.test/v1/it's?q=$(id)&b=%60x%60&p=100%25", {
@@ -161,6 +209,14 @@ internal static class CopyAsTests
             runner.AreEqual("$'\\x00'", CopyAs.BashQuote(new byte[] { 0 }), "bash: even a NUL is written as an escape, never raw");
 
             runner.AreEqual("\"a\\\"b\\\\c\\r\\n\\t\"", CopyAs.CurlConfigString("a\"b\\c\r\n\t"), "curl config: quote, backslash and control escapes");
+
+            runner.AreEqual("''", CopyAs.PsString(""), "PowerShell: empty");
+            runner.AreEqual("'it''s'", CopyAs.PsString("it's"), "PowerShell: a single quote is doubled");
+            runner.AreEqual("'$(x) `y` \"z\"'", CopyAs.PsString("$(x) `y` \"z\""), "PowerShell: nothing inside single quotes is interpreted");
+            runner.AreEqual("[string][char]0x2019", CopyAs.PsString("\u2019"), "PowerShell: a typographic quote, which PowerShell reads as a quote, is a [char]");
+            runner.AreEqual("('a' + [char]0x2018 + 'b')", CopyAs.PsString("a\u2018b"), "PowerShell: ... in the middle of text too");
+            runner.AreEqual("('a' + [char]0x000a + 'b')", CopyAs.PsString("a\nb"), "PowerShell: a line break is a [char]");
+            runner.AreEqual("([string][char]0xd83d + [char]0xde00)", CopyAs.PsString("\ud83d\ude00"), "PowerShell: an astral character is its two UTF-16 units");
 
             runner.AreEqual("\"a\\\"b\\\\</script>\\u2028\\u0000\"", CopyAs.JsString("a\"b\\</script>\u2028\0"), "JavaScript: quotes, backslashes and invisible characters");
             runner.AreEqual("\"\\ud83d\\ude00\"", CopyAs.JsString("\ud83d\ude00"), "JavaScript: an astral character is a surrogate pair");
@@ -296,13 +352,28 @@ internal static class CopyAsTests
 
     private static async Task RoundTripsAsync(TestRunner runner)
     {
+        var system = Environment.SystemDirectory;
+        var curl = Path.Combine(system, "curl.exe");
         var bash = new[]
         {
             Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Git", "usr", "bin", "bash.exe"),
             Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", "Git", "usr", "bin", "bash.exe"),
         }.FirstOrDefault(File.Exists);
+        var powershell = Path.Combine(system, "WindowsPowerShell", "v1.0", "powershell.exe");
         var node = FindOnPath("node.exe");
         var python = FindOnPath("python.exe");
+
+        var curlPowerShell = File.Exists(curl) && File.Exists(powershell) ? null : "curl.exe or powershell.exe is not installed";
+        await RoundTripAsync(runner, "PowerShell, curl.exe", CopyAsTarget.CurlPowerShell, curlPowerShell, (text, _) => RunPowerShellAsync(powershell, text));
+
+        // The console re-encodes what PowerShell pipes to curl, so non-ASCII text is not asserted to arrive
+        // verbatim here; that it cannot reach curl's argv (no option is added, nothing leaks) still is.
+        await RoundTripAsync(runner, "PowerShell, curl.exe", CopyAsTarget.CurlPowerShell, curlPowerShell,
+            (text, _) => RunPowerShellAsync(powershell, text), RoundTripSet.BestFit, verbatimNonAscii: false);
+
+        await RoundTripAsync(runner, "PowerShell, Invoke-WebRequest", CopyAsTarget.PowerShellWebRequest,
+            File.Exists(powershell) ? null : "powershell.exe is not installed",
+            (text, _) => RunPowerShellAsync(powershell, text));
 
         var bashMissing = bash is null ? "no bash (Git for Windows) is installed" : null;
         await RoundTripAsync(runner, "bash", CopyAsTarget.CurlBash, bashMissing, (text, dir) => ExecuteAsync(bash!, "-l -s", text, dir));
@@ -394,6 +465,8 @@ internal static class CopyAsTests
         // Authorization on to another host: the second origin must never be contacted.
         await RedirectRoundTripAsync(runner, "Node.js fetch", CopyAsTarget.JavaScriptFetch, node is null ? "node.exe is not on PATH" : null, RunNodeAsync);
         await RedirectRoundTripAsync(runner, "Python requests", CopyAsTarget.PythonRequests, requests ? null : "python with the requests package is not installed", RunPythonAsync);
+        await RedirectRoundTripAsync(runner, "PowerShell, Invoke-WebRequest", CopyAsTarget.PowerShellWebRequest,
+            File.Exists(powershell) ? null : "powershell.exe is not installed", (text, _) => RunPowerShellAsync(powershell, text));
     }
 
     private static async Task RedirectRoundTripAsync(TestRunner runner, string shell, CopyAsTarget target, string? unavailable, Func<string, string, Task<string>> run)
@@ -487,9 +560,17 @@ internal static class CopyAsTests
                 expected.AddRange(bestFitExpected);
 
                 // The runtimes that can carry bytes above 127 in a header must deliver them exactly.
-                if (target is CopyAsTarget.PythonRequests or CopyAsTarget.JavaScriptFetch)
+                if (target is CopyAsTarget.PythonRequests or CopyAsTarget.JavaScriptFetch or CopyAsTarget.PowerShellWebRequest)
                     expected.Add(("X-Uni", Latin1Unicode));
                 foreach (var (name, value) in expected) request.Headers.Add(name, value);
+
+                // Windows PowerShell 5.1 does not send a Cookie header given to Invoke-WebRequest; the
+                // snippet says so, and this pins that it does.
+                if (target == CopyAsTarget.PowerShellWebRequest)
+                {
+                    expected.RemoveAll(h => h.Item1 == "Cookie");
+                    runner.IsTrue(CopyAs.Build(request, target)!.Notes.Contains(CopyAsNote.CookieNeedsPowerShell7), $"{shell}: the Cookie limitation is reported");
+                }
 
                 var text = CopyAs.Build(request, target)!.Text;
 
@@ -526,6 +607,10 @@ internal static class CopyAsTests
             }
         });
     }
+
+    private static Task<string> RunPowerShellAsync(string powershell, string script) =>
+        ExecuteAsync(powershell, "-NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand "
+            + Convert.ToBase64String(Encoding.Unicode.GetBytes("$ErrorActionPreference = 'Stop'\n" + script)), null);
 
     private static string? FindOnPath(string file) =>
         (Environment.GetEnvironmentVariable("PATH") ?? string.Empty).Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries)
