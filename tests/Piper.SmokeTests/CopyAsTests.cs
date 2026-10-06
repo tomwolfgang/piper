@@ -43,13 +43,90 @@ internal static class CopyAsTests
         + "header = \"X-Dup: 2\"\n"
         + (body.Length > 0 ? "data-raw = " + CopyAs.CurlConfigString(body) + "\n" : string.Empty);
 
+    private static readonly string HostileCmdConfig = HostileConfig("X-Uni: café ’ 😀", string.Empty);
+
     private static readonly string HostileBashConfig = HostileConfig("X-Uni: " + Latin1Unicode, Encoding.Latin1.GetString(Encoding.UTF8.GetBytes(BodyJson)));
+
+    // The temporary file names carry a random token; a snapshot compares them with it replaced.
+    private static string WithoutToken(string text) =>
+        System.Text.RegularExpressions.Regex.Replace(text, "piper-(args|body)-[0-9a-f]{16}", "piper-$1-TOKEN");
+
+    // The curl config a cmd snippet writes: its base64 line is decoded here instead of by certutil.
+    private static string CmdConfigOf(string snippet)
+    {
+        var echo = snippet.Split("\r\n").Single(l => l.StartsWith("> \"%TEMP%\\piper-args-", StringComparison.Ordinal));
+        return Encoding.UTF8.GetString(Convert.FromBase64String(echo[(echo.IndexOf(" echo ", StringComparison.Ordinal) + 6)..]));
+    }
 
     private static readonly Dictionary<CopyAsTarget, string> Snapshots = new()
     {
         [CopyAsTarget.CurlBash] = $"""
                 # Headers with a name or value that cannot be written safely were left out.
                 printf %s {CopyAs.BashQuote(Encoding.Latin1.GetBytes(HostileBashConfig))} | curl --config -
+                """,
+        // X-Cmd holds an exclamation mark and X-Uni is not ASCII, so the request travels in a curl config
+        // file (written as base64) and the command line is plain ASCII with no "!" in it.
+        [CopyAsTarget.CurlCmd] = $"""
+                REM The request body is binary or not safe to paste as text, so it is written as base64 and decoded here.
+                REM Non-ASCII header text may be re-encoded by the shell it is pasted into, or by the runtime that sends it.
+                REM Headers with a name or value that cannot be written safely were left out.
+                REM This request has values cmd.exe cannot carry safely (an exclamation mark, or text that is not plain ASCII), so the request, headers and credentials included, is passed to curl in a temporary file in your temp folder as plain text. It is deleted when curl finishes, and stays there if the paste is interrupted: delete the piper-* files in that folder then.
+                > "%TEMP%\piper-args-TOKEN.b64" echo {Convert.ToBase64String(Encoding.UTF8.GetBytes(HostileCmdConfig))}
+                certutil -f -decode "%TEMP%\piper-args-TOKEN.b64" "%TEMP%\piper-args-TOKEN.cfg" > nul
+                del /q "%TEMP%\piper-args-TOKEN.b64"
+                > "%TEMP%\piper-body-TOKEN.b64" echo eyJxIjoiJChpZCkgYHhgICd5JyAlUEFUSCUgXCJ6XCIiLCJ1Ijoiw6kifQ==
+                certutil -f -decode "%TEMP%\piper-body-TOKEN.b64" "%TEMP%\piper-body-TOKEN.bin" > nul
+                del /q "%TEMP%\piper-body-TOKEN.b64"
+                curl.exe --config "%TEMP%\piper-args-TOKEN.cfg" ^
+                  --data-binary "@%TEMP%\piper-body-TOKEN.bin" & del /q "%TEMP%\piper-args-TOKEN.cfg" "%TEMP%\piper-body-TOKEN.bin"
+                """,
+        [CopyAsTarget.CurlPowerShell] = """
+                # The request body is binary or not safe to paste as text, so it is written as base64 and decoded here.
+                # Non-ASCII header text may be re-encoded by the shell it is pasted into, or by the runtime that sends it.
+                # Headers with a name or value that cannot be written safely were left out.
+                $piperBody = [IO.Path]::GetTempFileName()
+                [IO.File]::WriteAllBytes($piperBody, [Convert]::FromBase64String('eyJxIjoiJChpZCkgYHhgICd5JyAlUEFUSCUgXCJ6XCIiLCJ1Ijoiw6kifQ=='))
+                @'
+                url = "https://api.example.test/v1/it's?q=$(id)&b=%60x%60&p=100%25"
+                globoff
+                request = "POST"
+                compressed
+                header = "Content-Type: application/json"
+                header = "Accept-Encoding: gzip, br"
+                header = "Authorization: Bearer abc$def`x`"
+                header = "X-Dollar: $(touch /tmp/pwn) ${HOME} `id`"
+                header = "X-Quotes: it's \"quoted\" \\ back\\"
+                header = "X-Cmd: 100% %PATH% a&b|c<d>e^f!g (h)"
+                header = "X-Empty;"
+                header = "X-Uni: café ’ 😀"
+                header = "X-Dup: 1"
+                header = "X-Dup: 2"
+                '@ | curl.exe --config - --data-binary "@$piperBody"
+                Remove-Item -LiteralPath $piperBody
+                """,
+        [CopyAsTarget.PowerShellWebRequest] = """
+                # Non-ASCII header text may be re-encoded by the shell it is pasted into, or by the runtime that sends it.
+                # Headers with a name or value that cannot be written safely were left out.
+                # Repeated headers were merged into one value because this tool cannot repeat a header.
+                $params = @{
+                    Uri = 'https://api.example.test/v1/it''s?q=$(id)&b=%60x%60&p=100%25'
+                    Method = 'POST'
+                    UseBasicParsing = $true
+                    MaximumRedirection = 0
+                    ContentType = 'application/json'
+                    Headers = @{
+                        'Accept-Encoding' = 'gzip, br'
+                        'Authorization' = 'Bearer abc$def`x`'
+                        'X-Dollar' = '$(touch /tmp/pwn) ${HOME} `id`'
+                        'X-Quotes' = 'it''s "quoted" \ back\'
+                        'X-Cmd' = '100% %PATH% a&b|c<d>e^f!g (h)'
+                        'X-Empty' = ''
+                        'X-Uni' = ('cafÃ© â' + [char]0x0080 + [char]0x0099 + ' ð' + [char]0x009f + [char]0x0098 + [char]0x0080)
+                        'X-Dup' = '1, 2'
+                    }
+                    Body = [Text.Encoding]::UTF8.GetBytes('{"q":"$(id) `x` ''y'' %PATH% \"z\"","u":"é"}')
+                }
+                Invoke-WebRequest @params
                 """,
         [CopyAsTarget.JavaScriptFetch] = """
                 // Headers with a name or value that cannot be written safely were left out.
@@ -130,7 +207,7 @@ internal static class CopyAsTests
             {
                 var result = CopyAs.Build(HostileRequest(), target);
                 runner.IsTrue(result is not null, $"{target} builds");
-                runner.AreEqual(Snapshots[target].ReplaceLineEndings("\n"), result!.Text.ReplaceLineEndings("\n"), $"{target} snapshot");
+                runner.AreEqual(Snapshots[target].ReplaceLineEndings("\n"), WithoutToken(result!.Text).ReplaceLineEndings("\n"), $"{target} snapshot");
                 return Task.CompletedTask;
             });
         }
@@ -160,12 +237,357 @@ internal static class CopyAsTests
             runner.AreEqual("$'\\xc3\\xa9'", CopyAs.BashQuote("\u00e9"), "bash: non-ASCII is its UTF-8 bytes, whatever the locale");
             runner.AreEqual("$'\\x00'", CopyAs.BashQuote(new byte[] { 0 }), "bash: even a NUL is written as an escape, never raw");
 
+            runner.AreEqual("^\"^\"", CopyAs.CmdArg(""), "cmd: empty is an empty argument");
+            runner.AreEqual("^\"a^&b^|c^<d^>e^^fg^(h^)^\"", CopyAs.CmdArg("a&b|c<d>e^fg(h)"), "cmd: every metacharacter is caret-escaped");
+            var refused = false;
+            try { CopyAs.CmdArg("a!b"); }
+            catch (ArgumentException) { refused = true; }
+            runner.IsTrue(refused, "cmd: an exclamation mark has no spelling that is right with delayed expansion on and off, so it is refused");
+            foreach (var refusedText in new[] { "a＂b", "café", "a\tb", "a\u007fb" })
+            {
+                var refusedOther = false;
+                try { CopyAs.CmdArg(refusedText); }
+                catch (ArgumentException) { refusedOther = true; }
+                runner.IsTrue(refusedOther, $"cmd: text outside printable ASCII is refused (U+{(int)refusedText[1]:X4}), because an ANSI argv can turn it into a quote");
+            }
+            runner.AreEqual("^\"100%^\"", CopyAs.CmdArg("100%"), "cmd: a percent sign is followed by the caret that closing quote brings");
+            runner.AreEqual("^\"%^FOO:ZZ=%^\"", CopyAs.CmdArg("%FOO:ZZ=%"), "cmd: a variable name after a percent sign starts with a caret, so nothing expands");
+            runner.AreEqual("^\"%^%^\"", CopyAs.CmdArg("%%"), "cmd: so does the second of two percent signs");
+            runner.AreEqual("^\"%^&^\"", CopyAs.CmdArg("%&"), "cmd: and a percent sign before a metacharacter shares its caret");
+            runner.AreEqual("^\"a%^b^\"", CopyAs.CmdArg("a%b"), "cmd: and one before an ordinary character gets its own");
+            runner.AreEqual("^\"say \\^\"hi\\^\"^\"", CopyAs.CmdArg("say \"hi\""), "cmd: a quote is a backslash-escaped quote, caret-escaped");
+            runner.AreEqual("^\"C:\\dir\\\\^\"", CopyAs.CmdArg("C:\\dir\\"), "cmd: a trailing backslash is doubled so it cannot escape the closing quote");
+            runner.AreEqual("^\"a\\\\\\^\"b^\"", CopyAs.CmdArg("a\\\"b"), "cmd: backslashes before a quote are doubled");
+
             runner.AreEqual("\"a\\\"b\\\\c\\r\\n\\t\"", CopyAs.CurlConfigString("a\"b\\c\r\n\t"), "curl config: quote, backslash and control escapes");
+
+            runner.AreEqual("''", CopyAs.PsString(""), "PowerShell: empty");
+            runner.AreEqual("'it''s'", CopyAs.PsString("it's"), "PowerShell: a single quote is doubled");
+            runner.AreEqual("'$(x) `y` \"z\"'", CopyAs.PsString("$(x) `y` \"z\""), "PowerShell: nothing inside single quotes is interpreted");
+            runner.AreEqual("[string][char]0x2019", CopyAs.PsString("\u2019"), "PowerShell: a typographic quote, which PowerShell reads as a quote, is a [char]");
+            runner.AreEqual("('a' + [char]0x2018 + 'b')", CopyAs.PsString("a\u2018b"), "PowerShell: ... in the middle of text too");
+            runner.AreEqual("('a' + [char]0x000a + 'b')", CopyAs.PsString("a\nb"), "PowerShell: a line break is a [char]");
+            runner.AreEqual("([string][char]0xd83d + [char]0xde00)", CopyAs.PsString("\ud83d\ude00"), "PowerShell: an astral character is its two UTF-16 units");
 
             runner.AreEqual("\"a\\\"b\\\\</script>\\u2028\\u0000\"", CopyAs.JsString("a\"b\\</script>\u2028\0"), "JavaScript: quotes, backslashes and invisible characters");
             runner.AreEqual("\"\\ud83d\\ude00\"", CopyAs.JsString("\ud83d\ude00"), "JavaScript: an astral character is a surrogate pair");
             runner.AreEqual("\"\\U0001f600\\ufffd\"", CopyAs.PyString("\ud83d\ude00\ud800"), "Python: an astral character is one \\U escape, a lone surrogate is U+FFFD");
             runner.AreEqual("\"a\\\"b\\\\\\n\\u0000\"", CopyAs.CSharpString("a\"b\\\n\0"), "C#: quotes, backslashes and NUL");
+            return Task.CompletedTask;
+        });
+
+        await runner.RunAsync("Copy as: cmd.exe keeps every exclamation mark out of the command line", () =>
+        {
+            var request = Plain("POST", "https://h.test/a!b?x=!y!", Encoding.UTF8.GetBytes("{\"m\":\"Hello!\"}"));
+            request.Headers.Add("X-A", "!SECRET!");
+            request.Headers.Add("X-B", "plain");
+            var result = CopyAs.Build(request, CopyAsTarget.CurlCmd)!;
+            runner.IsTrue(!result.Text.Contains('!'), "no exclamation mark is left in the pasted text");
+            runner.IsTrue(result.Notes.Contains(CopyAsNote.CmdValuesInFile), "and the note says the values went to a file");
+            runner.IsTrue(result.Text.StartsWith("REM This request has values cmd.exe cannot carry safely"), "and so does the REM comment");
+
+            runner.AreEqual("url = \"https://h.test/a!b?x=!y!\"\ngloboff\nrequest = \"POST\"\nheader = \"X-A: !SECRET!\"\nheader = \"X-B: plain\"\nheader = \"Content-Type:\"\ndata-raw = \"{\\\"m\\\":\\\"Hello!\\\"}\"\n",
+                CmdConfigOf(result.Text), "the URL, method, every header (in order, so none is reordered) and the body are in the config");
+            runner.IsTrue(result.Text.Contains("curl.exe --config \"%TEMP%\\piper-args-") && !result.Text.Contains("--header") && !result.Text.Contains("--data-raw") && !result.Text.Contains("h.test"),
+                "the command reads the config and repeats none of them");
+
+            // The same for a value outside printable ASCII: a captured U+FF02 becomes a double quote in the
+            // ANSI command line of a curl.exe built with an ANSI main (Git for Windows' is), and would close
+            // the quoted argument. The pasted text holds nothing but printable ASCII outside the base64.
+            foreach (var odd in new[] { "\uff02", "\uff3c", "\u00a5", "\u201c", "\u2033", "\uff06", "\uff05", "\uff01", "\uff0d", "a\tb", "caf\u00e9" })
+            {
+                var oddRequest = Plain("POST", "https://h.test/p", Encoding.UTF8.GetBytes("a=b"));
+                oddRequest.Headers.Add("X-Odd", "v " + odd + " -o " + odd + "C:\\pwn.txt" + odd);
+                oddRequest.Headers.Add("Authorization", "Bearer secret");
+                var oddResult = CopyAs.Build(oddRequest, CopyAsTarget.CurlCmd)!;
+                var nonAscii = oddResult.Text.Where(c => (c < ' ' && c is not ('\r' or '\n')) || c > '~').ToArray();
+                runner.IsTrue(nonAscii.Length == 0, $"U+{(int)odd[0]:X4}: the pasted text is printable ASCII");
+                runner.IsTrue(!oddResult.Text.Contains("pwn") && !oddResult.Text.Contains("--header") && !oddResult.Text.Contains("secret"), $"U+{(int)odd[0]:X4}: no header is on the command line");
+                runner.IsTrue(CmdConfigOf(oddResult.Text).Contains("header = \"X-Odd: v " + odd.Replace("\t", "\\t") + " -o ", StringComparison.Ordinal), $"U+{(int)odd[0]:X4}: it is in the config");
+            }
+
+            var plain = CopyAs.Build(Plain("GET", "https://h.test/p", []), CopyAsTarget.CurlCmd)!;
+            runner.IsTrue(!plain.Text.Contains("--config") && !plain.Notes.Contains(CopyAsNote.CmdValuesInFile) && !plain.Text.Contains("del "), "without one, nothing changes");
+
+            // Deletion does not depend on curl succeeding, and the base64 copy goes as soon as it is decoded.
+            var cleaned = result.Text.Split("\r\n");
+            runner.IsTrue(cleaned.Last().Contains(" & del /q ") && cleaned.Any(l => l.StartsWith("del /q \"%TEMP%\\piper-args-", StringComparison.Ordinal) && l.EndsWith(".b64\"", StringComparison.Ordinal)),
+                "the config is deleted after curl whatever its exit, and the base64 file right after certutil");
+
+            // Each copy has its own file names, so a name cannot be predicted and pre-created.
+            var again = CopyAs.Build(request, CopyAsTarget.CurlCmd)!.Text;
+            runner.IsTrue(again != result.Text && WithoutToken(again) == WithoutToken(result.Text), "the temporary file names change from copy to copy and nothing else does");
+            return Task.CompletedTask;
+        });
+
+        await runner.RunAsync("Copy as: headers a tool or connection owns are not copied, secrets are", () =>
+        {
+            var request = Plain("POST", "https://h.test/p", Encoding.UTF8.GetBytes("a=b"));
+            request.Headers.Add("Host", "h.test");
+            request.Headers.Add("Content-Length", "3");
+            request.Headers.Add("Connection", "keep-alive");
+            request.Headers.Add("Keep-Alive", "timeout=5");
+            request.Headers.Add("Proxy-Connection", "keep-alive");
+            request.Headers.Add("Proxy-Authorization", "Basic cHJveHk6c2VjcmV0");
+            request.Headers.Add("Transfer-Encoding", "chunked");
+            request.Headers.Add("TE", "trailers");
+            request.Headers.Add("Upgrade", "websocket");
+            request.Headers.Add("Cookie", "sid=abc123");
+            request.Headers.Add("Authorization", "Bearer s3cr3t");
+            foreach (var target in AllTargets)
+            {
+                var text = CopyAs.Build(request, target)!.Text;
+                foreach (var dropped in new[] { "Content-Length", "Connection", "Keep-Alive", "Proxy-Connection", "Proxy-Authorization", "Transfer-Encoding", "TE", "Upgrade", "Host" })
+                    runner.IsTrue(!text.Contains(dropped + ":", StringComparison.OrdinalIgnoreCase) && !text.Contains("\"" + dropped + "\"", StringComparison.OrdinalIgnoreCase),
+                        $"{target}: {dropped} is not copied");
+                runner.IsTrue(text.Contains("sid=abc123") && text.Contains("Bearer s3cr3t"), $"{target}: cookies and Authorization are copied as captured");
+            }
+
+            var overridden = Plain("GET", "https://h.test/p", []);
+            overridden.Headers.Add("Host", "other.test");
+            foreach (var target in AllTargets)
+            {
+                var result = CopyAs.Build(overridden, target)!;
+                var isCurl = target is CopyAsTarget.CurlBash or CopyAsTarget.CurlCmd or CopyAsTarget.CurlPowerShell;
+                runner.AreEqual(isCurl, result.Text.Contains("Host: other.test"), $"{target}: a Host that differs from the URL is kept only where it can be sent");
+                runner.AreEqual(!isCurl, result.Notes.Contains(CopyAsNote.HostHeaderDropped), $"{target}: and the drop is reported");
+            }
+            return Task.CompletedTask;
+        });
+
+        await runner.RunAsync("Copy as: a header that cannot be written safely is left out and reported", () =>
+        {
+            var request = Plain("GET", "https://h.test/p", []);
+            request.Headers.Add("X-Good", "ok");
+            request.Headers.Add("X-Cr", "a\rInjected1: x");
+            request.Headers.Add("X-Lf", "a\nInjected2: x");
+            request.Headers.Add("X-Nul", "a\0Injected3");
+            request.Headers.Add("X-Esc", "a\u001b[2JInjected4");
+            request.Headers.Add("Bad Name", "Injected5");
+            request.Headers.Add("Bad:Name", "Injected6");
+            request.Headers.Add("Bad\"Name", "Injected7");
+            request.Headers.Add("Bad\nName", "Injected8");
+            request.Headers.Add("", "Injected9");
+            request.Headers.Add("X-Lone", "a\ud800Injected10");
+            foreach (var target in AllTargets)
+            {
+                var result = CopyAs.Build(request, target)!;
+                runner.IsTrue(!result.Text.Contains("Injected"), $"{target}: no value or name that could break out is written");
+                runner.IsTrue(result.Text.Contains("X-Good"), $"{target}: the safe header stays");
+                runner.IsTrue(result.Notes.Contains(CopyAsNote.HeadersSkipped), $"{target}: the omission is reported");
+                runner.IsTrue(result.Text.All(c => c is '\n' or '\r' or '\t' || c >= ' ' && c != '\u007f'), $"{target}: no control character in the output");
+            }
+
+            var invisible = Plain("GET", "https://h.test/p", []);
+            invisible.Headers.Add("X-Bidi", "a\u202eb");
+            runner.IsTrue(CopyAs.Build(invisible, CopyAsTarget.CurlCmd)!.Notes.Contains(CopyAsNote.HeadersSkipped), "cmd: a direction override is left out");
+            runner.IsTrue(CopyAs.Build(invisible, CopyAsTarget.CurlPowerShell)!.Notes.Contains(CopyAsNote.HeadersSkipped), "PowerShell curl: a direction override is left out");
+            runner.IsTrue(CopyAs.Build(invisible, CopyAsTarget.JavaScriptFetch)!.Text.Contains("\\u00e2\\u0080\\u00ae"), "JavaScript: its three wire bytes are written as escapes instead");
+            return Task.CompletedTask;
+        });
+
+        await runner.RunAsync("Copy as: the decoded body is written, with no Content-Encoding", () =>
+        {
+            var request = HostileRequest();
+            foreach (var target in AllTargets)
+            {
+                var text = CopyAs.Build(request, target)!.Text;
+                runner.IsTrue(!text.Contains("Content-Encoding", StringComparison.OrdinalIgnoreCase), $"{target}: Content-Encoding is not copied");
+                runner.IsTrue(!text.Contains(Convert.ToBase64String(request.Body)), $"{target}: the gzip bytes are not written");
+            }
+            runner.IsTrue(CopyAs.Build(request, CopyAsTarget.PythonRequests)!.Text.Contains("%PATH%"), "the decoded JSON is what is written");
+
+            var unknown = Plain("POST", "https://h.test/p", [1, 2, 3, 4]);
+            unknown.Headers.Add("Content-Encoding", "x-weird");
+            foreach (var target in AllTargets)
+            {
+                var text = CopyAs.Build(unknown, target)!.Text;
+                runner.IsTrue(text.Contains("Content-Encoding"), $"{target}: an encoding that could not be removed is kept");
+                runner.IsTrue(text.Contains("AQIDBA=="), $"{target}: and the original bytes are written as base64");
+            }
+            return Task.CompletedTask;
+        });
+
+        await runner.RunAsync("Copy as: binary and control-character bodies are base64, never pasted raw", () =>
+        {
+            var bodies = new[]
+            {
+                (Name: "NUL and high bytes", Bytes: new byte[] { 0, 1, 2, 0xff, 0xfe, 0x80 }, Type: "application/octet-stream"),
+                (Name: "an escape sequence in text", Bytes: Encoding.UTF8.GetBytes("a\u001b[31mred"), Type: "text/plain"),
+                (Name: "text in another charset", Bytes: Encoding.Latin1.GetBytes("caf\u00e9"), Type: "text/plain; charset=iso-8859-1"),
+                (Name: "invalid UTF-8 as text", Bytes: new byte[] { 0x61, 0xc3, 0x28 }, Type: "text/plain"),
+            };
+            foreach (var body in bodies)
+            {
+                var request = Plain("POST", "https://h.test/p", body.Bytes);
+                request.Headers.Add("Content-Type", body.Type);
+                var base64 = Convert.ToBase64String(body.Bytes);
+                foreach (var target in AllTargets)
+                {
+                    var result = CopyAs.Build(request, target)!;
+                    runner.IsTrue(result.Text.Contains(base64), $"{target}: {body.Name} is written as base64");
+                    runner.IsTrue(result.Notes.Contains(CopyAsNote.BodyAsBase64), $"{target}: {body.Name} is reported");
+                    runner.IsTrue(!result.Text.Any(c => c < ' ' && c is not ('\n' or '\r' or '\t')), $"{target}: {body.Name} puts no control character in the output");
+                }
+            }
+
+            runner.IsTrue(CopyAs.Build(Plain("POST", "https://h.test/p", [1, 2]), CopyAsTarget.CurlBash)!.Text.Contains("printf %s 'AQI=' | base64 -d | curl"), "bash decodes it on the way in");
+            runner.IsTrue(CopyAs.Build(Plain("POST", "https://h.test/p", [1, 2]), CopyAsTarget.CurlCmd)!.Text.Contains("certutil -f -decode"), "cmd decodes it with certutil");
+            runner.IsTrue(CopyAs.Build(Plain("POST", "https://h.test/p", [1, 2]), CopyAsTarget.CurlPowerShell)!.Text.Contains("FromBase64String('AQI=')"), "PowerShell decodes it into a temporary file");
+            return Task.CompletedTask;
+        });
+
+        await runner.RunAsync("Copy as: a body that is cut, incomplete or too large is left out with a comment", () =>
+        {
+            var incomplete = Plain("POST", "https://h.test/p", Encoding.UTF8.GetBytes("abcde"));
+            incomplete.BodyTotalLength = 500;
+            var oversized = Plain("POST", "https://h.test/p", Encoding.UTF8.GetBytes(new string('a', CopyAs.MaxInlineBodyBytes + 1)));
+            var bomb = Plain("POST", "https://h.test/p", Gzip(new byte[ContentCodec.MaxDecodedBytes + 1024 * 1024]));
+            bomb.Headers.Add("Content-Encoding", "gzip");
+
+            foreach (var (name, request, note) in new[]
+            {
+                ("a prefix of a larger body", incomplete, CopyAsNote.BodyNotCaptured),
+                ("a body over the inline limit", oversized, CopyAsNote.BodyTooLarge),
+                ("a body whose decoding was cut", bomb, CopyAsNote.BodyDecodeCut),
+            })
+            {
+                foreach (var target in AllTargets)
+                {
+                    var result = CopyAs.Build(request, target)!;
+                    runner.IsTrue(result.Notes.Contains(note), $"{target}: {name} is reported");
+                    runner.IsTrue(!result.Text.Contains("abcde") && !result.Text.Contains("aaaaaaaa") && !result.Text.Contains("data") && !result.Text.Contains("body:") && !result.Text.Contains("Body ="),
+                        $"{target}: {name} writes no body");
+                    runner.IsTrue(result.Text.Contains("The request body is not included"), $"{target}: {name} says so in a comment");
+                }
+            }
+            return Task.CompletedTask;
+        });
+
+        await runner.RunAsync("Copy as: a request that cannot be expressed gives nothing", () =>
+        {
+            foreach (var target in AllTargets)
+            {
+                runner.IsTrue(CopyAs.Build(new HttpRequestData { Method = "GET" }, target) is null, $"{target}: no URL");
+                runner.IsTrue(CopyAs.Build(new HttpRequestData { Method = "GET", Url = new Uri("ftp://h.test/x") }, target) is null, $"{target}: not http or https");
+                runner.IsTrue(CopyAs.Build(new HttpRequestData { Method = "GET", Url = new Uri("/relative", UriKind.Relative) }, target) is null, $"{target}: a relative URL");
+                foreach (var method in new[] { "", "GE T", "GET;id", "GET\r\nX: y", "$(id)", "GE\"T" })
+                    runner.IsTrue(CopyAs.Build(Plain(method, "https://h.test/", []), target) is null, $"{target}: method '{method.Replace("\r", "\\r").Replace("\n", "\\n")}' is not a token");
+            }
+            return Task.CompletedTask;
+        });
+
+        await runner.RunAsync("Copy as: methods, empty bodies and the fragment", () =>
+        {
+            runner.AreEqual("curl 'http://h.test/p?a=1' \\\n  --globoff", CopyAs.Build(Plain("GET", "http://h.test/p?a=1#frag", []), CopyAsTarget.CurlBash)!.Text, "bash: GET with nothing else, and no fragment");
+            runner.AreEqual("curl 'http://h.test/' \\\n  --globoff \\\n  --head", CopyAs.Build(Plain("HEAD", "http://h.test/", []), CopyAsTarget.CurlBash)!.Text, "bash: HEAD is --head, not a method that would wait for a body");
+            runner.AreEqual("curl 'http://h.test/' \\\n  --globoff \\\n  --request 'DELETE'", CopyAs.Build(Plain("DELETE", "http://h.test/", []), CopyAsTarget.CurlBash)!.Text, "bash: other methods are named");
+            var withBody = CopyAs.Build(Plain("GET", "http://h.test/", Encoding.UTF8.GetBytes("x")), CopyAsTarget.CurlBash)!.Text;
+            runner.IsTrue(withBody.Contains("--request 'GET'") && withBody.Contains("--header 'Content-Type:'"), "bash: GET with a body is named, and curl's own Content-Type is switched off");
+            runner.IsTrue(CopyAs.Build(Plain("GET", "http://h.test/", []), CopyAsTarget.JavaScriptFetch)!.Text == "await fetch(\"http://h.test/\", {\n  redirect: \"manual\",\n});", "fetch: GET has no method line");
+            runner.IsTrue(CopyAs.Build(Plain("PUT", "http://[::1]:8080/a b", []), CopyAsTarget.PythonRequests)!.Text.Contains("\"http://[::1]:8080/a%20b\""), "an IPv6 URL with a space is written escaped");
+            return Task.CompletedTask;
+        });
+
+        await runner.RunAsync("Copy as: repeated headers are merged where the target cannot repeat them", () =>
+        {
+            var request = Plain("GET", "https://h.test/", []);
+            request.Headers.Add("Cookie", "a=1");
+            request.Headers.Add("cookie", "b=2");
+            request.Headers.Add("X-Dup", "1");
+            request.Headers.Add("x-dup", "2");
+            foreach (var target in AllTargets)
+            {
+                var all = CopyAs.Build(request, target)!;
+                runner.IsTrue(all.Text.Contains("a=1; b=2") && !all.Text.Contains("\"b=2\"") && !all.Text.Contains(": b=2"), $"{target}: repeated Cookie headers are always one, joined with a semicolon");
+            }
+
+            var http2 = Plain("GET", "https://h.test/", []);
+            http2.Headers.Add("cookie", "a=1");
+            http2.Headers.Add("cookie", "b=2");
+            http2.Headers.Add("cookie", "c=3");
+            foreach (var target in AllTargets)
+            {
+                var result = CopyAs.Build(http2, target)!;
+                runner.IsTrue(result.Text.Contains("a=1; b=2; c=3"), $"{target}: HTTP/2 cookie crumbs are rejoined");
+                runner.IsTrue(!result.Notes.Contains(CopyAsNote.DuplicateHeadersMerged), $"{target}: and that is not reported as a lossy merge");
+            }
+
+            foreach (var target in new[] { CopyAsTarget.PythonRequests, CopyAsTarget.PowerShellWebRequest })
+            {
+                var result = CopyAs.Build(request, target)!;
+                runner.IsTrue(result.Text.Contains("a=1; b=2") && result.Text.Contains("1, 2"), $"{target}: cookies join with a semicolon, others with a comma");
+                runner.IsTrue(result.Notes.Contains(CopyAsNote.DuplicateHeadersMerged), $"{target}: the merge is reported");
+            }
+            runner.AreEqual(2, System.Text.RegularExpressions.Regex.Matches(CopyAs.Build(request, CopyAsTarget.CurlBash)!.Text, "x-dup:", System.Text.RegularExpressions.RegexOptions.IgnoreCase).Count, "curl keeps both");
+            runner.IsTrue(!CopyAs.Build(request, CopyAsTarget.CurlBash)!.Notes.Contains(CopyAsNote.DuplicateHeadersMerged), "and says nothing");
+            return Task.CompletedTask;
+        });
+
+        await runner.RunAsync("Copy as: replays do not follow redirects, so credentials stay with the captured host", () =>
+        {
+            var request = Plain("GET", "https://h.test/", []);
+            request.Headers.Add("Cookie", "sid=1");
+            runner.IsTrue(CopyAs.Build(request, CopyAsTarget.PythonRequests)!.Text.Contains("allow_redirects=False,"), "requests");
+            runner.IsTrue(CopyAs.Build(request, CopyAsTarget.JavaScriptFetch)!.Text.Contains("redirect: \"manual\","), "fetch");
+            runner.IsTrue(CopyAs.Build(request, CopyAsTarget.CSharpHttpClient)!.Text.Contains("AllowAutoRedirect = false,"), "HttpClient");
+            runner.IsTrue(CopyAs.Build(request, CopyAsTarget.PowerShellWebRequest)!.Text.Contains("MaximumRedirection = 0"), "Invoke-WebRequest");
+            foreach (var target in new[] { CopyAsTarget.CurlBash, CopyAsTarget.CurlCmd, CopyAsTarget.CurlPowerShell })
+                runner.IsTrue(!CopyAs.Build(request, target)!.Text.Contains("location", StringComparison.OrdinalIgnoreCase), $"{target}: curl follows none unless told to");
+            return Task.CompletedTask;
+        });
+
+        await runner.RunAsync("Copy as: pseudo-headers, upgrades and non-ASCII values", () =>
+        {
+            var request = Plain("GET", "https://h.test/", []);
+            request.Headers.Add(":authority", "h.test");
+            request.Headers.Add(":path", "/");
+            request.Headers.Add("X-Ok", "1");
+            foreach (var target in AllTargets)
+            {
+                var result = CopyAs.Build(request, target)!;
+                runner.IsTrue(!result.Text.Contains(":authority") && !result.Notes.Contains(CopyAsNote.HeadersSkipped), $"{target}: an HTTP/2 pseudo-header is ignored without a complaint");
+            }
+
+            var upgrade = Plain("GET", "https://h.test/chat", []);
+            upgrade.Headers.Add("Connection", "Upgrade");
+            upgrade.Headers.Add("Upgrade", "websocket");
+            upgrade.Headers.Add("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==");
+            foreach (var target in AllTargets)
+            {
+                var result = CopyAs.Build(upgrade, target)!;
+                runner.IsTrue(result.Notes.Contains(CopyAsNote.UpgradeDropped) && result.Text.Contains("will not switch protocols"), $"{target}: the dropped upgrade is reported");
+                runner.IsTrue(!result.Text.Contains("websocket\"") && !result.Text.Contains("websocket'") && !result.Text.Contains("Upgrade:"), $"{target}: and not copied");
+            }
+
+            var unicode = Plain("GET", "https://h.test/", []);
+            unicode.Headers.Add("X-Uni", Latin1Unicode);
+            runner.IsTrue(CopyAs.Build(unicode, CopyAsTarget.PythonRequests)!.Text.Contains("b\"caf\\xc3\\xa9 \\xe2\\x80\\x99 \\xf0\\x9f\\x98\\x80\""), "requests: a non-ASCII value is the bytes that crossed the wire");
+            runner.IsTrue(CopyAs.Build(unicode, CopyAsTarget.JavaScriptFetch)!.Text.Contains("\"caf\\u00c3\\u00a9 \\u00e2\\u0080\\u0099 \\u00f0\\u009f\\u0098\\u0080\""), "fetch: a ByteString, one character per wire byte");
+            var csharp = CopyAs.Build(unicode, CopyAsTarget.CSharpHttpClient)!.Text;
+            runner.IsTrue(csharp.Contains("RequestHeaderEncodingSelector = (_, _) => Encoding.Latin1,") && csharp.Contains("\"caf\\u00c3\\u00a9"), "HttpClient: Latin-1 encoding and one character per wire byte");
+            runner.IsTrue(!CopyAs.Build(Plain("GET", "https://h.test/", []), CopyAsTarget.CSharpHttpClient)!.Text.Contains("RequestHeaderEncodingSelector"), "HttpClient: not asked for when every header is ASCII");
+            return Task.CompletedTask;
+        });
+
+        await runner.RunAsync("Copy as: the cmd temporary files have a random name per copy, one token for both", () =>
+        {
+            var a = CopyAs.Build(Plain("POST", "https://h.test/", [1, 2, 3]), CopyAsTarget.CurlCmd)!.Text;
+            var again = CopyAs.Build(Plain("POST", "https://h.test/", [1, 2, 3]), CopyAsTarget.CurlCmd)!.Text;
+            var name = System.Text.RegularExpressions.Regex.Match(a, @"piper-body-[0-9a-f]{16}\.bin").Value;
+            var nameAgain = System.Text.RegularExpressions.Regex.Match(again, @"piper-body-[0-9a-f]{16}\.bin").Value;
+            runner.IsTrue(name.Length > 0 && nameAgain.Length > 0 && name != nameAgain, "the same body gets a different file name each time, which another user cannot guess");
+            runner.AreEqual(WithoutToken(a), WithoutToken(again), "and the text is otherwise the same");
+            return Task.CompletedTask;
+        });
+
+        await runner.RunAsync("Copy as: a cmd command too long for the prompt is flagged", () =>
+        {
+            var request = Plain("GET", "https://h.test/", []);
+            for (var i = 0; i < 100; i++) request.Headers.Add("X-Long-" + i, new string('v', 100));
+            var result = CopyAs.Build(request, CopyAsTarget.CurlCmd)!;
+            runner.IsTrue(result.Notes.Contains(CopyAsNote.CommandTooLong), "the note is there");
+            runner.IsTrue(result.Text.StartsWith("REM This command is longer than the 8191 characters"), "and so is a REM comment");
             return Task.CompletedTask;
         });
 
@@ -296,13 +718,60 @@ internal static class CopyAsTests
 
     private static async Task RoundTripsAsync(TestRunner runner)
     {
+        var system = Environment.SystemDirectory;
+        var curl = Path.Combine(system, "curl.exe");
         var bash = new[]
         {
             Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Git", "usr", "bin", "bash.exe"),
             Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", "Git", "usr", "bin", "bash.exe"),
         }.FirstOrDefault(File.Exists);
+        var powershell = Path.Combine(system, "WindowsPowerShell", "v1.0", "powershell.exe");
         var node = FindOnPath("node.exe");
         var python = FindOnPath("python.exe");
+
+        // cmd.exe twice, with delayed expansion off (the default) and on (cmd /v:on, or the registry
+        // value of the same effect), each with the values that have no exclamation mark and with the
+        // ones that do. The snippet has to deliver every value unchanged in all of them.
+        foreach (var delayed in new[] { "off", "on" })
+        {
+            foreach (var set in new[] { RoundTripSet.Simple, RoundTripSet.Plain, RoundTripSet.Bang, RoundTripSet.BestFit })
+            {
+                var cmd = Path.Combine(system, "cmd.exe");
+                var missing = File.Exists(curl) ? null : "curl.exe is not installed";
+                await RoundTripAsync(runner, $"cmd.exe /v:{delayed}", CopyAsTarget.CurlCmd, missing, (text, dir) => RunCmdByLineAsync(cmd, delayed, text, dir), set);
+
+                // The same text typed at the prompt: cmd reads it line by line from stdin, which is where a
+                // caret at the end of a line continues the command. A quote left open by a bad escape would
+                // end that continuation and run the following lines as commands of their own.
+                await RoundTripAsync(runner, $"cmd.exe /v:{delayed}, typed at the prompt", CopyAsTarget.CurlCmd, missing,
+                    (text, dir) => ExecuteAsync(cmd, "/d /v:" + delayed, text + "\r\nexit\r\n", dir), set);
+            }
+        }
+
+        // Git for Windows' curl.exe is built with an ANSI main: Windows converts its command line to the
+        // ANSI code page, so a U+FF02 on it would become a double quote. With the request in the config
+        // file nothing like that reaches it; this run puts that curl first on PATH to prove it.
+        var gitCurl = bash is null ? null : Path.GetFullPath(Path.Combine(Path.GetDirectoryName(bash)!, "..", "..", "mingw64", "bin"));
+        var gitCurlMissing = gitCurl is not null && File.Exists(Path.Combine(gitCurl, "curl.exe")) ? null : "Git for Windows' curl.exe is not installed";
+        await RoundTripAsync(runner, "cmd.exe with Git for Windows' curl.exe", CopyAsTarget.CurlCmd, gitCurlMissing,
+            (text, dir) => RunCmdByLineAsync(Path.Combine(system, "cmd.exe"), "on", text, dir, gitCurl), RoundTripSet.BestFit);
+        await RoundTripAsync(runner, "cmd.exe with Git for Windows' curl.exe, typed at the prompt", CopyAsTarget.CurlCmd, gitCurlMissing,
+            (text, dir) => ExecuteAsync(Path.Combine(system, "cmd.exe"), "/d /v:on", text + "\r\nexit\r\n", dir, curlDirectory: gitCurl), RoundTripSet.BestFit);
+
+        await CmdFuzzAsync(runner, Path.Combine(system, "cmd.exe"), File.Exists(curl) ? null : "curl.exe is not installed");
+        await CmdMissingFileAsync(runner, Path.Combine(system, "cmd.exe"), File.Exists(curl) ? null : "curl.exe is not installed");
+
+        var curlPowerShell = File.Exists(curl) && File.Exists(powershell) ? null : "curl.exe or powershell.exe is not installed";
+        await RoundTripAsync(runner, "PowerShell, curl.exe", CopyAsTarget.CurlPowerShell, curlPowerShell, (text, _) => RunPowerShellAsync(powershell, text));
+
+        // The console re-encodes what PowerShell pipes to curl, so non-ASCII text is not asserted to arrive
+        // verbatim here; that it cannot reach curl's argv (no option is added, nothing leaks) still is.
+        await RoundTripAsync(runner, "PowerShell, curl.exe", CopyAsTarget.CurlPowerShell, curlPowerShell,
+            (text, _) => RunPowerShellAsync(powershell, text), RoundTripSet.BestFit, verbatimNonAscii: false);
+
+        await RoundTripAsync(runner, "PowerShell, Invoke-WebRequest", CopyAsTarget.PowerShellWebRequest,
+            File.Exists(powershell) ? null : "powershell.exe is not installed",
+            (text, _) => RunPowerShellAsync(powershell, text));
 
         var bashMissing = bash is null ? "no bash (Git for Windows) is installed" : null;
         await RoundTripAsync(runner, "bash", CopyAsTarget.CurlBash, bashMissing, (text, dir) => ExecuteAsync(bash!, "-l -s", text, dir));
@@ -394,6 +863,148 @@ internal static class CopyAsTests
         // Authorization on to another host: the second origin must never be contacted.
         await RedirectRoundTripAsync(runner, "Node.js fetch", CopyAsTarget.JavaScriptFetch, node is null ? "node.exe is not on PATH" : null, RunNodeAsync);
         await RedirectRoundTripAsync(runner, "Python requests", CopyAsTarget.PythonRequests, requests ? null : "python with the requests package is not installed", RunPythonAsync);
+        await RedirectRoundTripAsync(runner, "PowerShell, Invoke-WebRequest", CopyAsTarget.PowerShellWebRequest,
+            File.Exists(powershell) ? null : "powershell.exe is not installed", (text, _) => RunPowerShellAsync(powershell, text));
+        await RedirectRoundTripAsync(runner, "cmd.exe", CopyAsTarget.CurlCmd, File.Exists(curl) ? null : "curl.exe is not installed",
+            (text, _) => RunCmdByLineAsync(Path.Combine(system, "cmd.exe"), "off", text));
+    }
+
+    private static readonly string[] FuzzPieces =
+    [
+        "!", "^", "%", "&", "|", "<", ">", "(", ")", "\"", "'", "\\", " ", "a", "B1", ":", "~0,3", "=", "s=A", "*", ";", ",", "$", "`", "/", "-",
+        "PIPER_COPYAS_SECRET", "!PIPER_COPYAS_SECRET!", "%PIPER_COPYAS_SECRET%", "!PIPER_COPYAS_SECRET:~0,3!", "%PIPER_COPYAS_SECRET:~0,3%", "!NOPE!", "!!", "^!", "^^!", "%%", "%^",
+    ];
+
+    // Header values also draw on characters an ANSI code page maps to ASCII quotes and backslashes.
+    private static readonly string[] FuzzHeaderPieces = [.. FuzzPieces, "＂", "＼", "¥", "“", "″", "é", "＆", "％"];
+
+    private static readonly string[] FuzzUrlPieces =
+    [
+        "!", "&", "=", "a", "'", "(", ")", "$", "x", "~", "*", "+", ",", ";", "@", ":", "%25", "!PIPER_COPYAS_SECRET!", "%25PIPER_COPYAS_SECRET%25", "!!", "!PIPER_COPYAS_SECRET:~0,3!",
+    ];
+
+    private static string FuzzText(Random random, string[] pieces, int maxPieces)
+    {
+        var sb = new StringBuilder();
+        for (var n = random.Next(1, maxPieces + 1); n > 0; n--) sb.Append(pieces[random.Next(pieces.Length)]);
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// Random text drawn from the pieces cmd.exe cares about, pasted into cmd.exe with delayed expansion
+    /// off and on, as a command and typed at the prompt: every value must arrive as it was, and the
+    /// secret variable never. PIPER_COPYAS_FUZZ sets how many requests each of the four runs sends.
+    /// </summary>
+    private static async Task CmdFuzzAsync(TestRunner runner, string cmd, string? unavailable)
+    {
+        await runner.RunAsync("Copy as: cmd.exe delivers random hostile text with delayed expansion off and on", async () =>
+        {
+            if (unavailable is not null)
+            {
+                runner.ToolMissing($"cmd.exe: {unavailable}");
+                return;
+            }
+
+            var requests = int.TryParse(Environment.GetEnvironmentVariable("PIPER_COPYAS_FUZZ"), out var configured) && configured > 0 ? configured : 4;
+            foreach (var delayed in new[] { "off", "on" })
+            {
+                foreach (var typed in new[] { false, true })
+                {
+                    var cases = 0;
+                    var failures = new List<string>();
+                    for (var r = 0; r < requests; r++)
+                    {
+                        var random = new Random(8300 + r);
+                        using var origin = new CaptureOrigin();
+                        var hasBody = random.Next(2) == 0;
+                        var request = new HttpRequestData
+                        {
+                            Method = hasBody ? "POST" : "GET",
+                            Url = new Uri(origin.Url + "f?q=" + FuzzText(random, FuzzUrlPieces, 12)),
+                            Body = hasBody ? Encoding.ASCII.GetBytes(FuzzText(random, FuzzPieces, 40)) : [],
+                        };
+                        var expected = new List<(string Name, string Value)>();
+                        for (var h = 0; h < 8; h++)
+                        {
+                            // Header values are bytes: the Latin-1 reading of the UTF-8 of the text.
+                            var value = Encoding.Latin1.GetString(Encoding.UTF8.GetBytes(FuzzText(random, FuzzHeaderPieces, 14).Trim(' ')));
+                            expected.Add(("X-F" + h, value));
+                            request.Headers.Add("X-F" + h, value);
+                        }
+                        if (hasBody)
+                        {
+                            expected.Add(("Content-Type", "text/plain"));
+                            request.Headers.Add("Content-Type", "text/plain");
+                        }
+
+                        var text = CopyAs.Build(request, CopyAsTarget.CurlCmd)!.Text;
+                        if (text.Contains('!')) failures.Add($"request {r}: the pasted text holds an exclamation mark");
+                        var diagnostics = typed
+                            ? await ExecuteAsync(cmd, "/d /v:" + delayed, text + "\r\nexit\r\n")
+                            : await RunCmdByLineAsync(cmd, delayed, text);
+                        var seen = await origin.WaitAsync(TimeSpan.FromSeconds(20));
+                        if (seen is null) { failures.Add($"request {r}: nothing arrived; output: {diagnostics}"); continue; }
+
+                        cases += 1 + expected.Count + (hasBody ? 1 : 0);
+                        if (seen.RequestLine != (hasBody ? "POST " : "GET ") + request.Url!.GetComponents(UriComponents.PathAndQuery, UriFormat.UriEscaped))
+                            failures.Add($"request {r}: the URL arrived as {seen.RequestLine}");
+                        foreach (var (name, value) in expected)
+                            if (!seen.Headers.Any(h => h.Name.Equals(name, StringComparison.OrdinalIgnoreCase) && h.Value == value))
+                                failures.Add($"request {r}: {name} <{value}> arrived as <{string.Join(" | ", seen.Headers.Where(h => h.Name.Equals(name, StringComparison.OrdinalIgnoreCase)).Select(h => h.Value))}>");
+                        if (hasBody && !request.Body.SequenceEqual(seen.Body))
+                            failures.Add($"request {r}: the body <{Encoding.ASCII.GetString(request.Body)}> arrived as <{Encoding.Latin1.GetString(seen.Body)}>");
+                        var everything = seen.RequestLine + "\n" + string.Join("\n", seen.Headers.Select(h => h.Name + ": " + h.Value)) + "\n" + Encoding.Latin1.GetString(seen.Body);
+                        if (everything.Contains(Secret)) failures.Add($"request {r}: the secret reached the origin");
+                    }
+
+                    Console.WriteLine($"   cmd.exe /v:{delayed}{(typed ? ", typed" : string.Empty)}: {cases} values in {requests} requests, {failures.Count} failed");
+                    runner.IsTrue(failures.Count == 0, $"cmd.exe /v:{delayed}{(typed ? ", typed at the prompt" : string.Empty)}: {cases} random values arrive unchanged and no secret does"
+                        + (failures.Count == 0 ? string.Empty : "; first failures: " + string.Join(" || ", failures.Take(3))));
+                }
+            }
+        });
+    }
+
+    /// <summary>
+    /// When certutil fails (or the temporary file is gone) curl must send nothing at all, never a request
+    /// without the headers that were in the file, and the files still get deleted.
+    /// </summary>
+    private static async Task CmdMissingFileAsync(TestRunner runner, string cmd, string? unavailable)
+    {
+        await runner.RunAsync("Copy as: cmd.exe sends nothing when the temporary file was not written", async () =>
+        {
+            if (unavailable is not null)
+            {
+                runner.ToolMissing($"cmd.exe: {unavailable}");
+                return;
+            }
+
+            foreach (var broken in new[] { "piper-args-", "piper-body-" })
+            {
+                using var origin = new CaptureOrigin();
+                var dir = Path.Combine(Path.GetTempPath(), "copyas-" + Guid.NewGuid().ToString("N"));
+                Directory.CreateDirectory(dir);
+                var request = new HttpRequestData { Method = "POST", Url = new Uri(origin.Url + "x"), Body = [1, 2, 3] };
+                request.Headers.Add("Authorization", "Bearer must-not-be-sent-alone");
+                request.Headers.Add("X-Bang", "Hello!");
+
+                // certutil never ran: drop its line for one of the two files.
+                var lines = CopyAs.Build(request, CopyAsTarget.CurlCmd)!.Text.Split("\r\n")
+                    .Where(l => !(l.StartsWith("certutil ", StringComparison.Ordinal) && l.Contains(broken, StringComparison.Ordinal))).ToList();
+                string diagnostics;
+                bool left;
+                try
+                {
+                    diagnostics = await RunCmdByLineAsync(cmd, "off", string.Join("\r\n", lines), dir);
+                    left = Directory.GetFiles(dir, "piper-*").Length > 0;
+                }
+                finally { try { Directory.Delete(dir, recursive: true); } catch (IOException) { } }
+
+                runner.IsTrue(await origin.WaitAsync(TimeSpan.FromSeconds(3)) is null, $"{broken}: curl sent no request (output: {diagnostics})");
+                runner.IsTrue(diagnostics.Contains("curl:", StringComparison.Ordinal), $"{broken}: and said why (output: {diagnostics})");
+                runner.IsTrue(!left, $"{broken}: the files that did exist were still deleted");
+            }
+        });
     }
 
     private static async Task RedirectRoundTripAsync(TestRunner runner, string shell, CopyAsTarget target, string? unavailable, Func<string, string, Task<string>> run)
@@ -428,6 +1039,21 @@ internal static class CopyAsTests
     // Both is Plain and Bang together, for the targets that need no separate treatment. Simple holds only
     // printable ASCII with no exclamation mark, which the cmd snippet writes on its command line.
     private enum RoundTripSet { Both, Plain, Bang, Simple, BestFit, PathLike }
+
+    /// <summary>Runs the pasted text of every cmd.exe line as its own <c>cmd /c</c>; a trailing caret continues a line.</summary>
+    private static async Task<string> RunCmdByLineAsync(string cmd, string delayed, string text, string? temp = null, string? curlDirectory = null)
+    {
+        var output = new StringBuilder();
+        var logical = new StringBuilder();
+        foreach (var line in text.Split("\r\n"))
+        {
+            if (line.EndsWith('^')) { logical.Append(line[..^1]); continue; }
+            logical.Append(line);
+            output.AppendLine(await ExecuteAsync(cmd, "/d /v:" + delayed + " /s /c \"" + logical + "\"", null, temp, curlDirectory: curlDirectory));
+            logical.Clear();
+        }
+        return output.ToString();
+    }
 
     private static async Task RoundTripAsync(TestRunner runner, string shell, CopyAsTarget target, string? unavailable, Func<string, string, Task<string>> run, RoundTripSet set = RoundTripSet.Both, bool verbatimNonAscii = true)
     {
@@ -487,11 +1113,30 @@ internal static class CopyAsTests
                 expected.AddRange(bestFitExpected);
 
                 // The runtimes that can carry bytes above 127 in a header must deliver them exactly.
-                if (target is CopyAsTarget.PythonRequests or CopyAsTarget.JavaScriptFetch)
+                if (target is CopyAsTarget.PythonRequests or CopyAsTarget.JavaScriptFetch or CopyAsTarget.PowerShellWebRequest)
                     expected.Add(("X-Uni", Latin1Unicode));
                 foreach (var (name, value) in expected) request.Headers.Add(name, value);
 
+                // Windows PowerShell 5.1 does not send a Cookie header given to Invoke-WebRequest; the
+                // snippet says so, and this pins that it does.
+                if (target == CopyAsTarget.PowerShellWebRequest)
+                {
+                    expected.RemoveAll(h => h.Item1 == "Cookie");
+                    runner.IsTrue(CopyAs.Build(request, target)!.Notes.Contains(CopyAsNote.CookieNeedsPowerShell7), $"{shell}: the Cookie limitation is reported");
+                }
+
                 var text = CopyAs.Build(request, target)!.Text;
+
+                // Delayed expansion reads every exclamation mark in the line, so none may be there at all.
+                if (target == CopyAsTarget.CurlCmd)
+                {
+                    runner.IsTrue(!text.Contains('!'), $"{shell}, {body.Name}: the pasted cmd text holds no exclamation mark");
+
+                    // An ANSI command line can turn a character above ASCII into a quote, so none may be on it.
+                    runner.IsTrue(!text.Any(c => (c < ' ' && c is not ('\r' or '\n')) || c > '~'), $"{shell}, {body.Name}: the pasted cmd text is printable ASCII");
+                    if (simple) runner.IsTrue(!text.Contains("--config"), $"{shell}, {body.Name}: plain ASCII values stay on the command line");
+                    else if (bestFit || bang) runner.IsTrue(text.Contains("--config") && !text.Contains("--header"), $"{shell}, {body.Name}: the headers are in the config, not on the command line");
+                }
 
                 string diagnostics;
                 bool ran, injected, left;
@@ -505,6 +1150,7 @@ internal static class CopyAsTests
                 finally { try { Directory.Delete(dir, recursive: true); } catch (IOException) { } }
                 runner.IsTrue(!ran, $"{shell}, {body.Name}: no second command ran");
                 runner.IsTrue(!injected, $"{shell}, {body.Name}: no extra curl option wrote a file");
+                if (target == CopyAsTarget.CurlCmd) runner.IsTrue(!left, $"{shell}, {body.Name}: no temporary file is left behind");
 
                 var seen = await origin.WaitAsync(TimeSpan.FromSeconds(20));
                 runner.IsTrue(seen is not null, $"{shell}, {body.Name}: the origin received a request" + (seen is null ? "; output: " + diagnostics : string.Empty));
@@ -526,6 +1172,10 @@ internal static class CopyAsTests
             }
         });
     }
+
+    private static Task<string> RunPowerShellAsync(string powershell, string script) =>
+        ExecuteAsync(powershell, "-NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand "
+            + Convert.ToBase64String(Encoding.Unicode.GetBytes("$ErrorActionPreference = 'Stop'\n" + script)), null);
 
     private static string? FindOnPath(string file) =>
         (Environment.GetEnvironmentVariable("PATH") ?? string.Empty).Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries)
@@ -720,6 +1370,13 @@ internal static class CopyAsTests
     }
 
     // ---------------------------------------------------------------- fixtures
+
+    private static HttpRequestData Plain(string method, string url, byte[] body) => new()
+    {
+        Method = method,
+        Url = url.StartsWith("http", StringComparison.Ordinal) ? new Uri(url) : null,
+        Body = body,
+    };
 
     private static HttpRequestData HostileRequest()
     {

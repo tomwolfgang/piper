@@ -27,7 +27,7 @@ keeping familiar workflows and file formats.
 | HTTPS debugging proxy | Capture, inspect, filter, replay, compose, and mock HTTP/HTTPS traffic |
 | Fiddler Classic migration | Import and export Fiddler SAZ archives (`.saz` full sessions, `.raz` request-only); Fiddler-compatible AutoResponder rules |
 | Protocols | HTTP/1.1, HTTP/2, and upstream HTTP/3 |
-| Developer tools | Composer, AutoResponder, search, and Copy as curl |
+| Developer tools | Composer, AutoResponder, search, and Copy as (curl for bash, cmd and PowerShell, Invoke-WebRequest, fetch, Python requests, C# HttpClient) |
 
 ## Why this exists
 
@@ -251,7 +251,35 @@ targets, so `Invoke-WebRequest -Proxy` would never reach Piper.
 - Composer history grouped into collapsible hosts, repeat sends folded into one counted row, and
   the response to the last send inspectable without leaving the Composer. Which hosts you have
   collapsed is remembered across restarts; a host you have not seen before starts expanded
-- Copy as curl, per-host filtering, dark theme
+- Copy as curl and other languages, per-host filtering, dark theme
+- **Copy as** in the session grid's context menu writes the selected request as curl for bash, for
+  cmd or for PowerShell, as PowerShell `Invoke-WebRequest`, JavaScript `fetch`, Python `requests` or
+  C# `HttpClient`. Every captured value is hostile input to the shell it is pasted into, so each
+  target has its own escaper (`$()`, backticks, `%`, `^`, `!`, quotes and non-ASCII are neutralised),
+  and a header whose name or value cannot be written safely (a CR, LF or NUL) is left out and
+  reported in the Log. The body is the decoded one, without Content-Encoding; a binary body is written
+  as base64, and one that is too large, incomplete or cut while decoding is left out with a comment.
+  Cookies and Authorization are copied exactly as captured (repeated Cookie headers are joined with
+  `; `), so treat the copied text as a secret; for that reason a replay never follows a redirect.
+  The cmd variant is for the interactive prompt, not a batch file. It is correct whether or not the
+  prompt has delayed expansion on (`cmd /v:on`, or the `DelayedExpansion` registry value; off by
+  default): cmd.exe would expand `!NAME!` there and send that environment variable to the request's
+  host, and no caret spelling of `!` is right in both modes. Non-ASCII text is a second hazard: a
+  curl.exe built for the ANSI code page (Git for Windows' is) has its command line converted by
+  Windows, which maps some characters to ASCII ones (U+FF02 becomes a double quote), so a header
+  could close its quoted argument and add curl options. So when a URL, header or text body holds an
+  exclamation mark or anything outside printable ASCII, the whole request is passed to curl in a
+  temporary config file and the pasted command is plain ASCII with no `!` in it (a REM line says so).
+  That file holds the headers, **Cookie and Authorization included, as plain text**, in your temp
+  folder with the folder's inherited permissions, under a random name (`%TEMP%\piper-args-<random>.cfg`;
+  a base64 copy, `.b64`, is deleted as soon as it is decoded). It is deleted when curl finishes,
+  whether or not curl succeeded, but an interrupted paste can leave it: delete `%TEMP%\piper-*`.
+  If certutil fails curl reads no file and sends nothing. A `%TEMP%` path that itself holds `!` is
+  not covered, and a `%TEMP%` with non-ASCII characters works with Windows' own curl.exe but not
+  with Git's curl.exe, which then cannot read the config and sends nothing. The bash variant does the
+  same for bytes above ASCII: it pipes a config to `curl --config -` (with a binary body, through a
+  `mktemp` file that is removed afterwards) so that Git for Windows' bash never hands them to an
+  ANSI curl.exe on its command line
 - Importing and exporting Fiddler SAZ session archives, by drag-and-drop or **File > Open SAZ
   capture...**; a request-only `.raz` capture is appended to the Composer's history (no responses
   to inspect, but readily reloaded and resent) rather than the main request list. That history

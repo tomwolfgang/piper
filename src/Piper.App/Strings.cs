@@ -1,4 +1,5 @@
 using Piper.Core.Proxy;
+using Piper.Core.Sessions;
 
 namespace Piper.App;
 
@@ -486,7 +487,54 @@ internal static class Strings
         public static string SendToComposer => I18n.T("sessionList.sendToComposer");
         public static string CreateAutoResponderRule => I18n.T("sessionList.createAutoResponderRule");
         public static string CopyUrl => I18n.T("sessionList.copyUrl");
-        public static string CopyAsCurl => I18n.T("sessionList.copyAsCurl");
+        public static string CopyAsMenu => I18n.T("sessionList.copyAsMenu");
+
+        /// <summary>A Copy as submenu item, access key included.</summary>
+        public static string CopyAsTargetMenu(CopyAsTarget target) => target switch
+        {
+            CopyAsTarget.CurlBash => I18n.T("sessionList.copyAsCurlBash"),
+            CopyAsTarget.CurlCmd => I18n.T("sessionList.copyAsCurlCmd"),
+            CopyAsTarget.CurlPowerShell => I18n.T("sessionList.copyAsCurlPowerShell"),
+            CopyAsTarget.PowerShellWebRequest => I18n.T("sessionList.copyAsWebRequest"),
+            CopyAsTarget.JavaScriptFetch => I18n.T("sessionList.copyAsFetch"),
+            CopyAsTarget.PythonRequests => I18n.T("sessionList.copyAsRequests"),
+            CopyAsTarget.CSharpHttpClient => I18n.T("sessionList.copyAsHttpClient"),
+            _ => throw new ArgumentOutOfRangeException(nameof(target)),
+        };
+
+        // The name of a target with the access-key marker taken out, for a sentence.
+        private static string CopyAsTargetName(CopyAsTarget target) =>
+            CopyAsTargetMenu(target).Replace("&", string.Empty, StringComparison.Ordinal);
+
+        public static string CopyAsClipboardFailed(CopyAsTarget target) =>
+            I18n.T("sessionList.copyAsClipboardFailed", ("target", CopyAsTargetName(target)));
+
+        public static string CopyAsFailed(CopyAsTarget target) =>
+            I18n.T("sessionList.copyAsFailed", ("target", CopyAsTargetName(target)));
+
+        public static string CopyAsUnavailable(CopyAsTarget target) =>
+            I18n.T("sessionList.copyAsUnavailable", ("target", CopyAsTargetName(target)));
+
+        /// <summary>The Log line after a copy: what was copied, then one sentence per way it differs from the capture.</summary>
+        public static string CopyAsDone(CopyAsTarget target, IReadOnlyList<CopyAsNote> notes) =>
+            string.Join(" ", notes.Select(CopyAsNoteText).Prepend(I18n.T("sessionList.copyAsDone", ("target", CopyAsTargetName(target)))));
+
+        private static string CopyAsNoteText(CopyAsNote note) => note switch
+        {
+            CopyAsNote.BodyNotCaptured => I18n.T("sessionList.copyAsNoteBodyNotCaptured"),
+            CopyAsNote.BodyDecodeCut => I18n.T("sessionList.copyAsNoteBodyDecodeCut"),
+            CopyAsNote.BodyTooLarge => I18n.T("sessionList.copyAsNoteBodyTooLarge"),
+            CopyAsNote.BodyAsBase64 => I18n.T("sessionList.copyAsNoteBodyAsBase64"),
+            CopyAsNote.HeadersSkipped => I18n.T("sessionList.copyAsNoteHeadersSkipped"),
+            CopyAsNote.DuplicateHeadersMerged => I18n.T("sessionList.copyAsNoteDuplicateHeadersMerged"),
+            CopyAsNote.HostHeaderDropped => I18n.T("sessionList.copyAsNoteHostHeaderDropped"),
+            CopyAsNote.NonAsciiMayChange => I18n.T("sessionList.copyAsNoteNonAsciiMayChange"),
+            CopyAsNote.CommandTooLong => I18n.T("sessionList.copyAsNoteCommandTooLong"),
+            CopyAsNote.CmdValuesInFile => I18n.T("sessionList.copyAsNoteCmdValuesInFile"),
+            CopyAsNote.CookieNeedsPowerShell7 => I18n.T("sessionList.copyAsNoteCookieNeedsPowerShell7"),
+            CopyAsNote.UpgradeDropped => I18n.T("sessionList.copyAsNoteUpgradeDropped"),
+            _ => throw new ArgumentOutOfRangeException(nameof(note)),
+        };
         public static string CopyFullSession => I18n.T("sessionList.copyFullSession");
         public static string SaveMenu => I18n.T("sessionList.saveMenu");
         public static string SaveResponseBody => I18n.T("sessionList.saveResponseBody");
