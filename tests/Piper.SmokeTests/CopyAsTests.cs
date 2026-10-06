@@ -1,4 +1,7 @@
+using System.Diagnostics;
 using System.IO.Compression;
+using System.Net;
+using System.Net.Sockets;
 using System.Text;
 using Piper.Core.Http;
 using Piper.Core.Sessions;
@@ -63,6 +66,440 @@ internal static class CopyAsTests
             runner.AreEqual("\"\\ud83d\\ude00\"", CopyAs.JsString("\ud83d\ude00"), "JavaScript: an astral character is a surrogate pair");
             return Task.CompletedTask;
         });
+
+        await RoundTripsAsync(runner);
+    }
+
+    // ---------------------------------------------------------------- real shells and runtimes
+
+    private static readonly (string Name, string Value)[] RoundTripHeaders =
+    [
+        ("X-Dollar", "$(echo pwn) ${HOME} `echo pwn` $HOME $PATH"),
+        ("X-Quotes", "it's \"quoted\" \\ back\\"),
+        ("X-Cmd", "100% %PATH% %USERNAME% a&b|c<d>e^fg (h) ;,= ^% %^"),
+        ("X-Path", "C:\\dir\\sub\\"),
+        ("X-Tab", "a\tb"),
+        ("X-Empty", ""),
+        ("Authorization", "Bearer abc$def`x`"),
+        ("Cookie", "a=1; b=\"2\""),
+
+        // Environment references of every shell. The child process holds a secret variable of each
+        // name; none of these may be expanded, or the secret would travel to the origin.
+        ("X-Env-Cmd", "%PIPER_COPYAS_SECRET% %PIPER_COPYAS_SECRET:ZZ=% %PIPER_COPYAS_SECRET:*x=% %PIPER_COPYAS_SECRET:~0,3% %PIPER_COPYAS_SECRET:s=A% %% %^ ^% %PATH%"),
+        ("X-Env-Other", "$PIPER_COPYAS_SECRET ${PIPER_COPYAS_SECRET} $env:PIPER_COPYAS_SECRET ${env:PIPER_COPYAS_SECRET} $(echo $PIPER_COPYAS_SECRET) `$env:PIPER_COPYAS_SECRET"),
+        ("X-Env-End", "100%"),
+        ("X-Env-Pair", "%PIPER_COPYAS_SECRET:ZZ=%\""),
+    ];
+
+    // Values with an exclamation mark, which cmd.exe expands as !NAME! when delayed expansion is on
+    // (cmd /v:on, or the DelayedExpansion registry value) and leaves alone when it is off. The cmd
+    // snippet must deliver every one of these unchanged in both modes, and never the secret.
+    private static readonly (string Name, string Value)[] BangHeaders =
+    [
+        ("X-Bang-Env", "!PIPER_COPYAS_SECRET!"),
+        ("X-Bang-Slice", "!PIPER_COPYAS_SECRET:~0,3! !PIPER_COPYAS_SECRET:s=A! !PIPER_COPYAS_SECRET:*x=!"),
+        ("X-Bang-Caret", "^! ^^! ^^^! !^ ^"),
+        ("X-Bang-Double", "!! !!! a!b!c Hello!"),
+        ("X-Bang-Mixed", "!PIPER_COPYAS_SECRET! %PIPER_COPYAS_SECRET% !%PIPER_COPYAS_SECRET%! %!PIPER_COPYAS_SECRET!% \"!PIPER_COPYAS_SECRET!\" & | < > ( ) ^"),
+        ("X-Bang-Trailing", "100!"),
+        ("X-Bang-Long", string.Concat(Enumerable.Repeat("ab!c^d%e&", 700))),
+    ];
+
+    private static readonly (string Name, byte[] Bytes, string ContentType)[] BangBodies =
+    [
+        ("JSON text with bangs", Encoding.UTF8.GetBytes("{\"m\":\"Hello!\",\"s\":\"!PIPER_COPYAS_SECRET!\",\"v\":\"!PIPER_COPYAS_SECRET:~0,3!\",\"c\":\"^!\",\"d\":\"!!\"}"), "application/json"),
+        ("single-line text with bangs", Encoding.ASCII.GetBytes("x=!PIPER_COPYAS_SECRET! %PIPER_COPYAS_SECRET% !PIPER_COPYAS_SECRET:~1,2! ^! !! \"q\" & echo ran | more < > ( ) ^ !"), "text/plain"),
+    ];
+
+    // Added to the request URL when bang values are on: the query holds the same kinds of text.
+    private const string BangQuery = "&t=!PIPER_COPYAS_SECRET!&u=!PIPER_COPYAS_SECRET:~0,3!&w=!!&x=a!b!c";
+
+    // Characters that Windows maps to an ASCII quote or backslash when it converts a command line to an
+    // ANSI code page (U+FF02 and U+2033 and U+02BA to a double quote on code page 1252 and others,
+    // U+FF3C, U+00A5 and U+2216 to a backslash on some), and lookalikes of the other things a shell treats
+    // specially. {0} is a file that must never be created: a header that broke out of its argument could
+    // add "-o {0}" and have curl write the response there.
+    private static readonly (string Name, string Format)[] BestFitHeaders =
+    [
+        ("X-BF-FF02", "a＂ -o ＂{0}＂ z"),
+        ("X-BF-FF3C", "a＼ -o ＼{0}＼ z"),
+        ("X-BF-00A5", "a¥ -o ¥{0}¥ z"),
+        ("X-BF-201C", "a“ -o “{0}” z"),
+        ("X-BF-2033", "a″ -o ″{0}″ z"),
+        ("X-BF-02BA", "aʺ -o ʺ{0}ʺ z"),
+        ("X-BF-FF07", "a＇ -o ＇{0}＇ z"),
+        ("X-BF-2216", "a∖ -o ∖{0}∖ z"),
+        ("X-BF-20A9", "a₩ -o ₩{0}₩ z"),
+        ("X-BF-Look", "＆ ｜ ＾ ％ ！ －－{0} ％PIPER_COPYAS_SECRET％ ！PIPER_COPYAS_SECRET！ z"),
+        ("X-BF-Mixed", "＂ & echo ran> \"{0}\" & ＂ %PIPER_COPYAS_SECRET% !PIPER_COPYAS_SECRET! café z"),
+    ];
+
+    private static readonly (string Name, byte[] Bytes, string ContentType)[] BestFitBodies =
+    [
+        ("best-fit text", Encoding.UTF8.GetBytes("＂ -o ＂pwn.txt＂ ＼＼ ¥ ″ ％PIPER_COPYAS_SECRET％ z"), "text/plain; charset=utf-8"),
+        ("every byte value", [.. Enumerable.Range(0, 256).Select(i => (byte)i)], "application/octet-stream"),
+    ];
+
+    private const string Secret = "s3cr3t-LEAK-7f3a";
+
+    // Values that would run a second command if they broke out of their argument; each would create
+    // the marker file. {0} is the marker path.
+    private static readonly string[] BreakOutValues =
+    [
+        "%\" & echo ran> \"{0}\" & \"",
+        "x%\"&echo ran>\"{0}\"&\"",
+        "\"; echo ran > '{0}'; \"",
+        "'; echo ran > '{0}'; '",
+        "$(echo ran > '{0}') `echo ran > '{0}'`",
+        "$(Set-Content -LiteralPath '{0}' ran) `$(Set-Content -LiteralPath '{0}' ran)",
+        "\"; Set-Content -LiteralPath '{0}' ran; \"",
+        "' ; Set-Content -LiteralPath '{0}' ran ; '",
+        "^\" & echo ran> \"{0}\"",
+    ];
+
+    private static readonly (string Name, byte[] Bytes, string ContentType)[] RoundTripBodies =
+    [
+        ("hostile text", Encoding.UTF8.GetBytes("line1 \"q\" $(id) `x`\n'x' %PATH% ^& \r\nend\\"), "text/plain"),
+        ("single-line hostile text", Encoding.ASCII.GetBytes("x=%PIPER_COPYAS_SECRET% %PIPER_COPYAS_SECRET:ZZ=% %PIPER_COPYAS_SECRET:~0,3% $PIPER_COPYAS_SECRET $env:PIPER_COPYAS_SECRET ${env:PIPER_COPYAS_SECRET} $(echo $PIPER_COPYAS_SECRET) 100% \"q\" & echo ran | more ^"), "text/plain"),
+        ("every byte value", [.. Enumerable.Range(0, 256).Select(i => (byte)i)], "application/octet-stream"),
+        ("non-ASCII text", Encoding.UTF8.GetBytes("h\u00e9llo \u2019 \ud83d\ude00"), "text/plain; charset=utf-8"),
+    ];
+
+    private static async Task RoundTripsAsync(TestRunner runner)
+    {
+        var node = FindOnPath("node.exe");
+
+        async Task<string> RunNodeAsync(string text, string dir)
+        {
+            var file = Path.Combine(dir, "snippet.mjs");
+            await File.WriteAllTextAsync(file, text, new UTF8Encoding(false));
+            return await ExecuteAsync(node!, "\"" + file + "\"", null);
+        }
+
+        await RoundTripAsync(runner, "Node.js fetch", CopyAsTarget.JavaScriptFetch, node is null ? "node.exe is not on PATH" : null, RunNodeAsync);
+
+        // A server that answers with a redirect must not be able to move the copied Cookie and
+        // Authorization on to another host: the second origin must never be contacted.
+        await RedirectRoundTripAsync(runner, "Node.js fetch", CopyAsTarget.JavaScriptFetch, node is null ? "node.exe is not on PATH" : null, RunNodeAsync);
+    }
+
+    private static async Task RedirectRoundTripAsync(TestRunner runner, string shell, CopyAsTarget target, string? unavailable, Func<string, string, Task<string>> run)
+    {
+        await runner.RunAsync($"Copy as: {target} pasted into {shell} does not follow a redirect", async () =>
+        {
+            if (unavailable is not null)
+            {
+                runner.ToolMissing($"{shell}: {unavailable}");
+                return;
+            }
+
+            using var elsewhere = new CaptureOrigin();
+            using var origin = new CaptureOrigin(elsewhere.Url + "moved");
+            var dir = Path.Combine(Path.GetTempPath(), "copyas-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dir);
+            var request = new HttpRequestData { Method = "GET", Url = new Uri(origin.Url + "start") };
+            request.Headers.Add("Authorization", "Bearer redirect-secret");
+            request.Headers.Add("Cookie", "sid=redirect-secret");
+
+            string diagnostics;
+            try { diagnostics = await run(CopyAs.Build(request, target)!.Text, dir); }
+            finally { try { Directory.Delete(dir, recursive: true); } catch (IOException) { } }
+
+            var first = await origin.WaitAsync(TimeSpan.FromSeconds(20));
+            runner.IsTrue(first is not null, $"{shell}: the captured host received the request" + (first is null ? "; output: " + diagnostics : string.Empty));
+            var second = await elsewhere.WaitAsync(TimeSpan.FromSeconds(1));
+            runner.IsTrue(second is null, $"{shell}: the host the redirect named received nothing (it got: {second?.RequestLine})");
+        });
+    }
+
+    // Both is Plain and Bang together, for the targets that need no separate treatment. Simple holds only
+    // printable ASCII with no exclamation mark, which the cmd snippet writes on its command line.
+    private enum RoundTripSet { Both, Plain, Bang, Simple, BestFit }
+
+    private static async Task RoundTripAsync(TestRunner runner, string shell, CopyAsTarget target, string? unavailable, Func<string, string, Task<string>> run, RoundTripSet set = RoundTripSet.Both, bool verbatimNonAscii = true)
+    {
+        var label = set switch
+        {
+            RoundTripSet.Bang => "values with an exclamation mark",
+            RoundTripSet.Simple => "plain ASCII values",
+            RoundTripSet.BestFit => "best-fit characters",
+            _ => "every value",
+        };
+        await runner.RunAsync($"Copy as: {target} pasted into {shell} delivers {label} unchanged", async () =>
+        {
+            if (unavailable is not null)
+            {
+                // Counted apart from the passes, and a failure under CI, where every tool is expected.
+                runner.ToolMissing($"{shell}: {unavailable}");
+                return;
+            }
+
+            var plain = set is RoundTripSet.Both or RoundTripSet.Plain;
+            var bang = set is RoundTripSet.Both or RoundTripSet.Bang;
+            var simple = set == RoundTripSet.Simple;
+            var bestFit = set == RoundTripSet.BestFit;
+            IEnumerable<(string Name, byte[] Bytes, string ContentType)> bodies =
+                (plain ? RoundTripBodies : []).Concat(bang ? BangBodies : []).Concat(bestFit ? BestFitBodies : [])
+                    .Concat(simple ? RoundTripBodies.Where(b => b.Name is "single-line hostile text" or "every byte value") : []);
+            IEnumerable<(string Name, string Value)> headers =
+                (plain ? RoundTripHeaders : []).Concat(bang ? BangHeaders : []).Concat(simple ? RoundTripHeaders.Where(h => h.Name != "X-Tab") : []);
+            var query = bang ? BangQuery : string.Empty;
+            foreach (var body in bodies)
+            {
+                using var origin = new CaptureOrigin();
+                var dir = Path.Combine(Path.GetTempPath(), "copyas-" + Guid.NewGuid().ToString("N"));
+                Directory.CreateDirectory(dir);
+                var marker = Path.Combine(dir, "ran.txt");
+                var pwn = Path.Combine(dir, "pwn.txt");
+
+                var request = new HttpRequestData
+                {
+                    Method = "POST",
+                    Url = new Uri(origin.Url + "p/it's?q=$(id)&r=%25&s=`x`" + query),
+                    Body = body.Bytes,
+                };
+                var expected = headers.Append(("Content-Type", body.ContentType)).ToList();
+                for (var i = 0; i < BreakOutValues.Length; i++)
+                    expected.Add(("X-Break-" + i, string.Format(BreakOutValues[i], marker)));
+
+                // A header value is bytes: its characters here are the Latin-1 reading of the UTF-8 bytes.
+                var bestFitExpected = new List<(string Name, string Value)>();
+                if (bestFit)
+                    foreach (var (name, format) in BestFitHeaders)
+                        bestFitExpected.Add((name, Encoding.Latin1.GetString(Encoding.UTF8.GetBytes(string.Format(format, pwn)))));
+                expected.AddRange(bestFitExpected);
+
+                // The runtimes that can carry bytes above 127 in a header must deliver them exactly.
+                if (target is CopyAsTarget.JavaScriptFetch)
+                    expected.Add(("X-Uni", Latin1Unicode));
+                foreach (var (name, value) in expected) request.Headers.Add(name, value);
+
+                var text = CopyAs.Build(request, target)!.Text;
+
+                string diagnostics;
+                bool ran, injected, left;
+                try
+                {
+                    diagnostics = await run(text, dir);
+                    ran = File.Exists(marker);
+                    injected = File.Exists(pwn);
+                    left = Directory.GetFiles(dir, "piper-*").Length > 0;
+                }
+                finally { try { Directory.Delete(dir, recursive: true); } catch (IOException) { } }
+                runner.IsTrue(!ran, $"{shell}, {body.Name}: no second command ran");
+                runner.IsTrue(!injected, $"{shell}, {body.Name}: no extra curl option wrote a file");
+
+                var seen = await origin.WaitAsync(TimeSpan.FromSeconds(20));
+                runner.IsTrue(seen is not null, $"{shell}, {body.Name}: the origin received a request" + (seen is null ? "; output: " + diagnostics : string.Empty));
+                if (seen is null) continue;
+
+                runner.AreEqual("POST " + request.Url!.GetComponents(UriComponents.PathAndQuery, UriFormat.UriEscaped), seen.RequestLine, $"{shell}, {body.Name}: the URL arrives unchanged");
+                foreach (var (name, value) in expected)
+                {
+                    if (!verbatimNonAscii && bestFitExpected.Any(b => b.Name == name)) continue;
+                    var got = seen.Headers.Where(h => h.Name.Equals(name, StringComparison.OrdinalIgnoreCase)).Select(h => h.Value).ToList();
+                    runner.IsTrue(got.Contains(value), $"{shell}, {body.Name}: {name} arrives verbatim (got: {string.Join(" | ", got)})");
+                }
+                runner.IsTrue(!seen.Headers.Any(h => h.Name.Equals("pwn", StringComparison.OrdinalIgnoreCase)), $"{shell}, {body.Name}: nothing was injected");
+                var everything = seen.RequestLine + "\n" + string.Join("\n", seen.Headers.Select(h => h.Name + ": " + h.Value)) + "\n" + Encoding.Latin1.GetString(seen.Body);
+                runner.IsTrue(!everything.Contains(Secret), $"{shell}, {body.Name}: an environment variable's value never reaches the origin");
+                if (verbatimNonAscii || body.Bytes.All(b => b < 0x80))
+                    runner.IsTrue(body.Bytes.SequenceEqual(seen.Body),
+                        $"{shell}, {body.Name}: the body arrives byte for byte ({seen.Body.Length} of {body.Bytes.Length} bytes)");
+            }
+        });
+    }
+
+    private static string? FindOnPath(string file) =>
+        (Environment.GetEnvironmentVariable("PATH") ?? string.Empty).Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries)
+            .Select(directory => { try { return Path.Combine(directory, file); } catch (ArgumentException) { return null; } })
+            .FirstOrDefault(path => path is not null && File.Exists(path));
+
+    /// <summary>Runs a program to completion and returns its exit code and output, or kills it after a minute.</summary>
+    private static async Task<string> ExecuteAsync(string file, string arguments, string? stdin, string? temp = null, bool msysPathConversion = false, string? curlDirectory = null)
+    {
+        var start = new ProcessStartInfo(file, arguments)
+        {
+            RedirectStandardInput = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+        };
+        // A proxy in the environment (Piper itself, while it is capturing) must not catch the test traffic.
+        foreach (var name in new[] { "http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY", "all_proxy", "ALL_PROXY" })
+            start.Environment.Remove(name);
+        start.Environment["NO_PROXY"] = "*";
+        start.Environment["no_proxy"] = "*";
+        if (msysPathConversion) start.Environment.Remove("MSYS_NO_PATHCONV");
+        else start.Environment["MSYS_NO_PATHCONV"] = "1";
+
+        // Another curl.exe first on PATH, e.g. Git for Windows', which is built with an ANSI main.
+        if (curlDirectory is not null)
+            start.Environment["PATH"] = curlDirectory + Path.PathSeparator + start.Environment["PATH"];
+
+        // A private temporary directory, so the test can see which files a snippet leaves behind.
+        if (temp is not null)
+        {
+            start.Environment["TEMP"] = temp;
+            start.Environment["TMP"] = temp;
+        }
+
+        // A secret every shell above could expand if a pasted value were let through.
+        start.Environment["PIPER_COPYAS_SECRET"] = Secret;
+
+        using var process = Process.Start(start)!;
+        var output = process.StandardOutput.ReadToEndAsync();
+        var error = process.StandardError.ReadToEndAsync();
+        if (stdin is not null) await process.StandardInput.WriteAsync(stdin);
+        process.StandardInput.Close();
+
+        using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(1));
+        try { await process.WaitForExitAsync(timeout.Token); }
+        catch (OperationCanceledException)
+        {
+            process.Kill(entireProcessTree: true);
+            return "timed out";
+        }
+        return $"exit {process.ExitCode}: {await output}\n--- stderr ---\n{await error}";
+    }
+
+    private sealed record Seen(string RequestLine, List<(string Name, string Value)> Headers, byte[] Body);
+
+    /// <summary>A server that records the first request it is sent, byte for byte, and answers 200.</summary>
+    private sealed class CaptureOrigin : IDisposable
+    {
+        private readonly TcpListener _listener = new(IPAddress.Loopback, 0);
+        private readonly TaskCompletionSource<Seen> _seen = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly CancellationTokenSource _cts = new();
+
+        private readonly string? _redirectTo;
+
+        /// <param name="redirectTo">When given, the origin answers 302 with this Location instead of 200.</param>
+        public CaptureOrigin(string? redirectTo = null)
+        {
+            _redirectTo = redirectTo;
+            _listener.Start();
+            _ = AcceptAsync();
+        }
+
+        public string Url => $"http://127.0.0.1:{((IPEndPoint)_listener.LocalEndpoint).Port}/";
+
+        public async Task<Seen?> WaitAsync(TimeSpan timeout)
+        {
+            try { return await _seen.Task.WaitAsync(timeout); }
+            catch (TimeoutException) { return null; }
+        }
+
+        private async Task AcceptAsync()
+        {
+            try
+            {
+                while (!_cts.IsCancellationRequested)
+                {
+                    var client = await _listener.AcceptTcpClientAsync(_cts.Token);
+                    _ = ServeAsync(client);
+                }
+            }
+            catch (OperationCanceledException) { }
+            catch (ObjectDisposedException) { }
+            catch (SocketException) { }
+        }
+
+        private async Task ServeAsync(TcpClient client)
+        {
+            using (client)
+            {
+                try
+                {
+                    var stream = client.GetStream();
+                    var buffer = new List<byte>();
+                    var one = new byte[4096];
+                    int headEnd;
+                    while ((headEnd = IndexOfHeadEnd(buffer)) < 0)
+                    {
+                        var n = await stream.ReadAsync(one, _cts.Token);
+                        if (n == 0) return;
+                        buffer.AddRange(one.AsSpan(0, n).ToArray());
+                    }
+
+                    var lines = Encoding.Latin1.GetString(buffer.GetRange(0, headEnd).ToArray()).Split("\r\n");
+                    // A header line without a colon is not a header; skipping it keeps a malformed request
+                    // from throwing here instead of failing the assertion that notices what is missing.
+                    var headers = lines.Skip(1).Where(l => l.Contains(':')).Select(l => (Name: l[..l.IndexOf(':')], Value: l[(l.IndexOf(':') + 1)..].Trim(' ', '\t'))).ToList();
+                    var rest = buffer.GetRange(headEnd + 4, buffer.Count - headEnd - 4);
+                    var lengthHeader = headers.FirstOrDefault(h => h.Name.Equals("Content-Length", StringComparison.OrdinalIgnoreCase)).Value;
+                    var body = new List<byte>();
+                    if (lengthHeader is not null)
+                    {
+                        var length = int.Parse(lengthHeader);
+                        body.AddRange(rest);
+                        while (body.Count < length)
+                        {
+                            var n = await stream.ReadAsync(one, _cts.Token);
+                            if (n == 0) break;
+                            body.AddRange(one.AsSpan(0, n).ToArray());
+                        }
+                    }
+                    else if (headers.Any(h => h.Name.Equals("Transfer-Encoding", StringComparison.OrdinalIgnoreCase)))
+                    {
+                        // Chunked: read until the terminating zero chunk, then decode.
+                        var raw = new List<byte>(rest);
+                        while (!EndsChunked(raw))
+                        {
+                            var n = await stream.ReadAsync(one, _cts.Token);
+                            if (n == 0) break;
+                            raw.AddRange(one.AsSpan(0, n).ToArray());
+                        }
+                        body.AddRange(DecodeChunked(raw));
+                    }
+
+                    _seen.TrySetResult(new Seen(lines[0][..lines[0].LastIndexOf(' ')], headers, body.ToArray()));
+                    var status = _redirectTo is null ? "200 OK" : "302 Found\r\nLocation: " + _redirectTo;
+                    await stream.WriteAsync(Encoding.ASCII.GetBytes($"HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"), _cts.Token);
+                }
+                catch (InvalidDataException ex)
+                {
+                    // A client that sent a broken chunked body: fail the test that waits, with the reason.
+                    _seen.TrySetException(ex);
+                }
+                catch (Exception ex) when (ex is IOException or SocketException or OperationCanceledException or ObjectDisposedException) { }
+            }
+        }
+
+        private static int IndexOfHeadEnd(List<byte> bytes)
+        {
+            for (var i = 0; i + 3 < bytes.Count; i++)
+                if (bytes[i] == '\r' && bytes[i + 1] == '\n' && bytes[i + 2] == '\r' && bytes[i + 3] == '\n') return i;
+            return -1;
+        }
+
+        private static bool EndsChunked(List<byte> raw) =>
+            raw.Count >= 5 && Encoding.ASCII.GetString(raw.GetRange(raw.Count - 5, 5).ToArray()) == "0\r\n\r\n";
+
+        private static IEnumerable<byte> DecodeChunked(List<byte> raw)
+        {
+            var position = 0;
+            while (position < raw.Count)
+            {
+                var lineEnd = raw.FindIndex(position, b => b == '\r');
+                if (lineEnd < 0) throw new InvalidDataException($"malformed chunked body: no chunk-size line ends after byte {position} of {raw.Count}");
+                int size;
+                try { size = Convert.ToInt32(Encoding.ASCII.GetString(raw.GetRange(position, lineEnd - position).ToArray()).Split(';')[0], 16); }
+                catch (FormatException) { throw new InvalidDataException($"malformed chunked body: the chunk size at byte {position} is not hexadecimal"); }
+                if (size < 0 || lineEnd + 2 + size > raw.Count) throw new InvalidDataException($"malformed chunked body: the chunk at byte {position} is cut short");
+                if (size == 0) yield break;
+                for (var i = 0; i < size; i++) yield return raw[lineEnd + 2 + i];
+                position = lineEnd + 2 + size + 2;
+            }
+        }
+
+        public void Dispose()
+        {
+            _cts.Cancel();
+            _listener.Stop();
+            _cts.Dispose();
+        }
     }
 
     // ---------------------------------------------------------------- fixtures
