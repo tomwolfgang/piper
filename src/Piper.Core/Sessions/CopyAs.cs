@@ -417,9 +417,18 @@ public static class CopyAs
             prefix = "printf %s " + BashQuote(Base64(m.Body)) + " | base64 -d | ";
             args.Add("--data-binary @-");
         }
+        else if (m.Kind == BodyKind.Text && bodyBytes.Contains((byte)'/'))
+        {
+            // Git for Windows bash rewrites a word such as /x or next=/home into a Windows path before a
+            // native curl.exe sees it, and a body is the one argument whose first characters are not
+            // fixed (a header starts with its name, the URL with its scheme). printf is a builtin, so the
+            // text goes to curl on standard input instead of on its command line.
+            prefix = "printf %s " + BashQuote(bodyBytes) + " | ";
+            args.Add("--data-binary @-");
+        }
         else if (m.Kind == BodyKind.Text)
         {
-            args.Add("--data-raw " + BashQuote(Encoding.UTF8.GetBytes(m.BodyText)));
+            args.Add("--data-raw " + BashQuote(bodyBytes));
         }
 
         return CommentBlock(m, "# ", "\n") + prefix + string.Join(" \\\n  ", args);

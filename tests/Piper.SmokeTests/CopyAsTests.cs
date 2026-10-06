@@ -135,6 +135,21 @@ internal static class CopyAsTests
             });
         }
 
+        await runner.RunAsync("Copy as: bash keeps a text body that holds a slash off the command line", () =>
+        {
+            string Bash(string body)
+            {
+                var request = new HttpRequestData { Method = "POST", Url = new Uri("https://api.example.test/p"), Body = Encoding.ASCII.GetBytes(body) };
+                request.Headers.Add("Content-Type", "text/plain");
+                return CopyAs.Build(request, CopyAsTarget.CurlBash)!.Text;
+            }
+
+            runner.IsTrue(Bash("/x").StartsWith("printf %s '/x' | curl ", StringComparison.Ordinal) && Bash("/x").Contains("--data-binary @-", StringComparison.Ordinal), "a body that starts with a slash goes on standard input");
+            runner.IsTrue(!Bash("next=/home").Contains("--data-raw", StringComparison.Ordinal), "a body with =/ goes on standard input");
+            runner.IsTrue(Bash("plain text").Contains("--data-raw 'plain text'", StringComparison.Ordinal), "a body with no slash stays on the command line");
+            return Task.CompletedTask;
+        });
+
         await runner.RunAsync("Copy as: every escaper turns hostile text into one literal", () =>
         {
             runner.AreEqual("''", CopyAs.BashQuote(""), "bash: empty is an empty word");
@@ -227,6 +242,33 @@ internal static class CopyAsTests
         ("every byte value", [.. Enumerable.Range(0, 256).Select(i => (byte)i)], "application/octet-stream"),
     ];
 
+    // Text that starts with a slash or holds "=/": Git for Windows bash turns such a word into a Windows
+    // path (/x into X:/, next=/home into next=C:/Program Files/Git/home) before it reaches a native
+    // curl.exe, unless the word is kept off the command line. Headers, cookies and the URL query hold the
+    // same shapes and must arrive as they are as well.
+    private static readonly (string Name, byte[] Bytes, string ContentType)[] PathLikeBodies =
+    [
+        ("slash text", Encoding.ASCII.GetBytes("/x"), "text/plain"),
+        ("path text", Encoding.ASCII.GetBytes("/v1/items"), "text/plain"),
+        ("assignment text", Encoding.ASCII.GetBytes("a=/b"), "application/x-www-form-urlencoded"),
+        ("form text", Encoding.ASCII.GetBytes("next=/home&from=/a/b"), "application/x-www-form-urlencoded"),
+        ("double slash text", Encoding.ASCII.GetBytes("//x"), "text/plain"),
+        ("path list text", Encoding.ASCII.GetBytes("/x:/y"), "text/plain"),
+        ("option text", Encoding.ASCII.GetBytes("--opt=/x"), "text/plain"),
+    ];
+
+    private static readonly (string Name, string Value)[] PathLikeHeaders =
+    [
+        ("Referer", "/home"),
+        ("X-Next", "a=/b"),
+        ("X-Path", "/v1/items"),
+        ("X-Double", "//x"),
+        ("X-List", "/a:/b;/c"),
+        ("Cookie", "next=/home; a=/b"),
+    ];
+
+    private const string PathLikeQuery = "&next=/home&a=/b&c=//d";
+
     private const string Secret = "s3cr3t-LEAK-7f3a";
 
     // Values that would run a second command if they broke out of their argument; each would create
@@ -265,6 +307,10 @@ internal static class CopyAsTests
         var bashMissing = bash is null ? "no bash (Git for Windows) is installed" : null;
         await RoundTripAsync(runner, "bash", CopyAsTarget.CurlBash, bashMissing, (text, dir) => ExecuteAsync(bash!, "-l -s", text, dir));
         await RoundTripAsync(runner, "bash", CopyAsTarget.CurlBash, bashMissing, (text, dir) => ExecuteAsync(bash!, "-l -s", text, dir, msysPathConversion: true), RoundTripSet.BestFit);
+
+        // With the default path conversion on, which an interactive Git for Windows bash has, a word such
+        // as /x or next=/home must still reach curl.exe as it is.
+        await RoundTripAsync(runner, "bash with path conversion", CopyAsTarget.CurlBash, bashMissing, (text, dir) => ExecuteAsync(bash!, "-l -s", text, dir, msysPathConversion: true), RoundTripSet.PathLike);
 
         await runner.RunAsync("Copy as: bash quoting reproduces every byte it is given", async () =>
         {
@@ -347,7 +393,7 @@ internal static class CopyAsTests
 
     // Both is Plain and Bang together, for the targets that need no separate treatment. Simple holds only
     // printable ASCII with no exclamation mark, which the cmd snippet writes on its command line.
-    private enum RoundTripSet { Both, Plain, Bang, Simple, BestFit }
+    private enum RoundTripSet { Both, Plain, Bang, Simple, BestFit, PathLike }
 
     private static async Task RoundTripAsync(TestRunner runner, string shell, CopyAsTarget target, string? unavailable, Func<string, string, Task<string>> run, RoundTripSet set = RoundTripSet.Both, bool verbatimNonAscii = true)
     {
@@ -356,6 +402,7 @@ internal static class CopyAsTests
             RoundTripSet.Bang => "values with an exclamation mark",
             RoundTripSet.Simple => "plain ASCII values",
             RoundTripSet.BestFit => "best-fit characters",
+            RoundTripSet.PathLike => "values that look like paths",
             _ => "every value",
         };
         await runner.RunAsync($"Copy as: {target} pasted into {shell} delivers {label} unchanged", async () =>
@@ -371,12 +418,15 @@ internal static class CopyAsTests
             var bang = set is RoundTripSet.Both or RoundTripSet.Bang;
             var simple = set == RoundTripSet.Simple;
             var bestFit = set == RoundTripSet.BestFit;
+            var pathLike = set == RoundTripSet.PathLike;
             IEnumerable<(string Name, byte[] Bytes, string ContentType)> bodies =
                 (plain ? RoundTripBodies : []).Concat(bang ? BangBodies : []).Concat(bestFit ? BestFitBodies : [])
-                    .Concat(simple ? RoundTripBodies.Where(b => b.Name is "single-line hostile text" or "every byte value") : []);
+                    .Concat(simple ? RoundTripBodies.Where(b => b.Name is "single-line hostile text" or "every byte value") : [])
+                    .Concat(pathLike ? PathLikeBodies : []);
             IEnumerable<(string Name, string Value)> headers =
-                (plain ? RoundTripHeaders : []).Concat(bang ? BangHeaders : []).Concat(simple ? RoundTripHeaders.Where(h => h.Name != "X-Tab") : []);
-            var query = bang ? BangQuery : string.Empty;
+                (plain ? RoundTripHeaders : []).Concat(bang ? BangHeaders : []).Concat(simple ? RoundTripHeaders.Where(h => h.Name != "X-Tab") : [])
+                    .Concat(pathLike ? PathLikeHeaders : []);
+            var query = bang ? BangQuery : pathLike ? PathLikeQuery : string.Empty;
             foreach (var body in bodies)
             {
                 using var origin = new CaptureOrigin();
