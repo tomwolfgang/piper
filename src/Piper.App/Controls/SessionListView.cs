@@ -42,7 +42,7 @@ public sealed class SessionListView : UserControl
     /// <summary>Ceiling on how many matches a find selects. Marking is unlimited.</summary>
     private const int MaxSelectedMatches = 2_000;
 
-    private readonly ListView _list;
+    private readonly SteadyListView _list;
     private readonly TextBox _filterBox;
     private readonly Button _followButton;
     private readonly ToolTip _filterToolTip = new();
@@ -646,6 +646,36 @@ public sealed class SessionListView : UserControl
         SelectedSessionsChanged?.Invoke(this, EventArgs.Empty);
     }
 
+    /// <summary>Selects every session currently shown, including all rows left by an active filter.</summary>
+    private void SelectAllVisibleSessions()
+    {
+        if (_visible.Count == 0 || _list.SelectedIndices.Count == _visible.Count) return;
+
+        var previousSession = SelectedSession;
+        _list.BeginUpdate();
+        try
+        {
+            _suppressSelectionChanged = true;
+            // This sends one native message, rather than setting every virtual row through managed
+            // SelectedIndices.Add calls. A capture can retain 20,000 sessions, and Ctrl+A should not
+            // make the UI step through each one before it responds.
+            _list.SelectAllItems();
+            if (previousSession is null) _list.Items[0].Focused = true;
+        }
+        finally
+        {
+            _suppressSelectionChanged = false;
+            _list.EndUpdate();
+        }
+
+        if (previousSession is null)
+            _primarySelectedSession = FirstSelectedSession();
+
+        if (!ReferenceEquals(previousSession, SelectedSession))
+            RaiseSelectionChanged(SelectedSession);
+        SelectedSessionsChanged?.Invoke(this, EventArgs.Empty);
+    }
+
     /// <summary>
     /// Drops marks for sessions the store no longer holds, so a long capture cannot accumulate
     /// them without bound. The count check is a conservative trigger, not an exact one: a stale id
@@ -1098,6 +1128,12 @@ public sealed class SessionListView : UserControl
             e.Handled = true;
             e.SuppressKeyPress = true;
         }
+        else if (e.Control && e.KeyCode == Keys.A)
+        {
+            SelectAllVisibleSessions();
+            e.Handled = true;
+            e.SuppressKeyPress = true;
+        }
         else if (e.KeyCode == Keys.F3 && e.Modifiers == Keys.None)
         {
             // Bare F3 only. Shift+F3 conventionally means find-previous, so leave it unbound
@@ -1437,9 +1473,18 @@ public sealed class SessionListView : UserControl
     {
         private const int WmSetRedraw = 0x000B;
         private const int LvmSetItemCount = 0x1000 + 47;
+        private const int LvmSetItemState = 0x1000 + 43;
         private const int LvsicfNoScroll = 0x0002;
+        private const uint LvisSelected = 0x0002;
 
         private bool _redrawSuspended;
+
+        /// <summary>Sets the selected state for every native row in one ListView message.</summary>
+        public void SelectAllItems()
+        {
+            var item = new ListViewItemState { State = LvisSelected, StateMask = LvisSelected };
+            SendMessage(Handle, LvmSetItemState, (nint)(-1), ref item);
+        }
 
         protected override void WndProc(ref Message m)
         {
@@ -1464,9 +1509,22 @@ public sealed class SessionListView : UserControl
         [System.Runtime.InteropServices.DllImport("user32.dll", EntryPoint = "DefWindowProcW")]
         private static extern nint DefWindowProc(nint hwnd, int msg, nint wParam, nint lParam);
 
+        [System.Runtime.InteropServices.DllImport("user32.dll", EntryPoint = "SendMessageW")]
+        private static extern nint SendMessage(nint hwnd, int msg, nint wParam, ref ListViewItemState item);
+
         [System.Runtime.InteropServices.DllImport("user32.dll")]
         [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
         private static extern bool IsWindowVisible(nint hwnd);
+
+        [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+        private struct ListViewItemState
+        {
+            public uint Mask;
+            public int Item;
+            public int SubItem;
+            public uint State;
+            public uint StateMask;
+        }
     }
 
     protected override void Dispose(bool disposing)

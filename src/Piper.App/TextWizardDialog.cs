@@ -24,6 +24,11 @@ public sealed class TextWizardDialog : Form
     /// <summary>How much of the output the byte view will render. See <see cref="HexDump"/>.</summary>
     private const int MaxDumpBytes = 64 * 1024;
 
+    /// <summary>Convenience settings must not create an unusably large form when the file is malformed.</summary>
+    private const int MaxRestoredWindowDimension = 16_384;
+
+    private static readonly Size MinimumWindowSize = new(700, 500);
+
     /// <summary>A token can hold a deeply nested or very wide JSON value; don't let it create an endless UI tree.</summary>
     private const int MaxJwtTreeNodes = 10_000;
 
@@ -83,8 +88,9 @@ public sealed class TextWizardDialog : Form
         Text = Strings.TextWizard.Caption;
         StartPosition = FormStartPosition.CenterParent;
         FormBorderStyle = FormBorderStyle.Sizable;
-        MinimumSize = new Size(700, 500);
+        MinimumSize = MinimumWindowSize;
         ClientSize = new Size(900, 660);
+        if (LoadLastWindowSize() is { } savedSize) Size = savedSize;
         MinimizeBox = false;
         ShowInTaskbar = false;
 
@@ -290,10 +296,7 @@ public sealed class TextWizardDialog : Form
         // Only a choice the user made themselves is worth remembering; a detected one belongs to the text
         // they happened to open, not to how they like to work.
         if (_transform.SelectedIndex >= 0 && _transform.SelectedIndex < Choices.Length)
-            TextWizardSettingsStore.Save(new TextWizardSettings
-            {
-                LastTransform = Choices[_transform.SelectedIndex].Transform.ToString(),
-            });
+            SaveSettings(settings => settings.LastTransform = Choices[_transform.SelectedIndex].Transform.ToString());
 
         Run();
     }
@@ -506,6 +509,38 @@ public sealed class TextWizardDialog : Form
             ? parsed
             : null;
 
+    private static Size? LoadLastWindowSize()
+    {
+        var settings = TextWizardSettingsStore.Load();
+        if (settings?.LastWindowWidth is not { } width || settings.LastWindowHeight is not { } height) return null;
+
+        var size = new Size(width, height);
+        return IsValidWindowSize(size) ? size : null;
+    }
+
+    private void SaveWindowSize()
+    {
+        var bounds = WindowState == FormWindowState.Normal ? Bounds : RestoreBounds;
+        if (!IsValidWindowSize(bounds.Size)) return;
+
+        SaveSettings(settings =>
+        {
+            settings.LastWindowWidth = bounds.Width;
+            settings.LastWindowHeight = bounds.Height;
+        });
+    }
+
+    private static bool IsValidWindowSize(Size size) =>
+        size.Width >= MinimumWindowSize.Width && size.Height >= MinimumWindowSize.Height
+        && size.Width <= MaxRestoredWindowDimension && size.Height <= MaxRestoredWindowDimension;
+
+    private static void SaveSettings(Action<TextWizardSettings> update)
+    {
+        var settings = TextWizardSettingsStore.Load() ?? new TextWizardSettings();
+        update(settings);
+        TextWizardSettingsStore.Save(settings);
+    }
+
     /// <summary>
     /// Offset, hex and printable ASCII, the same shape as the Hex inspector's view. Capped: the dump is
     /// roughly five times the size of what it describes, and a transform can already have multiplied a
@@ -581,6 +616,12 @@ public sealed class TextWizardDialog : Form
         _tips.SetToolTip(button, tooltip);
         button.Click += (_, _) => onClick();
         return button;
+    }
+
+    protected override void OnFormClosed(FormClosedEventArgs e)
+    {
+        SaveWindowSize();
+        base.OnFormClosed(e);
     }
 
     protected override void Dispose(bool disposing)
