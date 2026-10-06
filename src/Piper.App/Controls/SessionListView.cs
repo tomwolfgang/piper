@@ -104,6 +104,12 @@ public sealed class SessionListView : UserControl
     /// <summary>Raised when the user asks to see again every host hidden this session.</summary>
     public event EventHandler? ShowSessionHiddenHostsRequested;
 
+    /// <summary>
+    /// Raised with a line for the Log tab after a Copy as command, saying what was copied or why
+    /// nothing was. It never carries any captured value.
+    /// </summary>
+    public event EventHandler<string>? CopyAsNotice;
+
     public SessionListView(SessionStore store)
     {
         _store = store;
@@ -1133,7 +1139,10 @@ public sealed class SessionListView : UserControl
         });
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(Menus.Item(Strings.SessionList.CopyUrl, Strings.Shortcuts.CtrlC, (_, _) => CopyUrls()));
-        menu.Items.Add(Strings.SessionList.CopyAsCurl, null, (_, _) => CopyAsCurl());
+        var copyAs = new ToolStripMenuItem(Strings.SessionList.CopyAsMenu);
+        foreach (var target in Enum.GetValues<CopyAsTarget>())
+            copyAs.DropDownItems.Add(Strings.SessionList.CopyAsTargetMenu(target), null, (_, _) => CopyRequestAs(target));
+        menu.Items.Add(copyAs);
         menu.Items.Add(Strings.SessionList.CopyFullSession, null, (_, _) => CopyFullSession());
         var save = new ToolStripMenuItem(Strings.SessionList.SaveMenu);
         var saveResponseBody = save.DropDownItems.Add(Strings.SessionList.SaveResponseBody, null, (_, _) => SaveResponseBody());
@@ -1167,6 +1176,7 @@ public sealed class SessionListView : UserControl
             saveSessionsAsSaz.Enabled = SelectedSessions.Any(session => session.Request is not null);
             save.Enabled = saveResponseBody.Enabled || saveSessionsAsSaz.Enabled;
             resend.Enabled = SelectedSession is { IsTunnel: false, Request: not null };
+            copyAs.Enabled = resend.Enabled;
             clearMarks.Enabled = _marks.Count > 0;
             showHiddenHosts.Enabled = _sessionHiddenHostsFilter is not null;
             autoResponder.Enabled = SelectedSession is { IsTunnel: false, Request.Url: not null };
@@ -1349,22 +1359,50 @@ public sealed class SessionListView : UserControl
         return Strings.SessionList.SuggestedResponseFileName(session.Id, extension);
     }
 
-    private void CopyAsCurl()
+    private void CopyRequestAs(CopyAsTarget target)
     {
-        if (SelectedSession?.Request is not { } request) return;
+        if (SelectedSession?.Request is { } request) _ = CopyRequestAsAsync(request, target);
+    }
 
-        var sb = new System.Text.StringBuilder();
-        sb.Append("curl -X ").Append(request.Method).Append(" \"").Append(SelectedSession.Url).Append('"');
-        foreach (var header in request.Headers)
+    private async Task CopyRequestAsAsync(Piper.Core.Http.HttpRequestData request, CopyAsTarget target)
+    {
+        try
         {
-            if (header.Name.Equals("Host", StringComparison.OrdinalIgnoreCase)) continue;
-            sb.Append(" \\\r\n  -H \"").Append(header.Name).Append(": ")
-              .Append(header.Value.Replace("\"", "\\\"")).Append('"');
-        }
-        if (request.Body.Length > 0)
-            sb.Append(" \\\r\n  --data-raw \"").Append(request.BodyAsText().Replace("\"", "\\\"")).Append('"');
+            // Decoding a body can take a moment on a large one, so it is not done on the UI thread.
+            var result = await Task.Run(() => CopyAs.Build(request, target));
 
-        ClipboardText.TrySet(sb.ToString());
+            if (IsDisposed) return;
+
+            if (result is null)
+                CopyAsNotice?.Invoke(this, Strings.SessionList.CopyAsUnavailable(target));
+            else if (ClipboardText.TrySet(result.Text))
+                CopyAsNotice?.Invoke(this, Strings.SessionList.CopyAsDone(target, result.Notes));
+            else
+                CopyAsNotice?.Invoke(this, Strings.SessionList.CopyAsClipboardFailed(target));
+        }
+        catch (Exception)
+        {
+            // A broad catch is needed here because this is a fire-and-forget boundary (CopyRequestAs
+            // discards the task): a throw from the build, the clipboard or a CopyAsNotice subscriber
+            // would otherwise be an unobserved faulted task that nobody reports. Nothing in a copy is
+            // worth taking the capture down for, and the exception text can carry captured data, so
+            // the Log gets a fixed line instead of it.
+            ReportCopyAsFailed(target);
+        }
+    }
+
+    private void ReportCopyAsFailed(CopyAsTarget target)
+    {
+        if (IsDisposed) return;
+
+        try { CopyAsNotice?.Invoke(this, Strings.SessionList.CopyAsFailed(target)); }
+        catch (Exception)
+        {
+            // A broad catch is needed: CopyAsNotice is an event, so its subscribers are arbitrary code
+            // and any exception type can come out of them. This is the last report there is, a
+            // subscriber that throws on it leaves nobody to tell, and the fire-and-forget task must
+            // still end without faulting. Nothing here could be retried or recovered.
+        }
     }
 
     private void RemoveSelected()

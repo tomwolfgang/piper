@@ -219,6 +219,7 @@ public sealed class MainForm : Form, IMessageFilter
             PruneSessionHiddenHosts();
         };
         _sessionList.HideHostRequested += (_, host) => HideHost(host);
+        _sessionList.CopyAsNotice += (_, message) => AppendLog(message);
         _sessionList.ShowSessionHiddenHostsRequested += (_, _) =>
         {
             ClearSessionHiddenHosts();
