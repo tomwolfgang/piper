@@ -32,6 +32,14 @@ jobs:
         shell: pwsh
         run: choco install nsis --yes --no-progress
 
+      # The Copy as smoke tests exercise Git for Windows' ANSI curl.exe. Install it explicitly:
+      # hosted runner images are mutable, and a missing tool is a test failure under CI by design.
+      # This is test infrastructure only and is not included in shipped artifacts. release.yml
+      # uses the same installation before it runs the same smoke tests.
+      - name: Install Git for Windows for the Copy as round trips
+        shell: pwsh
+        run: choco install git --yes --no-progress
+
       # Test-only. The Copy as smoke tests run the generated Python snippet against the real `requests`
       # package, and a missing tool fails under CI by design so the security evidence cannot silently
       # skip. Uses the runner image's preinstalled python.exe (the one the tests find on PATH); every

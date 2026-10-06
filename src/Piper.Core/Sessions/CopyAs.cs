@@ -534,8 +534,12 @@ public static class CopyAs
         string text;
         if (m.Kind == BodyKind.Binary)
         {
+            // Git for Windows runs a native curl.exe. Newer Git Bash versions do not always convert a
+            // variable-expanded /tmp path for curl's --config argument, so convert it explicitly when
+            // cygpath is available. Ordinary Unix shells keep the path mktemp returned.
             text = "( trap 'rm -f \"$piperConfig\"' EXIT; trap 'exit 130' INT TERM; piperConfig=$(mktemp \"${TMPDIR:-/tmp}/piper-XXXXXXXXXX\") && printf %s " + word + " > \"$piperConfig\" && "
-                + "printf %s " + BashQuote(Base64(m.Body)) + " | base64 -d | curl --config \"$piperConfig\" --data-binary @- )";
+                + "piperCurlConfig=$piperConfig; command -v cygpath >/dev/null 2>&1 && piperCurlConfig=$(cygpath -w \"$piperConfig\"); "
+                + "printf %s " + BashQuote(Base64(m.Body)) + " | base64 -d | curl --config \"$piperCurlConfig\" --data-binary @- )";
         }
         else
         {

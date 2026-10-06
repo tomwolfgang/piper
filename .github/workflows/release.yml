@@ -56,6 +56,12 @@ jobs:
       - name: Build
         run: dotnet build Piper.slnx --configuration Release --no-restore
 
+      # Test-only. The Copy as smoke tests exercise Git for Windows' ANSI curl.exe. Install it
+      # explicitly because hosted runner images are mutable; this tool is not shipped in artifacts.
+      - name: Install Git for Windows for the Copy as round trips
+        shell: pwsh
+        run: choco install git --yes --no-progress
+
       # Test-only, the same command and pinned, hash-checked file as ci.yml: the smoke tests fail under
       # GITHUB_ACTIONS when the Python round trip cannot run. Nothing installed here reaches the artifacts.
       - name: Install Python requests for the Copy as round trips
