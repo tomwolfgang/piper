@@ -312,6 +312,40 @@ internal static class CopyAsTests
         // as /x or next=/home must still reach curl.exe as it is.
         await RoundTripAsync(runner, "bash with path conversion", CopyAsTarget.CurlBash, bashMissing, (text, dir) => ExecuteAsync(bash!, "-l -s", text, dir, msysPathConversion: true), RoundTripSet.PathLike);
 
+        // Ctrl+C on a curl that never gets an answer ends curl with SIGINT, which makes bash abandon the
+        // command list it is running: a trailing cleanup would never run and the temporary config, which
+        // holds the request's credentials, would stay on disk. A curl function stands in for the one that
+        // is interrupted: it checks that the config exists, then dies of SIGINT as curl does.
+        await runner.RunAsync("Copy as: CurlBash removes its temporary curl config when curl is interrupted", async () =>
+        {
+            if (bash is null)
+            {
+                runner.ToolMissing("bash: no bash (Git for Windows) is installed");
+                return;
+            }
+
+            var dir = Path.Combine(Path.GetTempPath(), "copyas-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dir);
+            try
+            {
+                var request = new HttpRequestData
+                {
+                    Method = "POST",
+                    Url = new Uri("http://127.0.0.1:9/hang"),
+                    Body = [.. Enumerable.Range(0, 256).Select(i => (byte)i)],
+                };
+                request.Headers.Add("Authorization", "Bearer interrupt-secret");
+                request.Headers.Add("X-Uni", Latin1Unicode); // a byte above ASCII and a binary body: the config goes to a temporary file
+                var text = CopyAs.Build(request, CopyAsTarget.CurlBash)!.Text;
+                var script = "curl() { compgen -G \"${TMPDIR:-/tmp}/piper-*\" > /dev/null && echo CONFIG-PRESENT >&2; kill -INT 0; sleep 5; }\n" + text + "\n";
+
+                var output = await ExecuteAsync(bash, "-l -s", script, dir);
+                runner.IsTrue(output.Contains("CONFIG-PRESENT", StringComparison.Ordinal), "the config was on disk when curl was interrupted; output: " + output);
+                runner.AreEqual(0, Directory.GetFiles(dir, "piper-*").Length, "no temporary curl config is left behind");
+            }
+            finally { try { Directory.Delete(dir, recursive: true); } catch (IOException) { } }
+        });
+
         await runner.RunAsync("Copy as: bash quoting reproduces every byte it is given", async () =>
         {
             if (bash is null)

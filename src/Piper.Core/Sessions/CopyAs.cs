@@ -452,12 +452,14 @@ public static class CopyAs
         var word = BashQuote(latin1.GetBytes(config.ToString()));
 
         // Without a binary body the config is piped to curl. A binary body needs curl's standard input
-        // for itself, so the config goes to a private temporary file that is removed afterwards.
+        // for itself, so the config goes to a private temporary file. A subshell removes it when it ends,
+        // however it ends: Ctrl+C on a hung curl would otherwise skip a trailing rm and leave the
+        // credentials in the file behind.
         string text;
         if (m.Kind == BodyKind.Binary)
         {
-            text = "piperConfig=$(mktemp \"${TMPDIR:-/tmp}/piper-XXXXXXXXXX\") && printf %s " + word + " > \"$piperConfig\" && "
-                + "printf %s " + BashQuote(Base64(m.Body)) + " | base64 -d | curl --config \"$piperConfig\" --data-binary @-; rm -f \"$piperConfig\"";
+            text = "( trap 'rm -f \"$piperConfig\"' EXIT; trap 'exit 130' INT TERM; piperConfig=$(mktemp \"${TMPDIR:-/tmp}/piper-XXXXXXXXXX\") && printf %s " + word + " > \"$piperConfig\" && "
+                + "printf %s " + BashQuote(Base64(m.Body)) + " | base64 -d | curl --config \"$piperConfig\" --data-binary @- )";
         }
         else
         {
