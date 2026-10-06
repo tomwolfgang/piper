@@ -201,6 +201,26 @@ internal static class CopyAsTests
 
     public static async Task RunAsync(TestRunner runner)
     {
+        await runner.RunAsync("Copy as: Git for Windows curl is found in both install layouts", () =>
+        {
+            var root = Path.Combine(Path.GetTempPath(), "piper-git-curl-" + Guid.NewGuid().ToString("N"));
+            var bash = Path.Combine(root, "usr", "bin", "bash.exe");
+            var ucrt = Path.Combine(root, "ucrt64", "bin");
+            var mingw = Path.Combine(root, "mingw64", "bin");
+            try
+            {
+                runner.IsTrue(FindGitCurlDirectory(bash) is null, "an install without curl is unavailable");
+                Directory.CreateDirectory(mingw);
+                File.WriteAllBytes(Path.Combine(mingw, "curl.exe"), []);
+                runner.AreEqual(mingw, FindGitCurlDirectory(bash), "the older mingw64 layout is found");
+                Directory.CreateDirectory(ucrt);
+                File.WriteAllBytes(Path.Combine(ucrt, "curl.exe"), []);
+                runner.AreEqual(ucrt, FindGitCurlDirectory(bash), "the newer ucrt64 layout is preferred");
+            }
+            finally { if (Directory.Exists(root)) Directory.Delete(root, recursive: true); }
+            return Task.CompletedTask;
+        });
+
         foreach (var target in AllTargets)
         {
             await runner.RunAsync($"Copy as: {target} snapshot of a hostile request", () =>
@@ -751,8 +771,8 @@ internal static class CopyAsTests
         // Git for Windows' curl.exe is built with an ANSI main: Windows converts its command line to the
         // ANSI code page, so a U+FF02 on it would become a double quote. With the request in the config
         // file nothing like that reaches it; this run puts that curl first on PATH to prove it.
-        var gitCurl = bash is null ? null : Path.GetFullPath(Path.Combine(Path.GetDirectoryName(bash)!, "..", "..", "mingw64", "bin"));
-        var gitCurlMissing = gitCurl is not null && File.Exists(Path.Combine(gitCurl, "curl.exe")) ? null : "Git for Windows' curl.exe is not installed";
+        var gitCurl = bash is null ? null : FindGitCurlDirectory(bash);
+        var gitCurlMissing = gitCurl is null ? "Git for Windows' curl.exe is not installed" : null;
         await RoundTripAsync(runner, "cmd.exe with Git for Windows' curl.exe", CopyAsTarget.CurlCmd, gitCurlMissing,
             (text, dir) => RunCmdByLineAsync(Path.Combine(system, "cmd.exe"), "on", text, dir, gitCurl), RoundTripSet.BestFit);
         await RoundTripAsync(runner, "cmd.exe with Git for Windows' curl.exe, typed at the prompt", CopyAsTarget.CurlCmd, gitCurlMissing,
@@ -1181,6 +1201,15 @@ internal static class CopyAsTests
         (Environment.GetEnvironmentVariable("PATH") ?? string.Empty).Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries)
             .Select(directory => { try { return Path.Combine(directory, file); } catch (ArgumentException) { return null; } })
             .FirstOrDefault(path => path is not null && File.Exists(path));
+
+    private static string? FindGitCurlDirectory(string bash)
+    {
+        var gitRoot = Path.GetFullPath(Path.Combine(Path.GetDirectoryName(bash)!, "..", ".."));
+        // Git for Windows 2.56 moved native tools from mingw64 to ucrt64.
+        return new[] { "ucrt64", "mingw64" }
+            .Select(variant => Path.Combine(gitRoot, variant, "bin"))
+            .FirstOrDefault(directory => File.Exists(Path.Combine(directory, "curl.exe")));
+    }
 
     /// <summary>Runs a program to completion and returns its exit code and output, or kills it after a minute.</summary>
     private static async Task<string> ExecuteAsync(string file, string arguments, string? stdin, string? temp = null, bool msysPathConversion = false, string? curlDirectory = null)
