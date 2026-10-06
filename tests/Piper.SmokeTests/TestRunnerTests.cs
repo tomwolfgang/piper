@@ -79,6 +79,21 @@ internal static class TestRunnerTests
                 && child.Failures[0].Contains("from the test body", StringComparison.Ordinal), $"it names the exception, not a runner timeout ({child.Failures[0]})");
         });
 
+        await runner.RunAsync("a missing tool is counted apart from the passes, and fails the run under CI", async () =>
+        {
+            var local = new TestRunner(TextWriter.Null, underCi: false);
+            await local.RunAsync("needs a tool", () => { local.ToolMissing("tool: not installed"); return Task.CompletedTask; });
+            runner.AreEqual(1, local.NotRun, "locally it is reported as not run");
+            runner.AreEqual(0, local.Passed, "it is not a pass");
+            runner.AreEqual(0, local.Failed, "and not a failure");
+
+            var ci = new TestRunner(TextWriter.Null, underCi: true);
+            await ci.RunAsync("needs a tool", () => { ci.ToolMissing("tool: not installed"); return Task.CompletedTask; });
+            runner.AreEqual(1, ci.Failed, "under CI the same call is a failure");
+            runner.AreEqual(0, ci.NotRun, "and is not counted as merely not run");
+            runner.AreEqual(1, ci.Summarize(), "so the run exits non-zero");
+        });
+
         await runner.RunAsync("--filter runs the tests whose name matches, ignoring case, and skips the rest", async () =>
         {
             var ran = new List<string>();
