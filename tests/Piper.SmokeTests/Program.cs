@@ -817,8 +817,11 @@ static class TestDiscovery
         && parameter == typeof(TestRunner);
 }
 
-sealed class TestRunner(TextWriter output, string? filter = null, TimeSpan? testTimeout = null)
+sealed class TestRunner(TextWriter output, string? filter = null, TimeSpan? testTimeout = null, bool? underCi = null)
 {
+    private readonly bool _underCi = underCi
+        ?? (Environment.GetEnvironmentVariable("CI") is { Length: > 0 } || Environment.GetEnvironmentVariable("GITHUB_ACTIONS") is { Length: > 0 });
+
     /// <summary>The state of one running test; assertions find it through <see cref="_current"/>.</summary>
     private sealed class TestContext(string name)
     {
@@ -838,6 +841,7 @@ sealed class TestRunner(TextWriter output, string? filter = null, TimeSpan? test
     private int _passed;
     private int _failed;
     private int _skipped;
+    private int _unavailable;
 
     public int Passed => _passed;
     public int Failed => _failed;
@@ -963,10 +967,35 @@ sealed class TestRunner(TextWriter output, string? filter = null, TimeSpan? test
 
     private const string OutsideTest = "(outside a test)";
 
+    /// <summary>Tests that could not check anything because a tool they drive is not installed.</summary>
+    public int NotRun => _unavailable;
+
+    /// <summary>
+    /// Reports that the running test cannot check anything here because a tool it drives is missing. That
+    /// is counted apart from the passes and shown in the summary, so a machine without the tool is never
+    /// read as having verified it. Under CI (the CI or GITHUB_ACTIONS environment variable is set) every
+    /// such tool is expected, so the same call fails the test instead.
+    /// </summary>
+    public void ToolMissing(string what)
+    {
+        var test = _current.Value;
+        if (test is { Abandoned: true }) return;
+
+        if (_underCi)
+        {
+            Fail($"{test?.Name ?? OutsideTest} / {what} (required under CI)");
+            output.WriteLine($"   FAIL  {what} (required under CI)");
+            return;
+        }
+
+        Interlocked.Increment(ref _unavailable);
+        output.WriteLine($"   SKIPPED  {what}");
+    }
+
     public int Summarize()
     {
         output.WriteLine($"\n{new string('-', 60)}");
-        output.WriteLine($"{_passed} passed, {_failed} failed");
+        output.WriteLine($"{_passed} passed, {_failed} failed" + (_unavailable > 0 ? $", {_unavailable} not run (tool not installed)" : string.Empty));
         output.WriteLine($"{_timings.Count} tests run, {_skipped} skipped by --filter, {_total.Elapsed.TotalSeconds:0.0} s");
 
         output.WriteLine("Slowest tests:");
