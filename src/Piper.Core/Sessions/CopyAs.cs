@@ -469,9 +469,18 @@ public static class CopyAs
             prefix = "printf %s " + BashQuote(Base64(m.Body)) + " | base64 -d | ";
             args.Add("--data-binary @-");
         }
+        else if (m.Kind == BodyKind.Text && bodyBytes.Contains((byte)'/'))
+        {
+            // Git for Windows bash rewrites a word such as /x or next=/home into a Windows path before a
+            // native curl.exe sees it, and a body is the one argument whose first characters are not
+            // fixed (a header starts with its name, the URL with its scheme). printf is a builtin, so the
+            // text goes to curl on standard input instead of on its command line.
+            prefix = "printf %s " + BashQuote(bodyBytes) + " | ";
+            args.Add("--data-binary @-");
+        }
         else if (m.Kind == BodyKind.Text)
         {
-            args.Add("--data-raw " + BashQuote(Encoding.UTF8.GetBytes(m.BodyText)));
+            args.Add("--data-raw " + BashQuote(bodyBytes));
         }
 
         return CommentBlock(m, "# ", "\n") + prefix + string.Join(" \\\n  ", args);
@@ -495,12 +504,14 @@ public static class CopyAs
         var word = BashQuote(latin1.GetBytes(config.ToString()));
 
         // Without a binary body the config is piped to curl. A binary body needs curl's standard input
-        // for itself, so the config goes to a private temporary file that is removed afterwards.
+        // for itself, so the config goes to a private temporary file. A subshell removes it when it ends,
+        // however it ends: Ctrl+C on a hung curl would otherwise skip a trailing rm and leave the
+        // credentials in the file behind.
         string text;
         if (m.Kind == BodyKind.Binary)
         {
-            text = "piperConfig=$(mktemp \"${TMPDIR:-/tmp}/piper-XXXXXXXXXX\") && printf %s " + word + " > \"$piperConfig\" && "
-                + "printf %s " + BashQuote(Base64(m.Body)) + " | base64 -d | curl --config \"$piperConfig\" --data-binary @-; rm -f \"$piperConfig\"";
+            text = "( trap 'rm -f \"$piperConfig\"' EXIT; trap 'exit 130' INT TERM; piperConfig=$(mktemp \"${TMPDIR:-/tmp}/piper-XXXXXXXXXX\") && printf %s " + word + " > \"$piperConfig\" && "
+                + "printf %s " + BashQuote(Base64(m.Body)) + " | base64 -d | curl --config \"$piperConfig\" --data-binary @- )";
         }
         else
         {
