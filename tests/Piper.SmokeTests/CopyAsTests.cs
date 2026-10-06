@@ -23,8 +23,34 @@ internal static class CopyAsTests
 
     private static readonly CopyAsTarget[] AllTargets = Enum.GetValues<CopyAsTarget>();
 
+    // The curl config the cmd.exe and bash snippets of the hostile request carry: its X-Uni header is not
+    // ASCII and X-Cmd holds an exclamation mark, so neither puts the request on the command line. For
+    // bash each character stands for one byte, as the snippet writes them.
+    private static string HostileConfig(string uni, string body) =>
+        "url = " + CopyAs.CurlConfigString("https://api.example.test/v1/it's?q=$(id)&b=%60x%60&p=100%25") + "\n"
+        + "globoff\n"
+        + "request = \"POST\"\n"
+        + "compressed\n"
+        + "header = \"Content-Type: application/json\"\n"
+        + "header = \"Accept-Encoding: gzip, br\"\n"
+        + "header = \"Authorization: Bearer abc$def`x`\"\n"
+        + "header = \"X-Dollar: $(touch /tmp/pwn) ${HOME} `id`\"\n"
+        + "header = \"X-Quotes: it's \\\"quoted\\\" \\\\ back\\\\\"\n"
+        + "header = \"X-Cmd: 100% %PATH% a&b|c<d>e^f!g (h)\"\n"
+        + "header = \"X-Empty;\"\n"
+        + "header = " + CopyAs.CurlConfigString(uni) + "\n"
+        + "header = \"X-Dup: 1\"\n"
+        + "header = \"X-Dup: 2\"\n"
+        + (body.Length > 0 ? "data-raw = " + CopyAs.CurlConfigString(body) + "\n" : string.Empty);
+
+    private static readonly string HostileBashConfig = HostileConfig("X-Uni: " + Latin1Unicode, Encoding.Latin1.GetString(Encoding.UTF8.GetBytes(BodyJson)));
+
     private static readonly Dictionary<CopyAsTarget, string> Snapshots = new()
     {
+        [CopyAsTarget.CurlBash] = $"""
+                # Headers with a name or value that cannot be written safely were left out.
+                printf %s {CopyAs.BashQuote(Encoding.Latin1.GetBytes(HostileBashConfig))} | curl --config -
+                """,
         [CopyAsTarget.JavaScriptFetch] = """
                 // Headers with a name or value that cannot be written safely were left out.
                 await fetch("https://api.example.test/v1/it's?q=$(id)&b=%60x%60&p=100%25", {
@@ -45,6 +71,55 @@ internal static class CopyAsTests
                   body: "{\"q\":\"$(id) `x` 'y' %PATH% \\\"z\\\"\",\"u\":\"\u00e9\"}",
                 });
                 """,
+        [CopyAsTarget.PythonRequests] = """
+                # Headers with a name or value that cannot be written safely were left out.
+                # Repeated headers were merged into one value because this tool cannot repeat a header.
+                import requests
+
+                response = requests.request(
+                    "POST",
+                    "https://api.example.test/v1/it's?q=$(id)&b=%60x%60&p=100%25",
+                    allow_redirects=False,
+                    headers={
+                        "Content-Type": "application/json",
+                        "Accept-Encoding": "gzip, br",
+                        "Authorization": "Bearer abc$def`x`",
+                        "X-Dollar": "$(touch /tmp/pwn) ${HOME} `id`",
+                        "X-Quotes": "it's \"quoted\" \\ back\\",
+                        "X-Cmd": "100% %PATH% a&b|c<d>e^f!g (h)",
+                        "X-Empty": "",
+                        "X-Uni": b"caf\xc3\xa9 \xe2\x80\x99 \xf0\x9f\x98\x80",
+                        "X-Dup": "1, 2",
+                    },
+                    data="{\"q\":\"$(id) `x` 'y' %PATH% \\\"z\\\"\",\"u\":\"\u00e9\"}".encode("utf-8"),
+                )
+                """,
+        [CopyAsTarget.CSharpHttpClient] = """
+                // Headers with a name or value that cannot be written safely were left out.
+                using System.Net;
+                using System.Net.Http;
+                using System.Text;
+
+                using var client = new HttpClient(new SocketsHttpHandler
+                {
+                    AutomaticDecompression = DecompressionMethods.All,
+                    UseCookies = false,
+                    AllowAutoRedirect = false,
+                    RequestHeaderEncodingSelector = (_, _) => Encoding.Latin1,
+                });
+                using var request = new HttpRequestMessage(new HttpMethod("POST"), "https://api.example.test/v1/it's?q=$(id)&b=%60x%60&p=100%25");
+                request.Content = new ByteArrayContent(Encoding.UTF8.GetBytes("{\"q\":\"$(id) `x` 'y' %PATH% \\\"z\\\"\",\"u\":\"\u00e9\"}"));
+                request.Content.Headers.TryAddWithoutValidation("Content-Type", "application/json");
+                request.Headers.TryAddWithoutValidation("Authorization", "Bearer abc$def`x`");
+                request.Headers.TryAddWithoutValidation("X-Dollar", "$(touch /tmp/pwn) ${HOME} `id`");
+                request.Headers.TryAddWithoutValidation("X-Quotes", "it's \"quoted\" \\ back\\");
+                request.Headers.TryAddWithoutValidation("X-Cmd", "100% %PATH% a&b|c<d>e^f!g (h)");
+                request.Headers.TryAddWithoutValidation("X-Empty", "");
+                request.Headers.TryAddWithoutValidation("X-Uni", "caf\u00c3\u00a9 \u00e2\u0080\u0099 \u00f0\u009f\u0098\u0080");
+                request.Headers.TryAddWithoutValidation("X-Dup", "1");
+                request.Headers.TryAddWithoutValidation("X-Dup", "2");
+                using var response = await client.SendAsync(request);
+                """,
     };
 
     public static async Task RunAsync(TestRunner runner)
@@ -60,10 +135,37 @@ internal static class CopyAsTests
             });
         }
 
+        await runner.RunAsync("Copy as: bash keeps a text body that holds a slash off the command line", () =>
+        {
+            string Bash(string body)
+            {
+                var request = new HttpRequestData { Method = "POST", Url = new Uri("https://api.example.test/p"), Body = Encoding.ASCII.GetBytes(body) };
+                request.Headers.Add("Content-Type", "text/plain");
+                return CopyAs.Build(request, CopyAsTarget.CurlBash)!.Text;
+            }
+
+            runner.IsTrue(Bash("/x").StartsWith("printf %s '/x' | curl ", StringComparison.Ordinal) && Bash("/x").Contains("--data-binary @-", StringComparison.Ordinal), "a body that starts with a slash goes on standard input");
+            runner.IsTrue(!Bash("next=/home").Contains("--data-raw", StringComparison.Ordinal), "a body with =/ goes on standard input");
+            runner.IsTrue(Bash("plain text").Contains("--data-raw 'plain text'", StringComparison.Ordinal), "a body with no slash stays on the command line");
+            return Task.CompletedTask;
+        });
+
         await runner.RunAsync("Copy as: every escaper turns hostile text into one literal", () =>
         {
+            runner.AreEqual("''", CopyAs.BashQuote(""), "bash: empty is an empty word");
+            runner.AreEqual("'a'\\''b'", CopyAs.BashQuote("a'b"), "bash: a single quote closes, escapes and reopens");
+            runner.AreEqual("'$(x) `y` ${z} !h \\ \"'", CopyAs.BashQuote("$(x) `y` ${z} !h \\ \""), "bash: nothing inside single quotes is interpreted");
+            runner.AreEqual("'a'$'\\x0d''b'", CopyAs.BashQuote("a\rb"), "bash: a carriage return is an ANSI-C escape");
+            runner.AreEqual("'a\nb'", CopyAs.BashQuote("a\nb"), "bash: a line feed stays literal inside single quotes");
+            runner.AreEqual("$'\\xc3\\xa9'", CopyAs.BashQuote("\u00e9"), "bash: non-ASCII is its UTF-8 bytes, whatever the locale");
+            runner.AreEqual("$'\\x00'", CopyAs.BashQuote(new byte[] { 0 }), "bash: even a NUL is written as an escape, never raw");
+
+            runner.AreEqual("\"a\\\"b\\\\c\\r\\n\\t\"", CopyAs.CurlConfigString("a\"b\\c\r\n\t"), "curl config: quote, backslash and control escapes");
+
             runner.AreEqual("\"a\\\"b\\\\</script>\\u2028\\u0000\"", CopyAs.JsString("a\"b\\</script>\u2028\0"), "JavaScript: quotes, backslashes and invisible characters");
             runner.AreEqual("\"\\ud83d\\ude00\"", CopyAs.JsString("\ud83d\ude00"), "JavaScript: an astral character is a surrogate pair");
+            runner.AreEqual("\"\\U0001f600\\ufffd\"", CopyAs.PyString("\ud83d\ude00\ud800"), "Python: an astral character is one \\U escape, a lone surrogate is U+FFFD");
+            runner.AreEqual("\"a\\\"b\\\\\\n\\u0000\"", CopyAs.CSharpString("a\"b\\\n\0"), "C#: quotes, backslashes and NUL");
             return Task.CompletedTask;
         });
 
@@ -140,6 +242,33 @@ internal static class CopyAsTests
         ("every byte value", [.. Enumerable.Range(0, 256).Select(i => (byte)i)], "application/octet-stream"),
     ];
 
+    // Text that starts with a slash or holds "=/": Git for Windows bash turns such a word into a Windows
+    // path (/x into X:/, next=/home into next=C:/Program Files/Git/home) before it reaches a native
+    // curl.exe, unless the word is kept off the command line. Headers, cookies and the URL query hold the
+    // same shapes and must arrive as they are as well.
+    private static readonly (string Name, byte[] Bytes, string ContentType)[] PathLikeBodies =
+    [
+        ("slash text", Encoding.ASCII.GetBytes("/x"), "text/plain"),
+        ("path text", Encoding.ASCII.GetBytes("/v1/items"), "text/plain"),
+        ("assignment text", Encoding.ASCII.GetBytes("a=/b"), "application/x-www-form-urlencoded"),
+        ("form text", Encoding.ASCII.GetBytes("next=/home&from=/a/b"), "application/x-www-form-urlencoded"),
+        ("double slash text", Encoding.ASCII.GetBytes("//x"), "text/plain"),
+        ("path list text", Encoding.ASCII.GetBytes("/x:/y"), "text/plain"),
+        ("option text", Encoding.ASCII.GetBytes("--opt=/x"), "text/plain"),
+    ];
+
+    private static readonly (string Name, string Value)[] PathLikeHeaders =
+    [
+        ("Referer", "/home"),
+        ("X-Next", "a=/b"),
+        ("X-Path", "/v1/items"),
+        ("X-Double", "//x"),
+        ("X-List", "/a:/b;/c"),
+        ("Cookie", "next=/home; a=/b"),
+    ];
+
+    private const string PathLikeQuery = "&next=/home&a=/b&c=//d";
+
     private const string Secret = "s3cr3t-LEAK-7f3a";
 
     // Values that would run a second command if they broke out of their argument; each would create
@@ -167,7 +296,80 @@ internal static class CopyAsTests
 
     private static async Task RoundTripsAsync(TestRunner runner)
     {
+        var bash = new[]
+        {
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Git", "usr", "bin", "bash.exe"),
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", "Git", "usr", "bin", "bash.exe"),
+        }.FirstOrDefault(File.Exists);
         var node = FindOnPath("node.exe");
+        var python = FindOnPath("python.exe");
+
+        var bashMissing = bash is null ? "no bash (Git for Windows) is installed" : null;
+        await RoundTripAsync(runner, "bash", CopyAsTarget.CurlBash, bashMissing, (text, dir) => ExecuteAsync(bash!, "-l -s", text, dir));
+        await RoundTripAsync(runner, "bash", CopyAsTarget.CurlBash, bashMissing, (text, dir) => ExecuteAsync(bash!, "-l -s", text, dir, msysPathConversion: true), RoundTripSet.BestFit);
+
+        // With the default path conversion on, which an interactive Git for Windows bash has, a word such
+        // as /x or next=/home must still reach curl.exe as it is.
+        await RoundTripAsync(runner, "bash with path conversion", CopyAsTarget.CurlBash, bashMissing, (text, dir) => ExecuteAsync(bash!, "-l -s", text, dir, msysPathConversion: true), RoundTripSet.PathLike);
+
+        // Ctrl+C on a curl that never gets an answer ends curl with SIGINT, which makes bash abandon the
+        // command list it is running: a trailing cleanup would never run and the temporary config, which
+        // holds the request's credentials, would stay on disk. A curl function stands in for the one that
+        // is interrupted: it checks that the config exists, then dies of SIGINT as curl does.
+        await runner.RunAsync("Copy as: CurlBash removes its temporary curl config when curl is interrupted", async () =>
+        {
+            if (bash is null)
+            {
+                runner.ToolMissing("bash: no bash (Git for Windows) is installed");
+                return;
+            }
+
+            var dir = Path.Combine(Path.GetTempPath(), "copyas-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dir);
+            try
+            {
+                var request = new HttpRequestData
+                {
+                    Method = "POST",
+                    Url = new Uri("http://127.0.0.1:9/hang"),
+                    Body = [.. Enumerable.Range(0, 256).Select(i => (byte)i)],
+                };
+                request.Headers.Add("Authorization", "Bearer interrupt-secret");
+                request.Headers.Add("X-Uni", Latin1Unicode); // a byte above ASCII and a binary body: the config goes to a temporary file
+                var text = CopyAs.Build(request, CopyAsTarget.CurlBash)!.Text;
+                var script = "curl() { compgen -G \"${TMPDIR:-/tmp}/piper-*\" > /dev/null && echo CONFIG-PRESENT >&2; kill -INT 0; sleep 5; }\n" + text + "\n";
+
+                var output = await ExecuteAsync(bash, "-l -s", script, dir);
+                runner.IsTrue(output.Contains("CONFIG-PRESENT", StringComparison.Ordinal), "the config was on disk when curl was interrupted; output: " + output);
+                runner.AreEqual(0, Directory.GetFiles(dir, "piper-*").Length, "no temporary curl config is left behind");
+            }
+            finally { try { Directory.Delete(dir, recursive: true); } catch (IOException) { } }
+        });
+
+        await runner.RunAsync("Copy as: bash quoting reproduces every byte it is given", async () =>
+        {
+            if (bash is null)
+            {
+                runner.ToolMissing("bash: no bash (Git for Windows) is installed");
+                return;
+            }
+
+            // Every byte but NUL (which bash cannot hold), the same bytes the other way round, then text.
+            byte[][] samples =
+            [
+                [.. Enumerable.Range(1, 255).Select(i => (byte)i)],
+                [.. Enumerable.Range(1, 255).Reverse().Select(i => (byte)i)],
+                Encoding.UTF8.GetBytes("it's $(id) `x` \\ \"q\" caf\u00e9 \ud83d\ude00\n\r\t'"),
+                Encoding.UTF8.GetBytes("'''"),
+            ];
+            foreach (var sample in samples)
+            {
+                var script = "printf %s " + CopyAs.BashQuote(sample) + " | od -An -v -tx1";
+                var output = await ExecuteAsync(bash, "-l -s", script);
+                var hex = string.Concat(output[(output.IndexOf(':') + 1)..output.IndexOf("--- stderr ---", StringComparison.Ordinal)].Where(Uri.IsHexDigit));
+                runner.AreEqual(Convert.ToHexString(sample).ToLowerInvariant(), hex, $"bash prints back all {sample.Length} bytes");
+            }
+        });
 
         async Task<string> RunNodeAsync(string text, string dir)
         {
@@ -178,9 +380,20 @@ internal static class CopyAsTests
 
         await RoundTripAsync(runner, "Node.js fetch", CopyAsTarget.JavaScriptFetch, node is null ? "node.exe is not on PATH" : null, RunNodeAsync);
 
+        var requests = python is not null && (await ExecuteAsync(python, "-c \"import requests\"", null)).StartsWith("exit 0", StringComparison.Ordinal);
+        async Task<string> RunPythonAsync(string text, string dir)
+        {
+            var file = Path.Combine(dir, "snippet.py");
+            await File.WriteAllTextAsync(file, text, new UTF8Encoding(false));
+            return await ExecuteAsync(python!, "\"" + file + "\"", null);
+        }
+
+        await RoundTripAsync(runner, "Python requests", CopyAsTarget.PythonRequests, requests ? null : "python with the requests package is not installed", RunPythonAsync);
+
         // A server that answers with a redirect must not be able to move the copied Cookie and
         // Authorization on to another host: the second origin must never be contacted.
         await RedirectRoundTripAsync(runner, "Node.js fetch", CopyAsTarget.JavaScriptFetch, node is null ? "node.exe is not on PATH" : null, RunNodeAsync);
+        await RedirectRoundTripAsync(runner, "Python requests", CopyAsTarget.PythonRequests, requests ? null : "python with the requests package is not installed", RunPythonAsync);
     }
 
     private static async Task RedirectRoundTripAsync(TestRunner runner, string shell, CopyAsTarget target, string? unavailable, Func<string, string, Task<string>> run)
@@ -214,7 +427,7 @@ internal static class CopyAsTests
 
     // Both is Plain and Bang together, for the targets that need no separate treatment. Simple holds only
     // printable ASCII with no exclamation mark, which the cmd snippet writes on its command line.
-    private enum RoundTripSet { Both, Plain, Bang, Simple, BestFit }
+    private enum RoundTripSet { Both, Plain, Bang, Simple, BestFit, PathLike }
 
     private static async Task RoundTripAsync(TestRunner runner, string shell, CopyAsTarget target, string? unavailable, Func<string, string, Task<string>> run, RoundTripSet set = RoundTripSet.Both, bool verbatimNonAscii = true)
     {
@@ -223,6 +436,7 @@ internal static class CopyAsTests
             RoundTripSet.Bang => "values with an exclamation mark",
             RoundTripSet.Simple => "plain ASCII values",
             RoundTripSet.BestFit => "best-fit characters",
+            RoundTripSet.PathLike => "values that look like paths",
             _ => "every value",
         };
         await runner.RunAsync($"Copy as: {target} pasted into {shell} delivers {label} unchanged", async () =>
@@ -238,12 +452,15 @@ internal static class CopyAsTests
             var bang = set is RoundTripSet.Both or RoundTripSet.Bang;
             var simple = set == RoundTripSet.Simple;
             var bestFit = set == RoundTripSet.BestFit;
+            var pathLike = set == RoundTripSet.PathLike;
             IEnumerable<(string Name, byte[] Bytes, string ContentType)> bodies =
                 (plain ? RoundTripBodies : []).Concat(bang ? BangBodies : []).Concat(bestFit ? BestFitBodies : [])
-                    .Concat(simple ? RoundTripBodies.Where(b => b.Name is "single-line hostile text" or "every byte value") : []);
+                    .Concat(simple ? RoundTripBodies.Where(b => b.Name is "single-line hostile text" or "every byte value") : [])
+                    .Concat(pathLike ? PathLikeBodies : []);
             IEnumerable<(string Name, string Value)> headers =
-                (plain ? RoundTripHeaders : []).Concat(bang ? BangHeaders : []).Concat(simple ? RoundTripHeaders.Where(h => h.Name != "X-Tab") : []);
-            var query = bang ? BangQuery : string.Empty;
+                (plain ? RoundTripHeaders : []).Concat(bang ? BangHeaders : []).Concat(simple ? RoundTripHeaders.Where(h => h.Name != "X-Tab") : [])
+                    .Concat(pathLike ? PathLikeHeaders : []);
+            var query = bang ? BangQuery : pathLike ? PathLikeQuery : string.Empty;
             foreach (var body in bodies)
             {
                 using var origin = new CaptureOrigin();
@@ -270,7 +487,7 @@ internal static class CopyAsTests
                 expected.AddRange(bestFitExpected);
 
                 // The runtimes that can carry bytes above 127 in a header must deliver them exactly.
-                if (target is CopyAsTarget.JavaScriptFetch)
+                if (target is CopyAsTarget.PythonRequests or CopyAsTarget.JavaScriptFetch)
                     expected.Add(("X-Uni", Latin1Unicode));
                 foreach (var (name, value) in expected) request.Headers.Add(name, value);
 
