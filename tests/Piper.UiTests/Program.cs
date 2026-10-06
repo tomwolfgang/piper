@@ -65,6 +65,13 @@ internal static class Program
             ExpectRowsFromTop(list, 10);
         });
 
+        Run("Ctrl+A selects every visible session", (store, grid, list) =>
+        {
+            PressKey(list, Keys.A, controlPressed: true, shift: false);
+            Check(list.SelectedIndices.Count == list.VirtualListSize,
+                $"Ctrl+A selects all {list.VirtualListSize} visible rows (got {list.SelectedIndices.Count})");
+        });
+
         Run("an imported session stays in the grid under a capture scope and a filterset", (store, grid, list) =>
         {
             // Live traffic is hidden by both; a file the user opened is not live traffic.
@@ -92,6 +99,7 @@ internal static class Program
 
         RunPanel("an AutoResponder rule whose pattern timed out is marked broken in the panel");
         RunWindowActivation("a second launch restores the existing Piper window");
+        RunAboutDialog("the About dialog identifies the running Piper version");
 
         Console.WriteLine(_failures == 0 ? "UI tests passed." : $"{_failures} UI check(s) failed.");
         return _failures == 0 ? 0 : 1;
@@ -295,6 +303,25 @@ internal static class Program
         }
     }
 
+    private static void PressKey(Control control, Keys key, bool controlPressed, bool shift)
+    {
+        control.Focus();
+        var original = new byte[256];
+        if (!GetKeyboardState(original)) throw new InvalidOperationException("Cannot read keyboard state.");
+        var pressed = (byte[])original.Clone();
+        if (controlPressed) pressed[(int)Keys.ControlKey] |= 0x80;
+        if (shift) pressed[(int)Keys.ShiftKey] |= 0x80;
+        try
+        {
+            if (!SetKeyboardState(pressed)) throw new InvalidOperationException("Cannot set keyboard state.");
+            SendMessage(control.Handle, WmKeyDown, (nint)key, 0);
+        }
+        finally
+        {
+            SetKeyboardState(original);
+        }
+    }
+
     private static void DoubleClick(Control control, Point location)
     {
         var position = (nint)(location.X | location.Y << 16);
@@ -326,6 +353,21 @@ internal static class Program
         Check(form.WindowState != FormWindowState.Minimized, "a minimized existing window is restored");
         Check(form.ContainsFocus, "the restored window is activated");
         form.Close();
+    }
+
+    private static void RunAboutDialog(string name)
+    {
+        Console.WriteLine($"== {name}");
+        using var dialog = new AboutDialog();
+        var version = typeof(AboutDialog).Assembly.GetName().Version?.ToString(3) ?? "0.0.0";
+        var labels = Descendants(dialog).OfType<Label>().ToList();
+
+        Check(dialog.FormBorderStyle == FormBorderStyle.FixedDialog && !dialog.MinimizeBox && !dialog.MaximizeBox,
+            "the About window is a compact dialog, not a resizable message box");
+        Check(labels.Any(label => label.Text.Contains(version, StringComparison.Ordinal)),
+            "the running application version is visible");
+        Check(Descendants(dialog).OfType<Button>().Any(button => button.DialogResult == DialogResult.OK),
+            "the dialog has a close action");
     }
 
     /// <summary>A rule that was skipped for timing out says so in its Last match cell, until it is edited.</summary>
@@ -447,6 +489,15 @@ internal static class Program
         foreach (Control child in root.Controls)
             if ((child as ListView ?? Find(child)) is { } list) return list;
         return null;
+    }
+
+    private static IEnumerable<Control> Descendants(Control root)
+    {
+        foreach (Control child in root.Controls)
+        {
+            yield return child;
+            foreach (var descendant in Descendants(child)) yield return descendant;
+        }
     }
 
     private static void Check(bool condition, string message)

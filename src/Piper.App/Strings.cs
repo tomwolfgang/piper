@@ -39,7 +39,9 @@ internal static class Strings
         public static string UnexpectedErrorCaption => I18n.T("app.unexpectedErrorCaption");
 
         public static string AboutCaption => I18n.T("app.aboutCaption");
-        public static string AboutBody => I18n.T("app.aboutBody");
+        public static string AboutVersion(string version) => I18n.T("app.aboutVersion", ("version", version));
+        public static string AboutDescription => I18n.T("app.aboutDescription");
+        public static string AboutClose => I18n.T("app.aboutClose");
 
         public static string CrashReport(string type, string message, string? stackTrace) =>
             I18n.T("app.crashReport", ("type", type), ("message", message), ("stackTrace", stackTrace));

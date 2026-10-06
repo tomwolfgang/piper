@@ -3,22 +3,28 @@ using System.Text.Json;
 namespace Piper.Core.Sessions;
 
 /// <summary>
-/// The TextWizard choice worth remembering between runs.
+/// The TextWizard choices worth remembering between runs.
 /// </summary>
 /// <remarks>
-/// Only the name of the transform is kept. The text being converted is never written anywhere: it comes
-/// from captured traffic and routinely holds credentials, cookies and tokens, so it stays in memory for as
-/// long as the window is open and no longer.
+/// Only the name of the transform and the window dimensions are kept. The text being converted is never
+/// written anywhere: it comes from captured traffic and routinely holds credentials, cookies and tokens,
+/// so it stays in memory for as long as the window is open and no longer.
 /// </remarks>
 public sealed class TextWizardSettings
 {
     /// <summary>Name of the last <c>TextTransform</c> the user picked, or null before they have picked one.</summary>
     public string? LastTransform { get; set; }
+
+    /// <summary>Outer window width when the TextWizard was last closed, or null before its first close.</summary>
+    public int? LastWindowWidth { get; set; }
+
+    /// <summary>Outer window height when the TextWizard was last closed, or null before its first close.</summary>
+    public int? LastWindowHeight { get; set; }
 }
 
 /// <summary>
-/// Persists the TextWizard's last transform under the user's local app-data directory, beside the other
-/// convenience state. Missing, inaccessible or malformed data simply falls back to the default.
+/// Persists the TextWizard's choices under the user's local app-data directory, beside the other convenience
+/// state. Missing, inaccessible or malformed data simply falls back to the default.
 /// </summary>
 public static class TextWizardSettingsStore
 {

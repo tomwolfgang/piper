@@ -4,7 +4,9 @@
     "closingTitle": "Piper - Closing...",
     "unexpectedErrorCaption": "Piper - unexpected error",
     "aboutCaption": "About Piper",
-    "aboutBody": "Piper\n\nAn HTTP(S) debugging proxy written from scratch on .NET 10.",
+    "aboutVersion": "Version {{version}}",
+    "aboutDescription": "An HTTP(S) debugging proxy written from scratch on .NET 10.",
+    "aboutClose": "Close",
     "crashReport": "{{type}}: {{message}}\n\n{{stackTrace}}"
   },
 

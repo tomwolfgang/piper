@@ -60,20 +60,34 @@ internal static class TextTransformDetectorTests
             return Task.CompletedTask;
         });
 
-        await runner.RunAsync("TextWizard remembers the transform but never the text", () =>
+        await runner.RunAsync("TextWizard remembers its transform and size but never the text", () =>
         {
             var path = Path.Combine(Path.GetTempPath(), $"piper-textwizard-{Guid.NewGuid():N}.json");
             try
             {
                 runner.AreEqual(null, TextWizardSettingsStore.Load(path), "nothing is loaded before anything is saved");
 
-                TextWizardSettingsStore.Save(new TextWizardSettings { LastTransform = "FromBase64" }, path);
-                runner.AreEqual("FromBase64", TextWizardSettingsStore.Load(path)?.LastTransform, "the choice survives a round trip");
+                TextWizardSettingsStore.Save(new TextWizardSettings
+                {
+                    LastTransform = "FromBase64",
+                    LastWindowWidth = 1234,
+                    LastWindowHeight = 876,
+                }, path);
+                var settings = TextWizardSettingsStore.Load(path);
+                runner.AreEqual("FromBase64", settings?.LastTransform, "the choice survives a round trip");
+                runner.AreEqual(1234, settings?.LastWindowWidth, "the window width survives a round trip");
+                runner.AreEqual(876, settings?.LastWindowHeight, "the window height survives a round trip");
 
                 // The stored file is the whole record; if a body could leak, it would leak here.
                 var stored = File.ReadAllText(path);
                 runner.IsTrue(!stored.Contains("hunter2", StringComparison.Ordinal), "no transformed text is stored");
                 runner.AreEqual(true, stored.Length < 200, "the record holds a transform name and nothing more");
+
+                File.WriteAllText(path, "{\"LastTransform\":\"FromBase64\"}");
+                settings = TextWizardSettingsStore.Load(path);
+                runner.AreEqual("FromBase64", settings?.LastTransform, "older transform-only settings still load");
+                runner.AreEqual(null, settings?.LastWindowWidth, "older settings have no saved width");
+                runner.AreEqual(null, settings?.LastWindowHeight, "older settings have no saved height");
 
                 File.WriteAllText(path, "{ this is not json");
                 runner.AreEqual(null, TextWizardSettingsStore.Load(path), "malformed settings fall back to the default");

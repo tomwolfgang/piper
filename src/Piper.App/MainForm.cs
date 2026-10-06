@@ -746,9 +746,11 @@ public sealed class MainForm : Form, IMessageFilter
         help.DropDownItems.Add(new ToolStripSeparator());
         help.DropDownItems.Add(Strings.Menu.SaveDiagnostics, null, (_, _) => SaveDiagnostics());
         help.DropDownItems.Add(new ToolStripSeparator());
-        help.DropDownItems.Add(Strings.Menu.About, null, (_, _) => MessageBox.Show(this,
-            Strings.App.AboutBody,
-            Strings.App.AboutCaption, MessageBoxButtons.OK, MessageBoxIcon.Information));
+        help.DropDownItems.Add(Strings.Menu.About, null, (_, _) =>
+        {
+            using var dialog = new AboutDialog();
+            dialog.ShowDialog(this);
+        });
 
         menu.Items.AddRange([file, BuildRulesMenu(), BuildViewMenu(), tools, help]);
         return menu;
