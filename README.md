@@ -218,7 +218,7 @@ To compare two builds in one session pass `--host before=<its piper-bench.dll> -
 (runs alternate A,B,B,A) and read them back with `--compare results.jsonl#before results.jsonl#after`.
 `OVERLAP` means the min..max ranges share a point, so the difference is within the run-to-run noise.
 Close other programs first, use `--wait-quiet 10`, and report the median and range of at least 8 runs
-(15 for large transfers). ESET buffers loopback HTTP: the tool records whether it ran, never changes it.
+(15 for large transfers). The tool records whether ESET ran (it buffers loopback HTTP), never changes it.
 
 ## What works
 
