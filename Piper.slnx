@@ -8,6 +8,7 @@
     <Project Path="tests/Piper.UiTests/Piper.UiTests.csproj" />
   </Folder>
   <Folder Name="/tools/">
+    <Project Path="tools/Piper.Bench/Piper.Bench.csproj" />
     <Project Path="tools/Piper.TrafficGen/Piper.TrafficGen.csproj" />
   </Folder>
   <Folder Name="/installer/">
