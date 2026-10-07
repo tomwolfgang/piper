@@ -279,7 +279,9 @@ targets, so `Invoke-WebRequest -Proxy` would never reach Piper.
   with Git's curl.exe, which then cannot read the config and sends nothing. The bash variant does the
   same for bytes above ASCII: it pipes a config to `curl --config -` (with a binary body, through a
   `mktemp` file that is removed afterwards) so that Git for Windows' bash never hands them to an
-  ANSI curl.exe on its command line
+  ANSI curl.exe on its command line. The PowerShell curl.exe variant writes a binary body to
+  `%TEMP%\piper-body-<random>` and removes it in a `finally` block, so Ctrl+C or a failing curl
+  still deletes it; closing the window mid-request does not, so delete `%TEMP%\piper-*` then
 - Importing and exporting Fiddler SAZ session archives, by drag-and-drop or **File > Open SAZ
   capture...**; a request-only `.raz` capture is appended to the Composer's history (no responses
   to inspect, but readily reloaded and resent) rather than the main request list. That history
