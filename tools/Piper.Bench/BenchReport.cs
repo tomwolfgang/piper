@@ -35,14 +35,19 @@ internal static class BenchReport
     /// <summary>Reads a results file; <c>path#label</c> keeps only the records of that build.</summary>
     public static List<BenchRecord> Load(string spec, out int skipped)
     {
-        var hash = spec.LastIndexOf('#');
+        // A file whose own name contains '#' is a file, not "path#label".
+        var hash = File.Exists(spec) ? -1 : spec.LastIndexOf('#');
         var path = hash > 0 ? spec[..hash] : spec;
         var label = hash > 0 ? spec[(hash + 1)..] : null;
         var info = new FileInfo(path);
         if (!info.Exists) throw new FileNotFoundException($"No such results file: {path}");
         if (info.Length > MaxFileBytes) throw new InvalidDataException($"{path} is larger than {MaxFileBytes >> 20} MB.");
         var records = Parse(File.ReadLines(path), out skipped);
-        return label is null ? records : records.Where(r => r.Label == label).ToList();
+        if (label is null) return records;
+        var chosen = records.Where(r => r.Label == label).ToList();
+        if (chosen.Count == 0)
+            throw new InvalidDataException($"{path} has no run labelled '{label}' (it has: {string.Join(", ", records.Select(r => r.Label).Distinct().Take(10))}).");
+        return chosen;
     }
 
     private static Dictionary<(string Scenario, string Metric), List<double>> Collect(IEnumerable<BenchRecord> records)

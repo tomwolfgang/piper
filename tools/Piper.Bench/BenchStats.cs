@@ -30,11 +30,29 @@ internal static class BenchStats
     public static double ProbabilityGreater(IReadOnlyList<double> b, IReadOnlyList<double> a)
     {
         if (a.Count == 0 || b.Count == 0) return double.NaN;
+        // For each B run, the A runs below it count 1 and the equal ones 1/2: two binary searches over
+        // the sorted A, so a results file full of one key costs n log n, not n x m.
+        var sorted = a.OrderBy(v => v).ToArray();
         double wins = 0;
         foreach (var x in b)
-            foreach (var y in a)
-                wins += x > y ? 1 : x == y ? 0.5 : 0;
+        {
+            var below = LowerBound(sorted, x);
+            wins += below + 0.5 * (LowerBound(sorted, x, upper: true) - below);
+        }
         return wins / ((double)a.Count * b.Count);
+    }
+
+    // The first index whose value is >= x (or > x when upper), in a sorted array.
+    private static int LowerBound(double[] sorted, double x, bool upper = false)
+    {
+        int lo = 0, hi = sorted.Length;
+        while (lo < hi)
+        {
+            var mid = lo + (hi - lo) / 2;
+            if (upper ? sorted[mid] <= x : sorted[mid] < x) lo = mid + 1;
+            else hi = mid;
+        }
+        return lo;
     }
 
     /// <summary>+1 when a larger value is better (throughput), -1 when a smaller one is (latency,

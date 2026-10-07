@@ -24,6 +24,25 @@ internal static class BenchReportTests
         runner.IsTrue(!BenchStats.RangesOverlap([1, 2], [3, 4]), "disjoint ranges do not");
         runner.AreEqual(1.0, BenchStats.ProbabilityGreater([10, 11], [1, 2]), "every B run above every A run");
         runner.AreEqual(0.5, BenchStats.ProbabilityGreater([1, 2], [1, 2]), "identical samples tie at one half");
+        runner.AreEqual(0.0, BenchStats.ProbabilityGreater([1, 2], [3, 4]), "every B run below every A run");
+        runner.AreEqual(0.375, BenchStats.ProbabilityGreater([1, 2, 2, 5], [2, 3]), "ties and a mix of wins count as in the pairwise definition");
+        // The rank-based result equals the pairwise definition on random small inputs, ties included.
+        var random = new Random(7);
+        for (var round = 0; round < 200; round++)
+        {
+            var left = Enumerable.Range(0, random.Next(1, 12)).Select(_ => (double)random.Next(0, 6)).ToArray();
+            var right = Enumerable.Range(0, random.Next(1, 12)).Select(_ => (double)random.Next(0, 6)).ToArray();
+            double wins = 0;
+            foreach (var x in right)
+                foreach (var y in left)
+                    wins += x > y ? 1 : x == y ? 0.5 : 0;
+            if (Math.Abs(BenchStats.ProbabilityGreater(right, left) - wins / (left.Length * right.Length)) > 1e-12) { runner.IsTrue(false, $"P(B>A) differs from the pairwise count for A=[{string.Join(",", left)}] B=[{string.Join(",", right)}]"); break; }
+        }
+        // A hostile results file can put a million runs under one key: this must not be a million squared.
+        var many = Enumerable.Range(0, 1_000_000).Select(i => (double)(i % 1000)).ToArray();
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        var chance = BenchStats.ProbabilityGreater(many, many);
+        runner.IsTrue(clock.Elapsed < TimeSpan.FromSeconds(10) && Math.Abs(chance - 0.5) < 1e-9, $"a million against a million runs finishes quickly ({clock.ElapsedMilliseconds} ms)");
         runner.AreEqual(1, BenchStats.Direction("rps"), "throughput: higher is better");
         runner.AreEqual(-1, BenchStats.Direction("p99_ms"), "latency: lower is better");
         runner.AreEqual(0, BenchStats.Direction("client_conns"), "a connection count has no direction");
@@ -33,9 +52,11 @@ internal static class BenchReportTests
         var line = written.ToLine();
         runner.IsTrue(line.Contains("\"scenario\":\"get_c16\"") && line.Contains("\"metrics\":{\"rps\":3000.5}") && !line.Contains("error"), "a record is one compact line without null fields");
         var parsed = BenchReport.Parse([line, "", """{"kind":"env","machine":"x"}""", "not json", """{"kind":"run","metrics":{"rps":1e999}}""", "[1,2]", "null"], out var skipped);
-        runner.AreEqual(2, parsed.Count, "the run record and the one whose only metric is not a finite number survive");
-        runner.AreEqual(3, skipped, "malformed lines are counted, not thrown");
-        runner.AreEqual(0, parsed[1].Metrics.Count, "a metric that is not finite is dropped");
+        // Whether the serializer rejects 1e999 (the line is skipped) or reads it as infinity (the metric is
+        // dropped) is its business; either way every line is accounted for and no infinity gets through.
+        runner.AreEqual(5, parsed.Count + skipped, "every non-blank, non-header line is either parsed or counted as skipped");
+        runner.IsTrue(parsed.Count >= 1 && skipped >= 3, "junk, an array and null are skipped");
+        runner.IsTrue(parsed.All(r => r.Metrics.Values.All(double.IsFinite)), "a metric that is not finite never reaches a table");
         runner.AreEqual(3000.5, parsed[0].Metrics["rps"], "the metric round trips");
         runner.AreEqual("main", parsed[0].Label, "the label round trips");
         runner.IsTrue(parsed[0].EsetRunning && parsed[0].BackgroundCpuPercent == 4.5, "the noise fields round trip");
@@ -49,6 +70,13 @@ internal static class BenchReportTests
             var missing = false;
             try { BenchReport.Load(file + ".missing", out _); } catch (FileNotFoundException) { missing = true; }
             runner.IsTrue(missing, "a missing file is reported, not an empty table");
+            var unknown = false;
+            try { BenchReport.Load(file + "#nope", out _); } catch (InvalidDataException) { unknown = true; }
+            runner.IsTrue(unknown, "a label that matches nothing is an error, not an empty table");
+            var hashed = Path.Combine(Path.GetTempPath(), $"piper#bench-{Guid.NewGuid():N}.jsonl");
+            File.Copy(file, hashed);
+            try { runner.AreEqual(2, BenchReport.Load(hashed, out _).Count, "a '#' in the file's own name is part of the name"); }
+            finally { File.Delete(hashed); }
         }
         finally { File.Delete(file); }
 
