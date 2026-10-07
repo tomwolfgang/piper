@@ -10,11 +10,11 @@ internal static class LoadGenerator
     private const int MaxSamplesPerWorker = 250_000;
 
     public static async Task<Dictionary<string, double>> RunAsync(ScenarioContext context, int concurrency, TimeSpan ramp, TimeSpan duration,
-        Func<HttpClient, CancellationToken, Task<HttpResponseMessage>> send)
+        Func<HttpClient, CancellationToken, Task<HttpResponseMessage>> send, Func<HttpClient>? newClient = null)
     {
         var ct = context.Token;
         var host = context.Host;
-        using var client = context.NewClient(concurrency);
+        using var client = newClient?.Invoke() ?? context.NewClient(concurrency);
         context.ResetConnectionCounts();
 
         long errors = 0, timeouts = 0;
