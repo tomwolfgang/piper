@@ -1,7 +1,9 @@
 # Test-only: the Python 'requests' package the Copy as smoke tests run the generated snippet against.
 # Pinned with hashes (Windows x64 wheels, pure-Python wheels and the sdist); installed only by
 # .github/workflows/ci.yml and release.yml (the same command in both, so the smoke tests can run in
-# either), never shipped. Regenerate the hashes from the
+# either), never shipped. Both pass --only-binary=:all: so an sdist is never built, which would run its
+# build backend with build dependencies that no hash here covers; the sdist hashes are kept only to
+# match what PyPI lists. Every version needs a wheel for the runner's Python. Regenerate the hashes from the
 # PyPI JSON API (https://pypi.org/pypi/<name>/<version>/json) when bumping a version.
 certifi==2026.7.22 \
     --hash=sha256:62f22742b58a1a33014a2b6b706588a8d7e2a88ae7bd1a6ebe8c992928483775 \
