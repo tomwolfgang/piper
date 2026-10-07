@@ -7,17 +7,19 @@ namespace Piper.Bench;
 internal static class LoadGenerator
 {
     // Bounds the memory a long --duration can use; the count of completed requests is not capped.
+    // maxRequests bounds a call by the number of requests it sends instead: a proxy that opens an upstream
+    // connection per request (h2_c100) would otherwise use up the machine's ephemeral ports for minutes.
     private const int MaxSamplesPerWorker = 250_000;
 
     public static async Task<Dictionary<string, double>> RunAsync(ScenarioContext context, int concurrency, TimeSpan ramp, TimeSpan duration,
-        Func<HttpClient, CancellationToken, Task<HttpResponseMessage>> send, Func<HttpClient>? newClient = null)
+        Func<HttpClient, CancellationToken, Task<HttpResponseMessage>> send, Func<HttpClient>? newClient = null, long maxRequests = long.MaxValue)
     {
         var ct = context.Token;
         var host = context.Host;
         using var client = newClient?.Invoke() ?? context.NewClient(concurrency);
         context.ResetConnectionCounts();
 
-        long errors = 0, timeouts = 0;
+        long errors = 0, timeouts = 0, issued = 0;
         var measuring = false;
         var stop = false;
         var latencies = new List<long>[concurrency];
@@ -25,7 +27,7 @@ internal static class LoadGenerator
         var workers = Enumerable.Range(0, concurrency).Select(w => Task.Run(async () =>
         {
             var samples = latencies[w] = new List<long>(8192);
-            while (!Volatile.Read(ref stop))
+            while (!Volatile.Read(ref stop) && Interlocked.Increment(ref issued) <= maxRequests)
             {
                 var began = Stopwatch.GetTimestamp();
                 try
@@ -52,7 +54,9 @@ internal static class LoadGenerator
             var before = await host.StatsAsync(ct).ConfigureAwait(false);
             var began = Stopwatch.GetTimestamp();
             Volatile.Write(ref measuring, true);
-            await Task.Delay(duration, ct).ConfigureAwait(false);
+            // Ends at the duration, or earlier when every worker has used up maxRequests.
+            await Task.WhenAny(Task.WhenAll(workers), Task.Delay(duration, ct)).ConfigureAwait(false);
+            ct.ThrowIfCancellationRequested();
             Volatile.Write(ref measuring, false);
             var seconds = Stopwatch.GetElapsedTime(began).TotalSeconds;
             var after = await host.StatsAsync(ct).ConfigureAwait(false);

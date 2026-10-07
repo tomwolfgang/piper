@@ -76,8 +76,11 @@ internal static class TlsScenarios
             throw new HttpRequestException("The response was not HTTP/2."); // counted as an error, not hidden
         }
 
-        await LoadGenerator.RunAsync(c, 100, TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(3), SendAsync, NewClient).ConfigureAwait(false);
-        return await LoadGenerator.RunAsync(c, 100, TimeSpan.FromSeconds(2), c.Options.Duration, SendAsync, NewClient).ConfigureAwait(false);
+        // Bounded by request count as well as time: if upstream connections are not reused, every request
+        // takes a loopback port that stays in TIME_WAIT for minutes, and the whole machine (not just this
+        // tool) would run out of them. 3,000 requests keep that to a fraction of the range.
+        await LoadGenerator.RunAsync(c, 100, TimeSpan.Zero, TimeSpan.FromSeconds(3), SendAsync, NewClient, maxRequests: 300).ConfigureAwait(false);
+        return await LoadGenerator.RunAsync(c, 100, TimeSpan.Zero, c.Options.Duration, SendAsync, NewClient, maxRequests: 3000).ConfigureAwait(false);
     }
 
     /// <summary>Reads <c>/big?mb=1024</c> through the proxy for at most max(--duration, 10 s) and reports the
