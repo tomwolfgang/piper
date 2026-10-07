@@ -108,8 +108,9 @@ internal sealed class Origin : IAsyncDisposable
                 int read;
                 while ((read = await context.Request.Body.ReadAsync(buffer, context.RequestAborted).ConfigureAwait(false)) > 0) count += read;
                 response.ContentType = "text/plain";
-                response.ContentLength = 8;
-                await response.Body.WriteAsync(Encoding.ASCII.GetBytes(count.ToString("D8", System.Globalization.CultureInfo.InvariantCulture)), context.RequestAborted).ConfigureAwait(false);
+                var counted = Encoding.ASCII.GetBytes(count.ToString("D12", System.Globalization.CultureInfo.InvariantCulture)); // wide enough for any body Kestrel accepts here
+                response.ContentLength = counted.Length;
+                await response.Body.WriteAsync(counted, context.RequestAborted).ConfigureAwait(false);
                 break;
             }
             default:
@@ -156,8 +157,11 @@ internal sealed class Origin : IAsyncDisposable
                     break;
                 case 'U':
                     var buffer = new byte[64 * 1024];
-                    while (await stream.ReadAsync(buffer, ct).ConfigureAwait(false) > 0) { }
-                    await stream.WriteAsync(new byte[PayloadBytes], ct).ConfigureAwait(false);
+                    long received = 0;
+                    int read;
+                    while ((read = await stream.ReadAsync(buffer, ct).ConfigureAwait(false)) > 0) received += read;
+                    // Acknowledge only a complete upload: a tunnel that loses or truncates data then fails the scenario.
+                    if (received == (long)TunnelMegabytes * 1024 * 1024) await stream.WriteAsync(new byte[PayloadBytes], ct).ConfigureAwait(false);
                     break;
             }
         }

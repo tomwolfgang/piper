@@ -115,7 +115,7 @@ internal static class Scenarios
             body.Headers.ContentLength = length;
             using var response = await client.PostAsync(c.OriginUrl + "/up", body, c.Token).ConfigureAwait(false);
             var counted = await response.Content.ReadAsStringAsync(c.Token).ConfigureAwait(false);
-            if (counted != length.ToString("D8", System.Globalization.CultureInfo.InvariantCulture)) throw new InvalidDataException($"The origin counted {counted} bytes, not {length}.");
+            if (counted != length.ToString("D12", System.Globalization.CultureInfo.InvariantCulture)) throw new InvalidDataException($"The origin counted {counted} bytes, not {length}.");
         }
         await PostAsync(16).ConfigureAwait(false);
         return await MeasureTransferAsync(c, 64, () => PostAsync(64)).ConfigureAwait(false);
