@@ -7,3 +7,6 @@
 /.release-verify/
 /publish/
 /artifacts/
+
+# BenchmarkDotNet output (tests/Piper.Benchmarks, run on demand)
+**/BenchmarkDotNet.Artifacts/
