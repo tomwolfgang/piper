@@ -895,6 +895,8 @@ internal static class CopyAsTests
 
         await RoundTripAsync(runner, "Python requests", CopyAsTarget.PythonRequests, requests ? null : "python with the requests package is not installed", RunPythonAsync);
 
+        await CSharpCompilesAsync(runner);
+
         // A server that answers with a redirect must not be able to move the copied Cookie and
         // Authorization on to another host: the second origin must never be contacted.
         await RedirectRoundTripAsync(runner, "Node.js fetch", CopyAsTarget.JavaScriptFetch, node is null ? "node.exe is not on PATH" : null, RunNodeAsync);
@@ -1348,6 +1350,56 @@ internal static class CopyAsTests
     private static Task<string> RunPowerShellAsync(string powershell, string script, string? temp = null) =>
         ExecuteAsync(powershell, "-NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand "
             + Convert.ToBase64String(Encoding.Unicode.GetBytes("$ErrorActionPreference = 'Stop'\n" + script)), null, temp);
+
+    /// <summary>
+    /// The generated C# is pasted into a project that may have implicit usings off, where Convert is not
+    /// in scope without a using System. It is built here as a top-level program of exactly that kind.
+    /// </summary>
+    private static async Task CSharpCompilesAsync(TestRunner runner)
+    {
+        var dotnet = new[]
+        {
+            Environment.GetEnvironmentVariable("DOTNET_HOST_PATH"),
+            FindOnPath("dotnet.exe"),
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "dotnet", "dotnet.exe"),
+        }.FirstOrDefault(path => !string.IsNullOrEmpty(path) && File.Exists(path));
+
+        var cases = new (string Name, byte[] Body)[]
+        {
+            ("a binary body", [.. Enumerable.Range(0, 256).Select(i => (byte)i)]),
+            ("a text body", Encoding.UTF8.GetBytes("{\"q\":\"hé\"}")),
+            ("no body", []),
+        };
+        foreach (var (name, body) in cases)
+        {
+            await runner.RunAsync($"Copy as: the C# snippet for {name} compiles without implicit usings", async () =>
+            {
+                if (dotnet is null)
+                {
+                    runner.ToolMissing("C# compile: dotnet.exe was not found");
+                    return;
+                }
+
+                var request = new HttpRequestData { Method = "POST", Url = new Uri("https://api.example.test/x"), Body = body };
+                request.Headers.Add("Content-Type", "application/octet-stream");
+                request.Headers.Add("X-Uni", Latin1Unicode); // makes the snippet use Encoding.Latin1
+                var dir = Path.Combine(Path.GetTempPath(), "copyas-" + Guid.NewGuid().ToString("N"));
+                Directory.CreateDirectory(dir);
+                try
+                {
+                    await File.WriteAllTextAsync(Path.Combine(dir, "Snippet.csproj"),
+                        "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0</TargetFramework>"
+                        + "<ImplicitUsings>disable</ImplicitUsings><Nullable>disable</Nullable><UseAppHost>false</UseAppHost></PropertyGroup></Project>");
+                    await File.WriteAllTextAsync(Path.Combine(dir, "Program.cs"), CopyAs.Build(request, CopyAsTarget.CSharpHttpClient)!.Text, new UTF8Encoding(false));
+
+                    var output = await ExecuteAsync(dotnet, "build \"" + Path.Combine(dir, "Snippet.csproj") + "\" -nologo -v:minimal -nodeReuse:false -p:UseSharedCompilation=false", null);
+                    runner.IsTrue(output.StartsWith("exit 0", StringComparison.Ordinal) && !output.Contains("error CS", StringComparison.Ordinal),
+                        $"the snippet for {name} compiles; output: " + (output.Length <= 800 ? output : output[..800]));
+                }
+                finally { try { Directory.Delete(dir, recursive: true); } catch (IOException) { } }
+            });
+        }
+    }
 
     private static string? FindOnPath(string file) =>
         (Environment.GetEnvironmentVariable("PATH") ?? string.Empty).Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries)

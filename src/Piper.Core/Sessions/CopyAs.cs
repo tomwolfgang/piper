@@ -1065,6 +1065,8 @@ public static class CopyAs
     private static string RenderCSharp(Model m)
     {
         var sb = new StringBuilder(CommentBlock(m, "// ", "\n"));
+        // Convert is in System, which only a project with implicit usings imports on its own.
+        if (m.Kind == BodyKind.Binary) sb.Append("using System;\n");
         sb.Append("using System.Net;\nusing System.Net.Http;\nusing System.Text;\n\n");
         sb.Append("using var client = new HttpClient(new SocketsHttpHandler\n{\n");
         sb.Append("    AutomaticDecompression = DecompressionMethods.All,\n    UseCookies = false,\n");
