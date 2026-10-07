@@ -17,6 +17,9 @@ internal sealed class BenchRecord
     [JsonPropertyName("run")] public int Run { get; set; }
     [JsonPropertyName("label")] public string Label { get; set; } = "";
     [JsonPropertyName("utc")] public string Utc { get; set; } = "";
+    [JsonPropertyName("bg_cpu_pct")] public double? BackgroundCpuPercent { get; set; }
+    [JsonPropertyName("bg_top")] public string? BackgroundTop { get; set; }
+    [JsonPropertyName("eset")] public bool EsetRunning { get; set; }
     [JsonPropertyName("metrics")] public Dictionary<string, double> Metrics { get; set; } = [];
     [JsonPropertyName("error")] public string? Error { get; set; }
 

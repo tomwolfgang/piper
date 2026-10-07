@@ -59,6 +59,7 @@ src/Piper.App/           WinForms shell, targets net10.0-windows
 tests/Piper.SmokeTests/  end-to-end tests, no test framework needed
 tests/Piper.UiTests/     drives real WinForms controls; needs a desktop session
 tools/Piper.TrafficGen/  local origin + traffic generator for manual UI testing
+tools/Piper.Bench/       repeatable proxy benchmarks (not part of the test gate)
 ```
 
 ## Running it
@@ -200,6 +201,32 @@ That serves a spread of status codes, content types and body shapes on `127.0.0.
 and sends them through the proxy. It must be a .NET process rather than Windows
 PowerShell: .NET Framework's `WebProxy` unconditionally bypasses the proxy for loopback
 targets, so `Invoke-WebRequest -Proxy` would never reach Piper.
+
+## Running the benchmarks
+
+`tools/Piper.Bench` measures the proxy so a change can report a before and after. It runs a real
+`ProxyServer` in one process and a Kestrel origin plus load generator in another, on loopback, with a
+temporary certificate authority: it never touches the trust store or the system proxy. It is not part of
+`eng/verify.ps1` and CI does not run it.
+
+```powershell
+dotnet build tools/Piper.Bench/Piper.Bench.csproj -c Release
+dotnet tools/Piper.Bench/bin/Release/net10.0/piper-bench.dll --list              # the scenarios
+dotnet tools/Piper.Bench/bin/Release/net10.0/piper-bench.dll --runs 8 --out after.jsonl
+dotnet tools/Piper.Bench/bin/Release/net10.0/piper-bench.dll --compare before.jsonl after.jsonl
+```
+
+Each run of each scenario writes one JSON line: its metrics, the system CPU load just before it, the
+busiest other processes, and whether ESET's `ekrn` was running. To compare two builds in one session,
+build both and pass `--host before=<path to its piper-bench.dll> --host after=<...>`; the runs alternate
+A,B,B,A so drift does not favour one, and `--compare results.jsonl#before results.jsonl#after` reads
+them back. The table shows median [min..max] of each, the change in the medians, and `OVERLAP` when the
+ranges share a point: then the difference is within the run-to-run noise.
+
+Numbers from a busy machine move by 20% or more between runs of the same build. Close other programs
+first (browsers, VPN, chat, vendor utilities), pass `--wait-quiet 10`, and report the median and range
+of at least 8 runs (15 for large transfers). ESET buffers loopback HTTP, so a result is only comparable
+with one taken with the same antivirus state; the tool records it but never changes it.
 
 ## What works
 
