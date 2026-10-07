@@ -42,7 +42,13 @@ internal static class BenchRunner
             foreach (var build in options.Hosts)
             {
                 Console.WriteLine($"Priming {build.Label}...");
-                await using var primed = await HostClient.StartAsync(build.Path, caDirectory, ct).ConfigureAwait(false);
+                try { await using var primed = await HostClient.StartAsync(build.Path, caDirectory, ct).ConfigureAwait(false); }
+                catch (Exception ex) when (ex is TimeoutException or IOException or FormatException or IndexOutOfRangeException or InvalidOperationException or System.ComponentModel.Win32Exception)
+                {
+                    // A build that cannot start, or does not say READY, is a usage problem: say which one.
+                    Console.Error.WriteLine($"Could not start the proxy host of '{build.Label}' ({build.Path}): {ex.Message}");
+                    return 2;
+                }
             }
 
             for (var run = 1; run <= options.Runs; run++)
@@ -99,7 +105,14 @@ internal static class BenchRunner
             var metrics = await scenario.Run(context).ConfigureAwait(false);
             record.Metrics = metrics.Where(m => double.IsFinite(m.Value)).ToDictionary(m => m.Key, m => Math.Round(m.Value, 3));
         }
-        catch (Exception ex) when (!ct.IsCancellationRequested)
+        catch (Exception) when (ct.IsCancellationRequested)
+        {
+            // Ctrl+C ends the host, so the scenario may fail with something other than a cancellation:
+            // report it as the cancellation it is, not as a failed run or an unhandled exception.
+            ct.ThrowIfCancellationRequested();
+            throw;
+        }
+        catch (Exception ex)
         {
             // Recovery is to record the failure (a timeout is one) and carry on with the next run.
             record.Error = ex is OperationCanceledException ? $"timed out after {options.Timeout.TotalSeconds:F0} s" : $"{ex.GetType().Name}: {ex.Message}";
