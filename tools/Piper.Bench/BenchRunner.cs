@@ -1,5 +1,4 @@
 using System.Globalization;
-using System.Runtime.InteropServices;
 using System.Text.Json;
 
 namespace Piper.Bench;
@@ -9,6 +8,9 @@ namespace Piper.Bench;
 /// first stall hides how often it stalls.</summary>
 internal static class BenchRunner
 {
+    private static readonly TimeSpan QuietPoll = TimeSpan.FromSeconds(1);
+    private static readonly TimeSpan QuietGiveUp = TimeSpan.FromSeconds(60);
+
     public static async Task<int> RunAsync(BenchOptions options, CancellationToken ct)
     {
         var scenarios = options.Scenarios.Count == 0 || options.Scenarios.Contains("all")
@@ -19,13 +21,14 @@ internal static class BenchRunner
         // the end, never the user's real one, never added to any trust store.
         var caDirectory = Path.Combine(Path.GetTempPath(), "piper-bench-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(caDirectory);
+        var records = new List<BenchRecord>();
         var failures = 0;
 
         try
         {
             await using var origin = await Origin.StartAsync().ConfigureAwait(false);
             await using var file = new StreamWriter(new FileStream(outPath, FileMode.Create, FileAccess.Write, FileShare.Read)) { AutoFlush = true };
-            var machine = $"{Environment.ProcessorCount} logical cores, {RuntimeInformation.OSDescription}, {RuntimeInformation.FrameworkDescription}";
+            var machine = SystemInfo.Describe();
             Console.WriteLine($"Machine: {machine}");
             Console.WriteLine($"Results: {Path.GetFullPath(outPath)}");
             await file.WriteLineAsync(JsonSerializer.Serialize(new
@@ -57,10 +60,12 @@ internal static class BenchRunner
                     {
                         ct.ThrowIfCancellationRequested();
                         var record = await RunOnceAsync(options, origin, build, scenario, run, caDirectory, ct).ConfigureAwait(false);
+                        records.Add(record);
                         if (record.Error is not null) failures++;
                         await file.WriteLineAsync(record.ToLine()).ConfigureAwait(false);
                         Console.WriteLine($"[{run}/{options.Runs}] {scenario.Name,-17}{build.Label,-12}"
-                            + (record.Error is null ? string.Join(" ", record.Metrics.Select(m => FormattableString.Invariant($"{m.Key}={m.Value:G6}"))) : "FAILED: " + record.Error));
+                            + (record.Error is null ? string.Join(" ", record.Metrics.Select(m => FormattableString.Invariant($"{m.Key}={m.Value:G6}"))) : "FAILED: " + record.Error)
+                            + FormattableString.Invariant($"   (bg cpu {record.BackgroundCpuPercent:F1}%{(record.BackgroundTop?.Length > 0 ? " " + record.BackgroundTop : "")})"));
                     }
             }
         }
@@ -78,14 +83,18 @@ internal static class BenchRunner
             }
         }
 
+        Console.WriteLine();
+        Console.Write(BenchReport.Summary(records));
         return failures == 0 ? 0 : 1;
     }
 
     private static async Task<BenchRecord> RunOnceAsync(BenchOptions options, Origin origin, HostBuild build, Scenario scenario, int run, string caDirectory, CancellationToken ct)
     {
+        var (cpu, top) = await WaitForQuietAsync(options, ct).ConfigureAwait(false);
         var record = new BenchRecord
         {
             Scenario = scenario.Name, Run = run, Label = build.Label, Utc = DateTime.UtcNow.ToString("O", CultureInfo.InvariantCulture),
+            BackgroundCpuPercent = double.IsNaN(cpu) ? null : Math.Round(cpu, 1), BackgroundTop = top, EsetRunning = SystemInfo.IsEsetRunning(),
         };
 
         using var limit = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -109,5 +118,16 @@ internal static class BenchRunner
             record.Error = ex is OperationCanceledException ? $"timed out after {options.Timeout.TotalSeconds:F0} s" : $"{ex.GetType().Name}: {ex.Message}";
         }
         return record;
+    }
+
+    private static async Task<(double Cpu, string Top)> WaitForQuietAsync(BenchOptions options, CancellationToken ct)
+    {
+        var waited = TimeSpan.Zero;
+        while (true)
+        {
+            var sample = await SystemInfo.SampleBackgroundAsync(QuietPoll, ct).ConfigureAwait(false);
+            if (options.WaitQuietPercent is not { } limit || sample.CpuPercent < limit || waited >= QuietGiveUp) return sample;
+            waited += QuietPoll;
+        }
     }
 }

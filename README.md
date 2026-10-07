@@ -59,6 +59,7 @@ src/Piper.App/           WinForms shell, targets net10.0-windows
 tests/Piper.SmokeTests/  end-to-end tests, no test framework needed
 tests/Piper.UiTests/     drives real WinForms controls; needs a desktop session
 tools/Piper.TrafficGen/  local origin + traffic generator for manual UI testing
+tools/Piper.Bench/       repeatable proxy benchmarks (not part of the test gate)
 ```
 
 ## Running it
@@ -200,6 +201,24 @@ That serves a spread of status codes, content types and body shapes on `127.0.0.
 and sends them through the proxy. It must be a .NET process rather than Windows
 PowerShell: .NET Framework's `WebProxy` unconditionally bypasses the proxy for loopback
 targets, so `Invoke-WebRequest -Proxy` would never reach Piper.
+
+## Running the benchmarks
+
+`tools/Piper.Bench` measures the proxy so a change can report a before and after: a real `ProxyServer`
+in one process, a Kestrel origin and load generator in another, a temporary certificate authority
+(nothing is installed or trusted). It is not part of `eng/verify.ps1` or CI.
+
+```powershell
+dotnet build tools/Piper.Bench/Piper.Bench.csproj -c Release
+dotnet tools/Piper.Bench/bin/Release/net10.0/piper-bench.dll --runs 8 --out after.jsonl
+dotnet tools/Piper.Bench/bin/Release/net10.0/piper-bench.dll --compare before.jsonl after.jsonl
+```
+
+To compare two builds in one session pass `--host before=<its piper-bench.dll> --host after=<...>`
+(runs alternate A,B,B,A) and read them back with `--compare results.jsonl#before results.jsonl#after`.
+`OVERLAP` means the min..max ranges share a point, so the difference is within the run-to-run noise.
+Close other programs first, use `--wait-quiet 10`, and report the median and range of at least 8 runs
+(15 for large transfers). The tool records whether ESET ran (it buffers loopback HTTP), never changes it.
 
 ## What works
 

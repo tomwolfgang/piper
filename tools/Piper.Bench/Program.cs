@@ -23,6 +23,28 @@ if (options.List)
     return 0;
 }
 
+try
+{
+    if (options.Summary is { } file)
+    {
+        Console.Write(BenchReport.Summary(BenchReport.Load(file, out var skipped)));
+        if (skipped > 0) Console.Error.WriteLine($"{skipped} unreadable line(s) skipped.");
+        return 0;
+    }
+
+    if (options.Compare is { } pair)
+    {
+        Console.Write(BenchReport.Compare(BenchReport.Load(pair.A, out var skippedA), BenchReport.Load(pair.B, out var skippedB), pair.A, pair.B));
+        if (skippedA + skippedB > 0) Console.Error.WriteLine($"{skippedA + skippedB} unreadable line(s) skipped.");
+        return 0;
+    }
+}
+catch (Exception ex) when (ex is IOException or InvalidDataException or UnauthorizedAccessException)
+{
+    Console.Error.WriteLine(ex.Message);
+    return 2;
+}
+
 using var cancel = new CancellationTokenSource();
 Console.CancelKeyPress += (_, e) =>
 {
