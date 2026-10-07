@@ -1,8 +1,6 @@
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
-using System.Runtime.Versioning;
-using Microsoft.Win32;
 
 namespace Piper.Bench;
 
@@ -74,20 +72,7 @@ internal static class SystemInfo
     public static string Describe()
     {
         var memory = GC.GetGCMemoryInfo().TotalAvailableMemoryBytes / (1024.0 * 1024 * 1024);
-        return $"{CpuName()}, {Environment.ProcessorCount} logical cores, {memory:F1} GB RAM, {RuntimeInformation.OSDescription}, "
+        return $"{Environment.ProcessorCount} logical cores, {memory:F1} GB RAM, {RuntimeInformation.OSDescription}, "
             + $"{RuntimeInformation.FrameworkDescription}, ekrn {(IsEsetRunning() ? "running" : "not running")}";
-    }
-
-    private static string CpuName()
-    {
-        if (!OperatingSystem.IsWindows()) return "unknown CPU";
-        return ReadCpuName();
-    }
-
-    [SupportedOSPlatform("windows")]
-    private static string ReadCpuName()
-    {
-        using var key = Registry.LocalMachine.OpenSubKey(@"HARDWARE\DESCRIPTION\System\CentralProcessor\0");
-        return (key?.GetValue("ProcessorNameString") as string)?.Trim() ?? "unknown CPU";
     }
 }
