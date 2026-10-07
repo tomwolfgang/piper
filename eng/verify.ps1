@@ -45,7 +45,8 @@ try {
         'src/Piper.App/Piper.App.csproj',
         'tests/Piper.SmokeTests/Piper.SmokeTests.csproj',
         'tests/Piper.UiTests/Piper.UiTests.csproj',
-        'tools/Piper.TrafficGen/Piper.TrafficGen.csproj'
+        'tools/Piper.TrafficGen/Piper.TrafficGen.csproj',
+        'tools/Piper.Bench/Piper.Bench.csproj'
     )
 
     foreach ($project in $projects) {
