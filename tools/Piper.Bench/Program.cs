@@ -1,6 +1,6 @@
 using Piper.Bench;
 
-// A benchmark, not a test: it is not part of eng/verify.ps1. See tools/Piper.Bench/README.md.
+// A benchmark, not a test: eng/verify.ps1 builds it (so it stays warning-free) but never runs it, and neither does CI.
 
 if (args.Length > 0 && args[0] == "host") return await HostMode.RunAsync(args[1..]);
 
