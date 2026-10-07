@@ -793,18 +793,21 @@ public static class CopyAs
         if (m.Kind == BodyKind.Text) config.Append("data-raw = ").Append(CurlConfigString(m.BodyText)).Append('\n');
 
         var sb = new StringBuilder(CommentBlock(m, "# ", "\n"));
-        var tail = " | curl.exe --config -";
-        var cleanup = string.Empty;
-        if (m.Kind == BodyKind.Binary)
+        var binary = m.Kind == BodyKind.Binary;
+        var tail = binary ? " | curl.exe --config - --data-binary \"@$piperBody\"" : " | curl.exe --config -";
+        if (binary)
         {
-            sb.Append("$piperBody = [IO.Path]::GetTempFileName()\n");
-            sb.Append("[IO.File]::WriteAllBytes($piperBody, [Convert]::FromBase64String('").Append(Base64(m.Body)).Append("'))\n");
-            tail = " | curl.exe --config - --data-binary \"@$piperBody\"";
-            cleanup = "\nRemove-Item -LiteralPath $piperBody";
+            // The file holds the request body, so it goes in a piper- name that the README's cleanup advice
+            // covers, and the Remove-Item is a finally: Ctrl+C during curl stops the pipeline, and a
+            // statement after it would never run.
+            sb.Append("$piperBody = Join-Path ([IO.Path]::GetTempPath()) ('piper-body-' + [IO.Path]::GetRandomFileName())\n");
+            sb.Append("try {\n");
+            sb.Append("    [IO.File]::WriteAllBytes($piperBody, [Convert]::FromBase64String('").Append(Base64(m.Body)).Append("'))\n");
         }
 
         // Every config line starts with a keyword, so none can be the "'@" that ends a here-string.
-        sb.Append("@'\n").Append(config).Append("'@").Append(tail).Append(cleanup);
+        sb.Append("@'\n").Append(config).Append("'@").Append(tail);
+        if (binary) sb.Append("\n} finally {\n    Remove-Item -LiteralPath $piperBody -ErrorAction SilentlyContinue\n}");
         return sb.ToString();
     }
 
@@ -874,11 +877,17 @@ public static class CopyAs
         return sb.ToString();
     }
 
+    // The most operands of one + chain PsString writes; the stack of Windows PowerShell 5.1 gave out
+    // between 3000 and 4000, and the chain is a part of an expression that may sit deeper still.
+    private const int MaxPsOperands = 100;
+
     /// <summary>
     /// A PowerShell expression that is exactly <paramref name="text"/>. Printable characters sit in a
     /// single-quoted literal with <c>'</c> doubled; everything else, line breaks, control and format
     /// characters, and the typographic quotes PowerShell reads as single quotes, is a <c>[char]</c>
-    /// joined on, so no character can end the literal or be reinterpreted.
+    /// joined on, so no character can end the literal or be reinterpreted. Past
+    /// <see cref="MaxPsOperands"/> operands the whole value is base64 of its UTF-16 text instead (no
+    /// caller passes an unpaired surrogate: header values and bodies are checked for one first).
     /// </summary>
     internal static string PsString(string text)
     {
@@ -905,6 +914,12 @@ public static class CopyAs
         Flush();
 
         if (parts.Count == 0) return "''";
+
+        // Windows PowerShell 5.1 parses a chain of + operands recursively on a fixed stack: a few
+        // thousand of them (a pasted multi-line body) end the process with a stack overflow. A value
+        // that is mostly characters to escape is therefore carried flat, as one base64 literal.
+        if (parts.Count > MaxPsOperands)
+            return "[Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('" + Convert.ToBase64String(Encoding.Unicode.GetBytes(text)) + "'))";
 
         // The left operand decides the type of a +, so an expression that starts with a character must
         // be turned into a string first.

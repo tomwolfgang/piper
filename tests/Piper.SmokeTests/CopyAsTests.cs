@@ -84,8 +84,9 @@ internal static class CopyAsTests
                 # The request body is binary or not safe to paste as text, so it is written as base64 and decoded here.
                 # Non-ASCII header text may be re-encoded by the shell it is pasted into, or by the runtime that sends it.
                 # Headers with a name or value that cannot be written safely were left out.
-                $piperBody = [IO.Path]::GetTempFileName()
-                [IO.File]::WriteAllBytes($piperBody, [Convert]::FromBase64String('eyJxIjoiJChpZCkgYHhgICd5JyAlUEFUSCUgXCJ6XCIiLCJ1Ijoiw6kifQ=='))
+                $piperBody = Join-Path ([IO.Path]::GetTempPath()) ('piper-body-' + [IO.Path]::GetRandomFileName())
+                try {
+                    [IO.File]::WriteAllBytes($piperBody, [Convert]::FromBase64String('eyJxIjoiJChpZCkgYHhgICd5JyAlUEFUSCUgXCJ6XCIiLCJ1Ijoiw6kifQ=='))
                 @'
                 url = "https://api.example.test/v1/it's?q=$(id)&b=%60x%60&p=100%25"
                 globoff
@@ -102,7 +103,9 @@ internal static class CopyAsTests
                 header = "X-Dup: 1"
                 header = "X-Dup: 2"
                 '@ | curl.exe --config - --data-binary "@$piperBody"
-                Remove-Item -LiteralPath $piperBody
+                } finally {
+                    Remove-Item -LiteralPath $piperBody -ErrorAction SilentlyContinue
+                }
                 """,
         [CopyAsTarget.PowerShellWebRequest] = """
                 # Non-ASCII header text may be re-encoded by the shell it is pasted into, or by the runtime that sends it.
@@ -288,6 +291,17 @@ internal static class CopyAsTests
             runner.AreEqual("('a' + [char]0x2018 + 'b')", CopyAs.PsString("a\u2018b"), "PowerShell: ... in the middle of text too");
             runner.AreEqual("('a' + [char]0x000a + 'b')", CopyAs.PsString("a\nb"), "PowerShell: a line break is a [char]");
             runner.AreEqual("([string][char]0xd83d + [char]0xde00)", CopyAs.PsString("\ud83d\ude00"), "PowerShell: an astral character is its two UTF-16 units");
+
+            // Past a hundred operands the value is one flat base64 literal, never a long + chain, and it
+            // decodes to the exact text.
+            var manyLines = string.Concat(Enumerable.Repeat("a\n", 4000)) + "😀";
+            var flat = CopyAs.PsString(manyLines);
+            const string FlatPrefix = "[Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('";
+            runner.IsTrue(flat.StartsWith(FlatPrefix, StringComparison.Ordinal) && flat.EndsWith("'))", StringComparison.Ordinal), "PowerShell: a value with thousands of line breaks is one base64 expression");
+            runner.IsTrue(!flat.Contains('+') && !flat.Contains("[char]", StringComparison.Ordinal), "PowerShell: ... with no operand chain in it");
+            runner.AreEqual(manyLines, Encoding.Unicode.GetString(Convert.FromBase64String(flat[FlatPrefix.Length..^3])), "PowerShell: ... that decodes to the same text");
+            runner.AreEqual(100, CopyAs.PsString(string.Concat(Enumerable.Repeat("\n", 100))).Count(c => c == '+') + 1, "PowerShell: a hundred operands is still a chain");
+            runner.IsTrue(CopyAs.PsString(string.Concat(Enumerable.Repeat("\n", 101))).StartsWith(FlatPrefix, StringComparison.Ordinal), "PowerShell: and a hundred and one is flat");
 
             runner.AreEqual("\"a\\\"b\\\\</script>\\u2028\\u0000\"", CopyAs.JsString("a\"b\\</script>\u2028\0"), "JavaScript: quotes, backslashes and invisible characters");
             runner.AreEqual("\"\\ud83d\\ude00\"", CopyAs.JsString("\ud83d\ude00"), "JavaScript: an astral character is a surrogate pair");
@@ -782,16 +796,18 @@ internal static class CopyAsTests
         await CmdMissingFileAsync(runner, Path.Combine(system, "cmd.exe"), File.Exists(curl) ? null : "curl.exe is not installed");
 
         var curlPowerShell = File.Exists(curl) && File.Exists(powershell) ? null : "curl.exe or powershell.exe is not installed";
-        await RoundTripAsync(runner, "PowerShell, curl.exe", CopyAsTarget.CurlPowerShell, curlPowerShell, (text, _) => RunPowerShellAsync(powershell, text));
+        await RoundTripAsync(runner, "PowerShell, curl.exe", CopyAsTarget.CurlPowerShell, curlPowerShell, (text, dir) => RunPowerShellAsync(powershell, text, dir));
 
         // The console re-encodes what PowerShell pipes to curl, so non-ASCII text is not asserted to arrive
         // verbatim here; that it cannot reach curl's argv (no option is added, nothing leaks) still is.
         await RoundTripAsync(runner, "PowerShell, curl.exe", CopyAsTarget.CurlPowerShell, curlPowerShell,
-            (text, _) => RunPowerShellAsync(powershell, text), RoundTripSet.BestFit, verbatimNonAscii: false);
+            (text, dir) => RunPowerShellAsync(powershell, text, dir), RoundTripSet.BestFit, verbatimNonAscii: false);
 
         await RoundTripAsync(runner, "PowerShell, Invoke-WebRequest", CopyAsTarget.PowerShellWebRequest,
             File.Exists(powershell) ? null : "powershell.exe is not installed",
             (text, _) => RunPowerShellAsync(powershell, text));
+        await LargeValuesAsync(runner, powershell);
+        await PowerShellCurlCleanupAsync(runner, powershell);
 
         var bashMissing = bash is null ? "no bash (Git for Windows) is installed" : null;
         await RoundTripAsync(runner, "bash", CopyAsTarget.CurlBash, bashMissing, (text, dir) => ExecuteAsync(bash!, "-l -s", text, dir));
@@ -1170,7 +1186,7 @@ internal static class CopyAsTests
                 finally { try { Directory.Delete(dir, recursive: true); } catch (IOException) { } }
                 runner.IsTrue(!ran, $"{shell}, {body.Name}: no second command ran");
                 runner.IsTrue(!injected, $"{shell}, {body.Name}: no extra curl option wrote a file");
-                if (target == CopyAsTarget.CurlCmd) runner.IsTrue(!left, $"{shell}, {body.Name}: no temporary file is left behind");
+                if (target is CopyAsTarget.CurlCmd or CopyAsTarget.CurlPowerShell) runner.IsTrue(!left, $"{shell}, {body.Name}: no temporary file is left behind");
 
                 var seen = await origin.WaitAsync(TimeSpan.FromSeconds(20));
                 runner.IsTrue(seen is not null, $"{shell}, {body.Name}: the origin received a request" + (seen is null ? "; output: " + diagnostics : string.Empty));
@@ -1193,9 +1209,145 @@ internal static class CopyAsTests
         });
     }
 
-    private static Task<string> RunPowerShellAsync(string powershell, string script) =>
+    /// <summary>
+    /// Windows PowerShell 5.1 has a fixed parser stack: a value written as one long chain of operands
+    /// ("a" + [char]10 + "b" + ...) overflows it and kills the whole process, which is what a pasted
+    /// multi-line body of a few thousand lines did. The script goes through a file because the
+    /// command line cannot hold a body of the size cap.
+    /// </summary>
+    private static async Task LargeValuesAsync(TestRunner runner, string powershell)
+    {
+        var emoji = Encoding.Latin1.GetString(Encoding.UTF8.GetBytes(string.Concat(Enumerable.Repeat("😀", 1500))));
+        var cases = new (string Name, byte[] Body, string ContentType)[]
+        {
+            ("8,000 bytes of short lines", Encoding.ASCII.GetBytes(string.Concat(Enumerable.Repeat("a\n", 4000))), "text/plain"),
+            ("a body of the size cap, all line breaks", Encoding.ASCII.GetBytes(string.Concat(Enumerable.Repeat("a\r\n", CopyAs.MaxInlineBodyBytes / 3)).PadRight(CopyAs.MaxInlineBodyBytes, '\n')), "text/plain"),
+            ("non-ASCII lines", Encoding.UTF8.GetBytes(string.Concat(Enumerable.Repeat("hé😀\t\r\n", 3000))), "text/plain; charset=utf-8"),
+            ("no body", [], "text/plain"),
+        };
+
+        foreach (var (name, body, contentType) in cases)
+        {
+            await runner.RunAsync($"Copy as: PowerShell, Invoke-WebRequest delivers {name} and long header values unchanged", async () =>
+            {
+                if (!File.Exists(powershell))
+                {
+                    runner.ToolMissing("PowerShell, Invoke-WebRequest: powershell.exe is not installed");
+                    return;
+                }
+
+                using var origin = new CaptureOrigin();
+                var request = new HttpRequestData { Method = "POST", Url = new Uri(origin.Url + "large"), Body = body };
+                request.Headers.Add("Content-Type", contentType);
+
+                // A header value has no line break (such a value is left out), but it can hold thousands of
+                // characters that are not printable: tabs, and the C1 bytes inside a UTF-8 emoji.
+                var tabs = string.Concat(Enumerable.Repeat("a\t", 4000)) + "z";
+                request.Headers.Add("X-Tabs", tabs);
+                request.Headers.Add("X-Emoji", emoji);
+                request.Headers.Add("User-Agent", emoji);
+
+                var dir = Path.Combine(Path.GetTempPath(), "copyas-" + Guid.NewGuid().ToString("N"));
+                Directory.CreateDirectory(dir);
+                try
+                {
+                    var file = Path.Combine(dir, "snippet.ps1");
+                    await File.WriteAllTextAsync(file, "$ErrorActionPreference = 'Stop'\n" + CopyAs.Build(request, CopyAsTarget.PowerShellWebRequest)!.Text, new UTF8Encoding(true));
+                    var output = await ExecuteAsync(powershell, "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"" + file + "\"", null);
+
+                    var seen = await origin.WaitAsync(TimeSpan.FromSeconds(20));
+                    runner.IsTrue(seen is not null, $"{name}: the origin received a request" + (seen is null ? "; output: " + Truncate(output) : string.Empty));
+                    if (seen is null) return;
+
+                    runner.IsTrue(body.SequenceEqual(seen.Body), $"{name}: the body arrives byte for byte ({seen.Body.Length} of {body.Length} bytes)");
+                    string Header(string header) => seen.Headers.FirstOrDefault(h => h.Name.Equals(header, StringComparison.OrdinalIgnoreCase)).Value ?? "(missing)";
+                    runner.IsTrue(Header("X-Tabs") == tabs, $"{name}: the tab-filled header arrives");
+                    runner.IsTrue(Header("X-Emoji") == emoji, $"{name}: the emoji header arrives byte for byte");
+                    runner.IsTrue(Header("User-Agent") == emoji, $"{name}: the emoji User-Agent arrives byte for byte");
+                }
+                finally { try { Directory.Delete(dir, recursive: true); } catch (IOException) { } }
+            });
+        }
+    }
+
+    /// <summary>
+    /// A binary body goes through a temporary file that holds the request's credentials. Ctrl+C on a curl
+    /// that never gets an answer stops the pipeline, so a Remove-Item written after it would never run.
+    /// A real console Ctrl+C cannot be sent from a test without a console of its own; what Ctrl+C does
+    /// to a running pipeline is PowerShell.Stop(), which this uses, with a curl.exe function that finds
+    /// the file on disk and then hangs (or fails) in place of the real one.
+    /// </summary>
+    private static async Task PowerShellCurlCleanupAsync(TestRunner runner, string powershell)
+    {
+        foreach (var mode in new[] { "interrupted", "failing" })
+        {
+            await runner.RunAsync($"Copy as: PowerShell, curl.exe removes its temporary body file when curl is {mode}", async () =>
+            {
+                if (!File.Exists(powershell))
+                {
+                    runner.ToolMissing("PowerShell, curl.exe: powershell.exe is not installed");
+                    return;
+                }
+
+                var dir = Path.Combine(Path.GetTempPath(), "copyas-" + Guid.NewGuid().ToString("N"));
+                var temp = Path.Combine(dir, "temp");
+                Directory.CreateDirectory(temp);
+                try
+                {
+                    var request = new HttpRequestData
+                    {
+                        Method = "POST",
+                        Url = new Uri("http://127.0.0.1:9/hang"),
+                        Body = [.. Enumerable.Range(0, 256).Select(i => (byte)i)],
+                    };
+                    request.Headers.Add("Authorization", "Bearer interrupt-secret");
+                    var snippet = Path.Combine(dir, "snippet.ps1");
+                    var marker = Path.Combine(dir, "present.txt");
+                    await File.WriteAllTextAsync(snippet, CopyAs.Build(request, CopyAsTarget.CurlPowerShell)!.Text, new UTF8Encoding(true));
+
+                    // Stands in for curl.exe: records that the body file was on disk, then hangs or fails.
+                    var standIn = Path.Combine(dir, "standin.ps1");
+                    await File.WriteAllTextAsync(standIn, $$"""
+                        function curl.exe {
+                            $null = $input
+                            if (@(Get-ChildItem -LiteralPath ([IO.Path]::GetTempPath()) -File | Where-Object Length -gt 0).Count -gt 0) { Set-Content -LiteralPath '{{marker}}' -Value present }
+                            {{(mode == "interrupted" ? "Start-Sleep -Seconds 60" : "throw 'curl failed'")}}
+                        }
+                        """, new UTF8Encoding(true));
+                    var script = mode == "interrupted"
+                        ? $$"""
+                            $ErrorActionPreference = 'Stop'
+                            $ps = [powershell]::Create()
+                            $null = $ps.AddScript(". '{{standIn}}'").AddStatement().AddScript("& '{{snippet}}'")
+                            $handle = $ps.BeginInvoke()
+                            $deadline = (Get-Date).AddSeconds(30)
+                            while (-not (Test-Path -LiteralPath '{{marker}}') -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 100 }
+                            $ps.Stop()
+                            try { $null = $ps.EndInvoke($handle) } catch { }
+                            'stopped'
+                            """
+                        : $$"""
+                            $ErrorActionPreference = 'Stop'
+                            . '{{standIn}}'
+                            try { & '{{snippet}}' } catch { 'caught' }
+                            """;
+                    var driver = Path.Combine(dir, "driver.ps1");
+                    await File.WriteAllTextAsync(driver, script, new UTF8Encoding(true));
+
+                    var output = await ExecuteAsync(powershell, "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"" + driver + "\"", null, temp);
+                    runner.IsTrue(File.Exists(marker), "the body file was on disk when curl ran; output: " + Truncate(output));
+                    runner.AreEqual(0, Directory.GetFileSystemEntries(temp).Length, $"no temporary file is left behind when curl is {mode}; output: " + Truncate(output));
+                }
+                finally { try { Directory.Delete(dir, recursive: true); } catch (IOException) { } }
+            });
+        }
+    }
+
+    private static string Truncate(string text) => text.Length <= 600 ? text : text[..600] + "...";
+
+    private static Task<string> RunPowerShellAsync(string powershell, string script, string? temp = null) =>
         ExecuteAsync(powershell, "-NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand "
-            + Convert.ToBase64String(Encoding.Unicode.GetBytes("$ErrorActionPreference = 'Stop'\n" + script)), null);
+            + Convert.ToBase64String(Encoding.Unicode.GetBytes("$ErrorActionPreference = 'Stop'\n" + script)), null, temp);
 
     private static string? FindOnPath(string file) =>
         (Environment.GetEnvironmentVariable("PATH") ?? string.Empty).Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries)
