@@ -12,8 +12,9 @@ namespace Piper.Bench;
 /// compete with the proxy for CPU. Only public Piper.Core API is used, so the same source builds
 /// against an older checkout.
 ///
-/// stdout: <c>READY port startup_ms</c>, then one reply per command. stdin: <c>stats</c> | <c>quit</c>;
-/// when stdin closes the host stops.
+/// stdout: <c>READY port startup_ms</c>, then one reply per command. stdin: <c>stats</c> | <c>gc</c> (the
+/// same counters after a forced, compacting collection) | <c>capacity N</c> | <c>quit</c>; when stdin
+/// closes the host stops.
 /// </summary>
 internal static class HostMode
 {
@@ -43,16 +44,32 @@ internal static class HostMode
                 return 0;
             }
 
-            using var self = Process.GetCurrentProcess();
-            Console.WriteLine(line == "stats"
-                ? $"STATS ws={self.WorkingSet64} peakws={self.PeakWorkingSet64} heap={GC.GetTotalMemory(false)} " +
-                  $"alloc={GC.GetTotalAllocatedBytes()} cpums={self.TotalProcessorTime.TotalMilliseconds:F0} " +
-                  $"threads={self.Threads.Count} sessions={store.Count} gcpausems={GC.GetTotalPauseDuration().TotalMilliseconds:F0}"
-                : "ERR unknown command");
+            if (line.StartsWith("capacity ", StringComparison.Ordinal) && int.TryParse(line.AsSpan(9), out var capacity) && capacity > 0)
+            {
+                store.Capacity = capacity;
+                Console.WriteLine("OK");
+            }
+            else if (line is "stats" or "gc") Console.WriteLine(Stats(line, store));
+            else Console.WriteLine("ERR unknown command");
             Console.Out.Flush();
         }
 
         await proxy.StopAsync();
         return 0;
+    }
+
+    private static string Stats(string command, SessionStore store)
+    {
+        if (command == "gc")
+        {
+            GC.Collect(2, GCCollectionMode.Forced, blocking: true, compacting: true);
+            GC.WaitForPendingFinalizers();
+            GC.Collect(2, GCCollectionMode.Forced, blocking: true, compacting: true);
+        }
+
+        using var self = Process.GetCurrentProcess();
+        return $"{(command == "gc" ? "GC" : "STATS")} ws={self.WorkingSet64} peakws={self.PeakWorkingSet64} heap={GC.GetTotalMemory(false)} " +
+            $"alloc={GC.GetTotalAllocatedBytes()} cpums={self.TotalProcessorTime.TotalMilliseconds:F0} " +
+            $"threads={self.Threads.Count} sessions={store.Count} gcpausems={GC.GetTotalPauseDuration().TotalMilliseconds:F0}";
     }
 }
