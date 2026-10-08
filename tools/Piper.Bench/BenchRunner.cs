@@ -56,11 +56,10 @@ internal static class BenchRunner
                 }
             }
 
-            // What built and ran the driver (commit, configuration, runtime, GC, CPU, power plan), one line.
-            await file.WriteLineAsync(JsonSerializer.Serialize(SystemInfo.Provenance())).ConfigureAwait(false);
-
             for (var run = 1; run <= options.Runs; run++)
             {
+                // Once, before the first result: what built and ran the driver (commit, configuration, runtime, GC, CPU, power plan).
+                if (run == 1) await file.WriteLineAsync(JsonSerializer.Serialize(SystemInfo.Provenance())).ConfigureAwait(false);
                 // A,B then B,A: a drift over the session (thermal, background tasks) does not favour one build.
                 var order = run % 2 == 1 ? options.Hosts : Enumerable.Reverse(options.Hosts).ToList();
                 foreach (var scenario in scenarios)
