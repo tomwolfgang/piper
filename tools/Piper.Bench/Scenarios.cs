@@ -231,6 +231,7 @@ internal static class Scenarios
         return new()
         {
             ["rps"] = SessionTarget / seconds,
+            ["requests"] = SessionTarget - errors,
             ["errors"] = errors,
             ["sessions_captured"] = captured,
             ["session_bytes"] = captured == 0 ? 0 : Math.Max(0, settled["heap"] - baseline["heap"]) / (double)captured,

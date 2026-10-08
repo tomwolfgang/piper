@@ -26,11 +26,19 @@ internal static class BenchReport
             catch (JsonException) { skipped++; continue; }
             if (record is null) { skipped++; continue; }
             if (record.Kind != "run") continue;
-            record.Metrics = record.Metrics?.Where(kv => double.IsFinite(kv.Value)).ToDictionary(kv => kv.Key, kv => kv.Value) ?? [];
+            (record.Scenario, record.Label) = (Clean(record.Scenario), Clean(record.Label));
+            if (record.Error is not null) record.Error = Clean(record.Error);
+            var metrics = new Dictionary<string, double>();
+            foreach (var (name, value) in record.Metrics ?? [])
+                if (double.IsFinite(value)) metrics[Clean(name)] = value;
+            record.Metrics = metrics;
             records.Add(record);
         }
         return records;
     }
+
+    // Text from a shared file as it may be printed: control (ESC, C1) and format (bidi) characters become '?'; cut at 200.
+    public static string Clean(string? text) => new((text ?? "").Take(200).Select(c => char.IsControl(c) || char.GetUnicodeCategory(c) == UnicodeCategory.Format ? '?' : c).ToArray());
 
     // A file whose own name contains '#' is a file, not "path#label".
     private static (string Path, string? Label) SplitSpec(string spec)
@@ -69,7 +77,7 @@ internal static class BenchReport
                 {
                     env = new BenchEnv(Text(root, "machine"),
                         root.TryGetProperty("scenarios", out var names) && names.ValueKind == JsonValueKind.Array
-                            ? names.EnumerateArray().Where(n => n.ValueKind == JsonValueKind.String).Select(n => n.GetString()!).Take(200).ToArray() : [],
+                            ? names.EnumerateArray().Where(n => n.ValueKind == JsonValueKind.String).Select(n => Clean(n.GetString())).Take(200).ToArray() : [],
                         root.TryGetProperty("runs", out var runs) && runs.ValueKind == JsonValueKind.Number && runs.TryGetInt32(out var count) ? count : 0,
                         root.TryGetProperty("duration_s", out var seconds) && seconds.ValueKind == JsonValueKind.Number && seconds.TryGetDouble(out var duration) ? duration : 0, "", "", "");
                 }
@@ -83,7 +91,7 @@ internal static class BenchReport
         }
         return env;
 
-        static string Text(JsonElement root, string name) => root.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() ?? "" : "";
+        static string Text(JsonElement root, string name) => root.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String ? Clean(value.GetString()) : "";
     }
 
     /// <summary>Why a comparison of two files may mislead: they differ in machine, CPU, scenarios,
@@ -160,7 +168,7 @@ internal static class BenchReport
     {
         var failed = records.Where(r => r.Error is not null).GroupBy(r => r.Scenario).ToList();
         return failed.Count == 0 ? "" : "Failed runs (left out of the numbers): "
-            + string.Join(", ", failed.Select(g => $"{g.Key} x{g.Count()}")) + Environment.NewLine;
+            + string.Join(", ", failed.Select(g => $"{g.Key} x{g.Count()} ({g.Sum(r => r.Metrics.GetValueOrDefault("errors") + r.Metrics.GetValueOrDefault("timeouts")):F0} errors)")) + Environment.NewLine;
     }
 
     /// <summary>Median [min..max] of every metric, one table per build label.</summary>
@@ -192,7 +200,7 @@ internal static class BenchReport
         // Callers that pass no header (the tests of the table itself) get no environment check.
         if (envA is not null || envB is not null)
             foreach (var warning in EnvWarnings(envA, envB)) text.AppendLine("WARNING: " + warning);
-        text.AppendLine($"A = {nameA}   B = {nameB}   delta = (B - A) / A on the medians; P(B>A) = chance a B run beats an A run");
+        text.AppendLine($"A = {Clean(nameA)}   B = {Clean(nameB)}   delta = (B - A) / A on the medians; P(B>A) = chance a B run beats an A run");
         text.AppendLine($"{"scenario",-20}{"metric",-20}{"A median [min..max]",-28}{"B median [min..max]",-28}{"delta",9}{"P(B>A)",8}  verdict");
         foreach (var key in left.Keys.Intersect(right.Keys).OrderBy(k => k.Scenario, StringComparer.Ordinal).ThenBy(k => k.Metric, StringComparer.Ordinal))
         {

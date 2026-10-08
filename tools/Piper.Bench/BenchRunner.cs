@@ -111,9 +111,9 @@ internal static class BenchRunner
         {
             var metrics = await scenario.Run(context).ConfigureAwait(false);
             record.Metrics = metrics.Where(m => double.IsFinite(m.Value)).ToDictionary(m => m.Key, m => Math.Round(m.Value, 3));
-            // A load run in which nothing succeeded is a failure, not a row of zeros and an exit code of 0.
-            if (BenchStats.NoSuccess(record.Metrics))
-                record.Error = FormattableString.Invariant($"no request succeeded (errors {record.Metrics.GetValueOrDefault("errors")}, timeouts {record.Metrics.GetValueOrDefault("timeouts")})");
+            // A load run in which nothing succeeded, or too many requests failed (BenchStats.FailureReason), is
+            // a failure, not a row of numbers that pollutes the medians, and not an exit code of 0.
+            record.Error = BenchStats.FailureReason(record.Metrics);
         }
         catch (Exception) when (ct.IsCancellationRequested)
         {

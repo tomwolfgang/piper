@@ -4,7 +4,17 @@ using Piper.Bench;
 
 if (args.Length > 0 && args[0] == "host") return await HostMode.RunAsync(args[1..]);
 
-Console.OutputEncoding = System.Text.Encoding.UTF8; // a label or path with non-ASCII characters prints as written
+// Non-ASCII labels print as written. The code page outlives this process: set it only on a console, put it back at exit.
+try
+{
+    if (!Console.IsOutputRedirected)
+    {
+        var shell = Console.OutputEncoding;
+        Console.OutputEncoding = System.Text.Encoding.UTF8;
+        AppDomain.CurrentDomain.ProcessExit += (_, _) => { try { Console.OutputEncoding = shell; } catch (IOException) { /* console closed */ } };
+    }
+}
+catch (IOException) { /* no console: output stays as it is */ }
 
 if (args.Contains("--help") || args.Contains("-h"))
 {

@@ -14,8 +14,16 @@ internal static class BenchComparisonTests
         runner.IsTrue(double.IsFinite(BenchStats.Median([double.MaxValue, double.MaxValue])), "two huge runs do not overflow");
         runner.AreEqual(2.0, BenchStats.Percentile([1, 2, 3, 4], 0.5), "a latency percentile stays nearest-rank");
 
-        runner.IsTrue(BenchStats.NoSuccess(new Dictionary<string, double> { ["rps"] = 0, ["errors"] = 200 }), "a load run with a request rate of zero succeeded at nothing");
-        runner.IsTrue(!BenchStats.NoSuccess(new Dictionary<string, double> { ["rps"] = 0.5 }) && !BenchStats.NoSuccess(new Dictionary<string, double> { ["mbps"] = 0 }), "any success, or a metric that is not a request rate, is not a failure");
+        // A load run fails when more than 1% of what it attempted (succeeded + errors + timeouts) did not succeed.
+        static Dictionary<string, double> Load(double requests, double errors, double timeouts = 0, double rps = 100) =>
+            new() { ["rps"] = rps, ["requests"] = requests, ["errors"] = errors, ["timeouts"] = timeouts };
+        foreach (var (metrics, failed, what) in new[]
+        {
+            (Load(0, 200, rps: 0), true, "a rate of zero"), (Load(99, 1), false, "exactly 1% failed"), (Load(9900, 100), false, "exactly 1% of 10000"), (Load(9899, 101), true, "just over 1% failed"),
+            (Load(99, 0, 1), false, "1 timeout in 100"), (Load(98, 0, 2), true, "2 timeouts in 100"), (Load(1, 2999, rps: 0.439), true, "0.439 rps, 2999 errors"), (Load(0, 0, rps: 5), true, "nothing attempted"),
+            (Load(100, 0, rps: double.NaN), true, "a NaN rate"), (Load(100, double.NaN), true, "a NaN count"), (Load(100, -5), true, "a negative count"), (new Dictionary<string, double> { ["rps"] = 0.5 }, false, "uncounted successes"),
+        })
+            runner.IsTrue((BenchStats.FailureReason(metrics) is not null) == failed, $"a load run with {what} is {(failed ? "a failure" : "kept")}");
 
         var four = new[] { 1.0, 2, 3, 4 };
         runner.IsTrue(BenchReport.Summary(four.Select((v, i) => Run("a", i, v)).ToList()).Contains("2.50 [1.00..4.00]"), "the summary shows 2.5 as the median of [1,2,3,4]");
@@ -37,6 +45,10 @@ internal static class BenchComparisonTests
         const string env = """{"schema":2,"kind":"env","machine":"32 cores, 31.6 GB","hosts":[{"label":"a","file":"piper-bench.dll"}],"scenarios":["get_c16","startup"],"runs":5,"duration_s":8}""";
         const string build = """{"kind":"build","configuration":"Release","git_sha":"abcdef123456","cpu":"Test CPU","power_plan":"balanced"}""";
         var read = BenchReport.ReadEnv([env, build, """{"kind":"run","scenario":"x"}"""]);
+
+        // The three lines of a real file (env, build, run) give one record and nothing counted as unreadable.
+        var roundTrip = BenchReport.Parse([env, build, new BenchRecord { Scenario = "get_c16", Label = "a", Metrics = { ["rps"] = 5 } }.ToLine()], out var unreadable);
+        runner.IsTrue(roundTrip.Count == 1 && unreadable == 0 && roundTrip[0].Scenario == "get_c16", "env + build + run parses to exactly one record, none skipped");
         runner.IsTrue(read is { Machine: "32 cores, 31.6 GB", Runs: 5, DurationSeconds: 8, Cpu: "Test CPU", Configuration: "Release", PowerPlan: "balanced" } && read.Scenarios.SequenceEqual(["get_c16", "startup"]), "the env and build lines are read");
 
         var old = BenchReport.ReadEnv(["""{"schema":1,"kind":"env","machine":"old","hosts":[{"Label":"a","Path":"C:\\x"}],"scenarios":["a"],"runs":3,"duration_s":4}"""]);
@@ -48,6 +60,12 @@ internal static class BenchComparisonTests
         var other = a with { Machine = "8 cores", Scenarios = ["get_c16", "download_cl"], Runs = 15, DurationSeconds = 4, Cpu = "Other CPU", Configuration = "Debug", PowerPlan = "power saver" };
         var warnings = string.Join("\n", BenchReport.EnvWarnings(a, other));
         runner.IsTrue(new[] { "machines differ", "CPUs differ", "scenarios differ", "only in A: startup", "only in B: download_cl", "runs differ", "duration differs", "power plans differ", "Debug build" }.All(warnings.Contains), $"every difference is named: {warnings}");
+
+        // A results file is shared: ESC, C1 and bidi characters must not reach a terminal through a table.
+        runner.IsTrue(BenchReport.Clean("x\u001b[2J\u009b\u202Ey") == "x?[2J??y" && BenchReport.Clean(null) == "" && BenchReport.Clean(new string('a', 500)).Length == 200, "control and format characters are replaced, long text is cut");
+        var poisoned = BenchReport.Parse(["""{"kind":"run","scenario":"s\u001b[31m","label":"l\u202E","error":"e\u001b","metrics":{"m\u001b":1,"m\u0007":2}}"""], out _);
+        var printed = BenchReport.Summary(poisoned) + BenchReport.Compare(poisoned, poisoned, "n\u001b", "n\u009b", BenchReport.ReadEnv(["""{"kind":"env","machine":"m\u001b"}"""]), a);
+        runner.IsTrue(poisoned.Count == 1 && !printed.Any(c => char.IsControl(c) && c is not ('\n' or '\r')) && !printed.Contains('\u202E'), "no control or bidi character reaches a summary or comparison");
         runner.IsTrue(BenchReport.EnvWarnings(a, null).Count == 1 && BenchReport.EnvWarnings(null, null).Count == 1, "a file without a header is a warning");
         runner.AreEqual(0, BenchReport.EnvWarnings(a, a with { Cpu = "", PowerPlan = "" }).Count, "a field one file does not have is not a difference");
 
