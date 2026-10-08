@@ -16,7 +16,7 @@ internal static partial class BenchHygiene
         "ekrn", "egui", "MsMpEng", "MpDefenderCoreService", "NisSrv", "MsSense", "avp", "AvastSvc", "avgsvc",
         "mbamservice", "SentinelAgent", "CSFalconService", "SearchIndexer", "SearchHost", "OneDrive", "Teams",
         "ms-teams", "chrome", "msedge", "firefox", "Code", "devenv", "MSBuild", "dotnet", "VBCSCompiler",
-        "TiWorker", "TrustedInstaller", "svchost", "System", "vmmem", "vmmemWSL", "Docker Desktop",
+        "TiWorker", "TrustedInstaller", "svchost", "System", "vmmem", "vmmemWSL", "Docker Desktop", "claude",
     };
 
     /// <summary>The name a background process is recorded under: its own when it is on the short list
@@ -30,13 +30,48 @@ internal static partial class BenchHygiene
     {
         var cleaned = new StringBuilder(text.Length);
         foreach (var c in text) cleaned.Append(char.IsControl(c) ? ' ' : c);
-        var scrubbed = PathPattern().Replace(cleaned.ToString(), "<path>");
+        var scrubbed = PathPattern().Replace(cleaned.ToString(), m => m.Groups["q"] is { Success: true } q ? q.Value + "<path>" + q.Value : "<path>");
         return scrubbed.Length <= MaxErrorChars ? scrubbed : scrubbed[..MaxErrorChars] + "...";
     }
 
-    // A drive path (C:\ or C:/) or a UNC path (\\host\share), up to the next quote or the end of the line.
-    [GeneratedRegex("""(?:[A-Za-z]:[\\/]|\\\\)[^"'<>|*?]*""")]
+    // Where a path starts: C:\, C:/, C:dir\, \\host, \\?\, a rooted \dir\, or //host/ (not inside a URL).
+    private const string PathStart = """(?:(?<![A-Za-z0-9])[A-Za-z]:[\\/]|(?<![A-Za-z0-9])[A-Za-z]:[\w.$-]+\\|\\\\(?:[?.]\\)?|(?<![\w\\])\\(?=[\w$.-]+\\)|(?<![^\s'"(\[=,;])//(?=[^\s/]+/))""";
+
+    // A quoted path runs to the closing quote (one not followed by a letter or digit: O'Brien goes whole).
+    // An unquoted path takes the rest of the line up to a character no file name holds. DOMAIN\user goes alone.
+    [GeneratedRegex("(?<q>['\"])" + PathStart + """(?:(?!\k<q>(?!\w)).)*(?:\k<q>)?|""" + PathStart + """[^"<>|*?]*|(?<![\w\\.:/-])[A-Za-z][\w.-]*\\[\w.$-]+""")]
     private static partial Regex PathPattern();
+
+    /// <summary>Whether a path names a Windows device (NUL, CON, COM1, ... with or without an extension), which
+    /// would swallow the results.</summary>
+    public static bool IsDevicePath(string path)
+    {
+        if (path.Replace('/', '\\').StartsWith(@"\\.\", StringComparison.Ordinal)) return true;
+        var name = Path.GetFileName(path);
+        var end = name.IndexOfAny(['.', ':']);
+        return DeviceName().IsMatch((end < 0 ? name : name[..end]).TrimEnd(' '));
+    }
+
+    [GeneratedRegex(@"^(?:CON|PRN|AUX|NUL|(?:COM|LPT)[1-9\u00B9\u00B2\u00B3]|CONIN\$|CONOUT\$)$", RegexOptions.IgnoreCase)]
+    private static partial Regex DeviceName();
+
+    /// <summary>Why <paramref name="path"/> cannot be the results file, or null when a file can be created
+    /// there. Checked before any proxy host is started, so the user learns at once, not after the run.</summary>
+    public static string? CheckOut(string path)
+    {
+        try
+        {
+            var folder = Path.GetDirectoryName(Path.GetFullPath(path)) ?? "";
+            if (!Directory.Exists(folder)) return $"--out: the folder {folder} does not exist.";
+            // A probe that vanishes on close: the results file itself is only created once the run can start.
+            using var probe = new FileStream(Path.Combine(folder, $".piper-bench-{Guid.NewGuid():N}.tmp"), FileMode.CreateNew, FileAccess.Write, FileShare.None, 1, FileOptions.DeleteOnClose);
+            return null;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
+        {
+            return $"--out '{path}' cannot be written: {ex.Message}";
+        }
+    }
 
     /// <summary>Creates the results file, which must not exist: a benchmark that is re-run into an old
     /// file name must not destroy the recording that was there.</summary>

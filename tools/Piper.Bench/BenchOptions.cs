@@ -69,13 +69,9 @@ internal sealed class BenchOptions
                     options.Timeout = TimeSpan.FromSeconds(whole);
                     break;
                 case "--wait-quiet":
-                    if (!TryValue(args, ref i, out text, out error)) return false;
-                    if (!double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out var percent) || percent is < 1 or > 100)
-                    {
-                        error = $"--wait-quiet takes a percentage from 1 to 100, got '{text}'.";
-                        return false;
-                    }
-                    options.WaitQuietPercent = percent;
+                    // A whole number, like every other numeric option: NaN, 1e1 or " 5" must not slip through.
+                    if (!TryWhole(args, ref i, 1, 100, out whole, out error)) return false;
+                    options.WaitQuietPercent = whole;
                     break;
                 case "--summary":
                     if (!TryValue(args, ref i, out text, out error)) return false;
@@ -88,6 +84,7 @@ internal sealed class BenchOptions
                     break;
                 case "--out":
                     if (!TryValue(args, ref i, out text, out error)) return false;
+                    if (BenchHygiene.IsDevicePath(text)) { error = $"--out '{text}' is a device, not a file; the results would be discarded."; return false; }
                     options.Out = text;
                     break;
                 case "--host":

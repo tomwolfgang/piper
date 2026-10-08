@@ -45,6 +45,15 @@ internal static class BenchOptionsTests
             runner.IsTrue(!Parse(["--wait-quiet", "0"], out _, out var quiet) && quiet.Contains("1 to 100"), "--wait-quiet 0 is refused");
             runner.IsTrue(!Parse(["--wait-quiet", "101"], out _, out _) && !Parse(["--wait-quiet", "x"], out _, out _), "--wait-quiet above 100 or not a number is refused");
             runner.IsTrue(Parse(["--wait-quiet", "1"], out var q1, out _) && q1!.WaitQuietPercent == 1 && Parse(["--wait-quiet", "100"], out _, out _), "--wait-quiet accepts 1 and 100");
+            // NaN passed the old range test (every comparison with it is false) and disabled the wait.
+            foreach (var bad in new[] { "NaN", "1e1", " 5", "5.5", "-5" })
+                runner.IsTrue(!Parse(["--wait-quiet", bad], out _, out var quietError) && quietError.Contains($"'{bad}'"), $"--wait-quiet '{bad}' is refused");
+
+            // A device name as --out would discard the whole run and exit 0.
+            foreach (var device in new[] { "NUL", "nul.jsonl", @"C:\x\CON", "com1.txt", "LPT9", "AUX.tar.gz", "Prn ", @"\\.\NUL" })
+                runner.IsTrue(!Parse(["--out", device], out _, out var deviceError) && deviceError.Contains("device"), $"--out '{device}' is refused");
+            foreach (var fine in new[] { "console.jsonl", "NULL.jsonl", "COM10", "my.nul" })
+                runner.IsTrue(Parse(["--out", fine], out var named, out _) && named!.Out == fine, $"--out '{fine}' is not a device");
 
             var unknownFlag = Parse(["--bogus"], out _, out var unknownError);
             runner.IsTrue(!unknownFlag && unknownError.StartsWith("Unrecognised option: --bogus", StringComparison.Ordinal), "an unknown flag is refused by name");
@@ -83,6 +92,24 @@ internal static class BenchOptionsTests
         runner.AreEqual("msmpeng", BenchHygiene.ProcessLabel("msmpeng"), "the match ignores case");
         runner.AreEqual("other", BenchHygiene.ProcessLabel("my-secret-project"), "any other process is not named");
         runner.AreEqual("other", BenchHygiene.ProcessLabel(""), "an empty name is not named");
+        runner.AreEqual("CLAUDE", BenchHygiene.ProcessLabel("CLAUDE"), "the allow list matches a whole name, ignoring case");
+        runner.AreEqual("other", BenchHygiene.ProcessLabel("claudeX"), "a name that only starts with an allowed one is not named");
+
+        // A URL keeps its scheme: "s:/" in "https://" is not a drive.
+        var url = "HttpRequestException: https://h1.bench.test:5001/small answered 502: upstream failed";
+        runner.AreEqual(url, BenchHygiene.Scrub(url), "a URL is left alone");
+        runner.AreEqual("see http://a//b and file:///<path>", BenchHygiene.Scrub("see http://a//b and file:///C:/Users/jane/x.txt"), "a double slash inside a URL is not a path, a file URI's path is");
+        // An apostrophe in a name does not end the path (it used to leave "Brien\secret\x" behind).
+        runner.AreEqual("Could not find '<path>'.", BenchHygiene.Scrub(@"Could not find 'C:\Users\O'Brien\secret\x'."), "a quoted path with an apostrophe goes whole");
+        runner.AreEqual("a '<path>' and \"<path>\" b", BenchHygiene.Scrub(@"a 'C:\x y' and ""D:\o'k\z"" b"), "two quoted paths are replaced separately");
+        runner.AreEqual("failed <path>", BenchHygiene.Scrub(@"failed C:\Users\O'Brien\secret\x"), "an unquoted path with an apostrophe goes whole");
+        foreach (var path in new[] { @"\\?\UNC\srv\share\jane\a.dll", @"\\?\C:\Users\jane\a.dll", "//srv/share/jane/a.dll", @"\Users\jane\a.dll", @"C:Users\jane\a.dll", @"\\srv\share\jane\a.dll" })
+        {
+            var cleaned = BenchHygiene.Scrub($"open {path} failed");
+            runner.IsTrue(cleaned == "open <path>" && !cleaned.Contains("jane"), $"'{path}' is replaced: {cleaned}");
+        }
+        runner.AreEqual("login failed for <path> on host", BenchHygiene.Scrub(@"login failed for CORP\jane.doe on host"), "a DOMAIN\\user token is replaced");
+        runner.AreEqual("a // b, 1/2 and c:d are plain text", BenchHygiene.Scrub("a // b, 1/2 and c:d are plain text"), "ordinary text is left alone");
 
         var scrubbed = BenchHygiene.Scrub("IOException: Could not find file 'C:\\Users\\jane.doe\\bench\\a.dll'.");
         runner.IsTrue(!scrubbed.Contains("jane") && !scrubbed.Contains("C:\\") && scrubbed.StartsWith("IOException: Could not find file '<path>'", StringComparison.Ordinal), $"a quoted drive path is replaced: {scrubbed}");
@@ -110,6 +137,11 @@ internal static class BenchOptionsTests
             var fresh = Path.Combine(folder, "new.jsonl");
             using (var stream = BenchHygiene.CreateResultsFile(fresh)) stream.WriteByte((byte)'x');
             runner.AreEqual("x", File.ReadAllText(fresh), "a new results file is created and written");
+
+            // --out is checked before any host starts: a usable folder passes and leaves nothing behind.
+            runner.IsTrue(BenchHygiene.CheckOut(Path.Combine(folder, "later.jsonl")) is null && Directory.GetFiles(folder).Length == 2, "a writable folder passes, the probe is gone");
+            runner.IsTrue(BenchHygiene.CheckOut(Path.Combine(folder, "no-such-folder", "x.jsonl")) is { } missing && missing.Contains("does not exist"), "a missing folder is reported");
+            runner.IsTrue(BenchHygiene.CheckOut("bad\0name.jsonl") is not null, "an invalid file name is reported, not thrown");
         }
         finally { Directory.Delete(folder, recursive: true); }
         return Task.CompletedTask;

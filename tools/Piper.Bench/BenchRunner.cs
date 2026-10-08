@@ -23,6 +23,11 @@ internal static class BenchRunner
             Console.Error.WriteLine($"{outPath} already exists and is not overwritten; choose another --out or delete it.");
             return 2;
         }
+        if (BenchHygiene.CheckOut(outPath) is { } unusable)
+        {
+            Console.Error.WriteLine(unusable);
+            return 2;
+        }
         // One certificate authority folder for every host process: in the temp folder, deleted at
         // the end, never the user's real one, never added to any trust store.
         var caDirectory = Path.Combine(Path.GetTempPath(), "piper-bench-" + Guid.NewGuid().ToString("N"));
@@ -51,7 +56,7 @@ internal static class BenchRunner
 
             FileStream results;
             try { results = BenchHygiene.CreateResultsFile(outPath); }
-            catch (IOException ex)
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
                 Console.Error.WriteLine(ex.Message);
                 return 2;
