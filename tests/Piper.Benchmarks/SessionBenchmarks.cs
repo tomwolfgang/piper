@@ -32,8 +32,12 @@ public class SearchQueryBenchmarks
     private Session[] _sessions = [];
     private SearchQuery _query = SearchQuery.Empty;
 
-    [Params("orders", "status:5xx", "domain:api7.example.com method:POST", "body:\"status\":\"ok\" -status:404")]
-    public string Query { get; set; } = "orders";
+    // Hits among the 100,000 sessions (counted, not guessed): 1,111 (1.1%), 5,883 (5.9%), 2,000 (2%),
+    // 91,444 (91%, a scan of every body). "orders" matches all and "domain:api7 method:POST" matches none.
+    [Params("orders/77", "status:5xx", "domain:api5.example.com method:POST", "body:\"status\":\"ok\" -status:404")]
+    public string Query { get; set; } = "orders/77";
+
+    private Session[] _cold = [];
 
     [GlobalSetup]
     public void Setup()
@@ -43,11 +47,22 @@ public class SearchQueryBenchmarks
         foreach (var session in _sessions) _query.Matches(session); // fills the per-session text caches, as a first search does
     }
 
+    /// <summary>Typing in the filter box again: every session's text is already cached.</summary>
     [Benchmark]
-    public int MatchAll()
+    public int MatchAll() => Count(_sessions);
+
+    /// <summary>The first search after the sessions were captured: nothing is cached yet, so this includes
+    /// building each session's search text. New sessions for every iteration (outside the measurement).</summary>
+    [IterationSetup(Target = nameof(FirstSearch))]
+    public void ColdSessions() => _cold = SessionFactory.Make(SessionFactory.Count);
+
+    [Benchmark]
+    public int FirstSearch() => Count(_cold);
+
+    private int Count(Session[] sessions)
     {
         var hits = 0;
-        foreach (var session in _sessions)
+        foreach (var session in sessions)
             if (_query.Matches(session)) hits++;
         return hits;
     }

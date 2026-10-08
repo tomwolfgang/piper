@@ -23,8 +23,29 @@ public class CertificateBenchmarks
     [GlobalSetup]
     public void Setup()
     {
+        DeleteStaleFolders(Path.GetTempPath(), TimeSpan.FromDays(1));
         _directory = Path.Combine(Path.GetTempPath(), "piper-benchmarks-" + Guid.NewGuid().ToString("N"));
         _ca = CertificateAuthority.LoadOrCreate(_directory);
+    }
+
+    /// <summary>A run that was killed leaves its folder (a throwaway root key, Piper-Root.pfx). Removes the ones in
+    /// <paramref name="root"/> older than <paramref name="age"/>: a real folder named exactly
+    /// <c>piper-benchmarks-</c> and 32 lower-case hex digits, never a link (a junction is not followed or deleted).</summary>
+    public static int DeleteStaleFolders(string root, TimeSpan age)
+    {
+        var deleted = 0;
+        foreach (var path in Directory.EnumerateDirectories(root, "piper-benchmarks-*"))
+        {
+            var info = new DirectoryInfo(path);
+            if (!System.Text.RegularExpressions.Regex.IsMatch(info.Name, "^piper-benchmarks-[0-9a-f]{32}$") || info.LinkTarget is not null
+                || info.Attributes.HasFlag(FileAttributes.ReparsePoint) || DateTime.UtcNow - info.CreationTimeUtc <= age) continue;
+            try { info.Delete(recursive: true); deleted++; }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                // In use by another run: left for the next one.
+            }
+        }
+        return deleted;
     }
 
     [GlobalCleanup]
@@ -49,8 +70,15 @@ public class CertificateBenchmarks
     [Benchmark]
     public void RsaFreshKey() => Mint(NewHost(), RSA.Create(2048), ownsKey: true);
 
-    /// <summary>The same extensions, signature by the root and PFX round trip as <c>CertificateAuthority.MintLeaf</c>.</summary>
+    // A fresh key is released even when minting throws.
     private void Mint(string host, AsymmetricAlgorithm key, bool ownsKey)
+    {
+        try { MintCore(host, key); }
+        finally { if (ownsKey) key.Dispose(); }
+    }
+
+    /// <summary>The same extensions, signature by the root and PFX round trip as <c>CertificateAuthority.MintLeaf</c>.</summary>
+    private void MintCore(string host, AsymmetricAlgorithm key)
     {
         var request = key switch
         {
@@ -79,6 +107,5 @@ public class CertificateBenchmarks
             _ => throw new ArgumentException("Unsupported key type.", nameof(key)),
         };
         using var loaded = X509CertificateLoader.LoadPkcs12(withKey.Export(X509ContentType.Pfx, "bench"), "bench", X509KeyStorageFlags.Exportable);
-        if (ownsKey) key.Dispose();
     }
 }
