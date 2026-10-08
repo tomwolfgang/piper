@@ -1,5 +1,8 @@
+using System.Diagnostics;
 using System.Net;
+using System.Net.Security;
 using System.Net.Sockets;
+using System.Security.Cryptography.X509Certificates;
 
 namespace Piper.Bench;
 
@@ -8,7 +11,7 @@ namespace Piper.Bench;
 internal sealed class ScenarioContext(BenchOptions options, Origin origin, string hostPath, string caDirectory, CancellationToken token) : IAsyncDisposable
 {
     private HostClient? _host;
-    private long _clientConnections;
+    private long _clientConnections, _validationTicks;
 
     public BenchOptions Options { get; } = options;
     public Origin Origin { get; } = origin;
@@ -20,8 +23,11 @@ internal sealed class ScenarioContext(BenchOptions options, Origin origin, strin
 
     public long ClientConnections => Interlocked.Read(ref _clientConnections);
 
-    public async Task<HostClient> StartHostAsync() =>
-        _host ??= await HostClient.StartAsync(hostPath, caDirectory, Token).ConfigureAwait(false);
+    /// <summary>Total time the client's own certificate check has taken so far.</summary>
+    public double ValidationMilliseconds => Stopwatch.GetElapsedTime(0, Interlocked.Read(ref _validationTicks)).TotalMilliseconds;
+
+    public async Task<HostClient> StartHostAsync(params string[] hostArguments) =>
+        _host ??= await HostClient.StartAsync(hostPath, caDirectory, Token, hostArguments).ConfigureAwait(false);
 
     /// <summary>Clears what a scenario counts per measurement: the connections the load generator
     /// opened, and the ones the origin accepted. Equal to the concurrency when keep-alive works.</summary>
@@ -32,9 +38,48 @@ internal sealed class ScenarioContext(BenchOptions options, Origin origin, strin
     }
 
     /// <summary>A client that reaches the origin only through the proxy (loopback is not bypassed).</summary>
-    public HttpClient NewClient(int maxConnections, TimeSpan? timeout = null)
+    public HttpClient NewClient(int maxConnections, TimeSpan? timeout = null) =>
+        new(NewHandler(maxConnections)) { Timeout = timeout ?? TimeSpan.FromSeconds(10) };
+
+    /// <summary>A client for HTTPS through a decrypting proxy. It trusts the throwaway CA the host made, and
+    /// only that, through a callback of its own: nothing is added to any certificate store. With
+    /// <paramref name="http2"/> every request must be HTTP/2 and share one connection.</summary>
+    public HttpClient NewTlsClient(int maxConnections, bool http2)
     {
-        var handler = new SocketsHttpHandler
+        var handler = NewHandler(maxConnections);
+        var root = X509Certificate2.CreateFromPem(File.ReadAllText(Path.Combine(caDirectory, "Piper-Root.cer")));
+        // Only chain errors are forgiven (the throwaway CA is no trusted root): a name mismatch or a missing certificate
+        // fails, so a proxy that reuses or mints the wrong leaf is noticed. The time spent here is kept apart.
+        handler.SslOptions.RemoteCertificateValidationCallback = (_, certificate, _, errors) =>
+        {
+            var began = Stopwatch.GetTimestamp();
+            try { return certificate is not null && (errors & ~SslPolicyErrors.RemoteCertificateChainErrors) == 0 && ChainsTo(root, certificate); }
+            finally { Interlocked.Add(ref _validationTicks, Stopwatch.GetTimestamp() - began); }
+        };
+        handler.EnableMultipleHttp2Connections = !http2;
+        var client = new HttpClient(handler, disposeHandler: true) { Timeout = TimeSpan.FromSeconds(30) };
+        if (http2)
+        {
+            client.DefaultRequestVersion = HttpVersion.Version20;
+            client.DefaultVersionPolicy = HttpVersionPolicy.RequestVersionExact;
+        }
+        return client;
+    }
+
+    private static bool ChainsTo(X509Certificate2 root, X509Certificate leaf)
+    {
+        using var chain = new X509Chain();
+        chain.ChainPolicy.TrustMode = X509ChainTrustMode.CustomRootTrust;
+        chain.ChainPolicy.CustomTrustStore.Add(root);
+        chain.ChainPolicy.RevocationMode = X509RevocationMode.NoCheck;
+        chain.ChainPolicy.DisableCertificateDownloads = true;
+        using var certificate = new X509Certificate2(leaf);
+        return chain.Build(certificate) && chain.ChainElements[^1].Certificate.Thumbprint == root.Thumbprint;
+    }
+
+    private SocketsHttpHandler NewHandler(int maxConnections)
+    {
+        return new SocketsHttpHandler
         {
             Proxy = new WebProxy($"http://127.0.0.1:{Host.Port}") { BypassProxyOnLocal = false },
             UseProxy = true,
@@ -56,7 +101,6 @@ internal sealed class ScenarioContext(BenchOptions options, Origin origin, strin
                 }
             },
         };
-        return new HttpClient(handler) { Timeout = timeout ?? TimeSpan.FromSeconds(10) };
     }
 
     public async ValueTask DisposeAsync()

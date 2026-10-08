@@ -21,7 +21,7 @@ internal sealed class HostClient : IAsyncDisposable
 
     /// <summary><paramref name="hostPath"/> is a <c>.dll</c> (run with <c>dotnet</c>) or an executable of
     /// a <c>piper-bench</c> build; the proxy it runs is whatever Piper.Core that build was made with.</summary>
-    public static async Task<HostClient> StartAsync(string hostPath, string caDirectory, CancellationToken ct)
+    public static async Task<HostClient> StartAsync(string hostPath, string caDirectory, CancellationToken ct, IEnumerable<string>? hostArguments = null)
     {
         var isDll = hostPath.EndsWith(".dll", StringComparison.OrdinalIgnoreCase);
         var startInfo = new ProcessStartInfo(isDll ? "dotnet" : hostPath)
@@ -33,7 +33,7 @@ internal sealed class HostClient : IAsyncDisposable
             CreateNoWindow = true,
         };
         if (isDll) startInfo.ArgumentList.Add(hostPath);
-        foreach (var argument in new[] { "host", "--ca-dir", caDirectory }) startInfo.ArgumentList.Add(argument);
+        foreach (var argument in new[] { "host", "--ca-dir", caDirectory }.Concat(hostArguments ?? [])) startInfo.ArgumentList.Add(argument);
 
         var process = Process.Start(startInfo) ?? throw new InvalidOperationException($"Could not start {hostPath}.");
         var client = new HostClient(process);
