@@ -31,15 +31,25 @@ internal sealed class LatencyRelay : IAsyncDisposable
     private readonly long _delayTicks;
     private readonly CancellationTokenSource _stop = new();
     private readonly Task _accepting;
+    private readonly List<Task> _relays = [];
 
     public LatencyRelay(int targetPort, TimeSpan oneWay)
     {
         _targetPort = targetPort;
         _delayTicks = (long)(oneWay.TotalSeconds * Stopwatch.Frequency);
         timeBeginPeriod(1);
-        _listener.Start();
-        Port = ((IPEndPoint)_listener.LocalEndpoint).Port;
-        _accepting = Task.Run(AcceptAsync);
+        try
+        {
+            _listener.Start();
+            Port = ((IPEndPoint)_listener.LocalEndpoint).Port;
+            _accepting = Task.Run(AcceptAsync);
+        }
+        catch
+        {
+            timeEndPeriod(1); // the timer request is undone when the relay cannot be built
+            _stop.Dispose();
+            throw;
+        }
     }
 
     public int Port { get; }
@@ -51,7 +61,11 @@ internal sealed class LatencyRelay : IAsyncDisposable
             TcpClient client;
             try { client = await _listener.AcceptTcpClientAsync(_stop.Token).ConfigureAwait(false); }
             catch (Exception ex) when (ex is OperationCanceledException or ObjectDisposedException or SocketException) { return; }
-            _ = Task.Run(() => RelayAsync(client), CancellationToken.None);
+            lock (_relays)
+            {
+                _relays.RemoveAll(t => t.IsCompleted);
+                _relays.Add(Task.Run(() => RelayAsync(client), CancellationToken.None)); // DisposeAsync waits for these
+            }
         }
     }
 
@@ -60,21 +74,41 @@ internal sealed class LatencyRelay : IAsyncDisposable
         using var near = client;
         using var far = new TcpClient { NoDelay = true };
         near.NoDelay = true;
-        using var cts = CancellationTokenSource.CreateLinkedTokenSource(_stop.Token);
+        CancellationTokenSource? cts = null;
+        Task up = Task.CompletedTask, down = Task.CompletedTask;
         try
         {
+            cts = CancellationTokenSource.CreateLinkedTokenSource(_stop.Token); // inside the try: DisposeAsync may have won the race
             await far.ConnectAsync(IPAddress.Loopback, _targetPort, cts.Token).ConfigureAwait(false);
-            var up = PumpAsync(near.Client, far.Client, cts.Token);
-            var down = PumpAsync(far.Client, near.Client, cts.Token);
-            await Task.WhenAny(up, down).ConfigureAwait(false); // one side closing ends the connection
-            await cts.CancelAsync().ConfigureAwait(false);
-            await Task.WhenAll(up, down).ConfigureAwait(false);
+            up = PumpAsync(near.Client, far.Client, cts.Token);
+            down = PumpAsync(far.Client, near.Client, cts.Token);
+            // A pump that ends cleanly has passed the end of its stream on (a half-close): the other direction
+            // goes on until it ends too, so the response to a request followed by a FIN still arrives. A pump
+            // that fails (a reset, a cancellation) ends the connection.
+            for (var pending = new List<Task> { up, down }; pending.Count > 0;)
+            {
+                var done = await Task.WhenAny(pending).ConfigureAwait(false);
+                pending.Remove(done);
+                await done.ConfigureAwait(false);
+            }
         }
-        catch (Exception ex) when (ex is OperationCanceledException or IOException or SocketException or ObjectDisposedException or ChannelClosedException)
+        catch (Exception ex) when (IsOver(ex))
         {
             // Either end went away: the connection is over.
         }
+        finally
+        {
+            if (cts is not null)
+            {
+                await cts.CancelAsync().ConfigureAwait(false);
+                try { await Task.WhenAll(up, down).ConfigureAwait(false); }
+                catch (Exception ex) when (IsOver(ex)) { /* the pump that failed was reported above */ }
+                cts.Dispose();
+            }
+        }
     }
+
+    private static bool IsOver(Exception ex) => ex is OperationCanceledException or IOException or SocketException or ObjectDisposedException or ChannelClosedException;
 
     private async Task PumpAsync(Socket from, Socket to, CancellationToken ct)
     {
@@ -98,6 +132,7 @@ internal sealed class LatencyRelay : IAsyncDisposable
             catch (Exception ex)
             {
                 queue.Writer.TryComplete(ex); // the reader must not wait on a queue nobody drains
+                while (queue.Reader.TryRead(out var left)) ArrayPool<byte>.Shared.Return(left.Data); // what was queued goes back to the pool
                 throw;
             }
         }, CancellationToken.None);
@@ -119,7 +154,12 @@ internal sealed class LatencyRelay : IAsyncDisposable
                     ArrayPool<byte>.Shared.Return(buffer);
                     break;
                 }
-                await queue.Writer.WriteAsync((Stopwatch.GetTimestamp(), buffer, read), ct).ConfigureAwait(false);
+                try { await queue.Writer.WriteAsync((Stopwatch.GetTimestamp(), buffer, read), ct).ConfigureAwait(false); }
+                catch
+                {
+                    ArrayPool<byte>.Shared.Return(buffer); // cancelled or the writer is gone: the chunk was never queued
+                    throw;
+                }
             }
         }
         finally { queue.Writer.TryComplete(); }
@@ -131,6 +171,9 @@ internal sealed class LatencyRelay : IAsyncDisposable
         await _stop.CancelAsync().ConfigureAwait(false);
         _listener.Stop();
         await _accepting.ConfigureAwait(false);
+        Task[] relays;
+        lock (_relays) relays = [.. _relays];
+        await Task.WhenAll(relays).ConfigureAwait(false); // every connection is closed and its buffers returned before the timer is released
         _stop.Dispose();
         timeEndPeriod(1);
     }

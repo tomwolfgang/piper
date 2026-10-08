@@ -16,6 +16,7 @@
     <Compile Include="..\..\src\Piper.App\UpdateService.cs" Link="UpdateService.cs" />
     <Compile Include="..\..\src\Piper.App\DiagnosticsBundle.cs" Link="DiagnosticsBundle.cs" />
     <Compile Include="..\..\src\Piper.App\SazFileRelay.cs" Link="SazFileRelay.cs" />
+    <Compile Include="..\..\tools\Piper.Bench\LatencyRelay.cs" Link="Bench\LatencyRelay.cs" />
     <!-- UpdateService and DiagnosticsBundle report their failures with the app's shared string
          catalogue, so the tests link it in and exercise the same loader the app uses. -->
     <Compile Include="..\..\src\Piper.App\Strings.cs" Link="Strings.cs" />
