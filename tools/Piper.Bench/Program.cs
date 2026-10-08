@@ -45,6 +45,9 @@ catch (Exception ex) when (ex is IOException or InvalidDataException or Unauthor
     return 2;
 }
 
+// A hard kill (or a power cut) of an earlier run leaves its folder behind, with a throwaway root key in it.
+BenchTemp.DeleteStaleFolders(Path.GetTempPath(), TimeSpan.FromDays(1));
+
 using var cancel = new CancellationTokenSource();
 Console.CancelKeyPress += (_, e) =>
 {

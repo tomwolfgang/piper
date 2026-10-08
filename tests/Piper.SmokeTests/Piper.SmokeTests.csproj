@@ -23,6 +23,7 @@
     <!-- Free of WinForms, so the session list's size and progress text can be checked here. -->
     <Compile Include="..\..\src\Piper.App\Controls\Format.cs" Link="Format.cs" />
     <Compile Include="..\..\src\Piper.App\Controls\ColumnLayout.cs" Link="ColumnLayout.cs" />
+    <Compile Include="..\..\tools\Piper.Bench\BenchTemp.cs" Link="Bench\BenchTemp.cs" />
     <EmbeddedResource Include="..\..\src\Piper.App\Locales\en.json" LogicalName="Piper.App.Locales.en.json" />
     <!-- The benchmark tool's result file and statistics; free of the proxy, so checked here. -->
     <Compile Include="..\..\tools\Piper.Bench\BenchStats.cs" Link="Bench\BenchStats.cs" />
