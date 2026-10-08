@@ -76,11 +76,21 @@ internal sealed class HostClient : IAsyncDisposable
         return await ReadAsync(prefix, ct).ConfigureAwait(false);
     }
 
-    /// <summary>Process counters of the proxy: ws, peakws, heap, alloc, cpums, threads, sessions, gcpausems, gc0..gc2.</summary>
-    public async Task<Dictionary<string, long>> StatsAsync(CancellationToken ct = default)
+    /// <summary>Process counters of the proxy: ws, peakws, heap, alloc, cpums, threads, sessions, gcpausems.</summary>
+    public async Task<Dictionary<string, long>> StatsAsync(CancellationToken ct = default) =>
+        Parse(await CommandAsync("stats", "STATS", ct).ConfigureAwait(false));
+
+    /// <summary>The same counters after a forced, compacting collection (so <c>heap</c> is what is retained).</summary>
+    public async Task<Dictionary<string, long>> CollectAsync(CancellationToken ct = default) =>
+        Parse(await CommandAsync("gc", "GC", ct).ConfigureAwait(false));
+
+    public Task SetCapacityAsync(int sessions, CancellationToken ct = default) =>
+        CommandAsync(FormattableString.Invariant($"capacity {sessions}"), "OK", ct);
+
+    private static Dictionary<string, long> Parse(string line)
     {
         var values = new Dictionary<string, long>();
-        foreach (var pair in (await CommandAsync("stats", "STATS", ct).ConfigureAwait(false)).Split(' ').Skip(1))
+        foreach (var pair in line.Split(' ').Skip(1))
         {
             var kv = pair.Split('=');
             if (kv.Length == 2 && long.TryParse(kv[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out var value)) values[kv[0]] = value;
