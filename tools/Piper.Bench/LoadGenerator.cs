@@ -64,6 +64,7 @@ internal static class LoadGenerator
             return new Dictionary<string, double>
             {
                 ["rps"] = total / seconds,
+                ["requests"] = total,
                 ["p50_ms"] = BenchStats.Percentile(millis, 0.50),
                 ["p99_ms"] = BenchStats.Percentile(millis, 0.99),
                 ["errors"] = Interlocked.Read(ref errors),

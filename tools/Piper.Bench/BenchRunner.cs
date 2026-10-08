@@ -21,6 +21,9 @@ internal static class BenchRunner
         // the end, never the user's real one, never added to any trust store.
         var caDirectory = Path.Combine(Path.GetTempPath(), "piper-bench-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(caDirectory);
+#if DEBUG
+        Console.Error.WriteLine("WARNING: this driver is a Debug build: its numbers say little about Release. Run it with -c Release.");
+#endif
         var records = new List<BenchRecord>();
         var failures = 0;
 
@@ -53,6 +56,8 @@ internal static class BenchRunner
 
             for (var run = 1; run <= options.Runs; run++)
             {
+                // Once, before the first result: what built and ran the driver.
+                if (run == 1) await file.WriteLineAsync(JsonSerializer.Serialize(SystemInfo.Provenance())).ConfigureAwait(false);
                 // A,B then B,A: a drift over the session (thermal, background tasks) does not favour one build.
                 var order = run % 2 == 1 ? options.Hosts : Enumerable.Reverse(options.Hosts).ToList();
                 foreach (var scenario in scenarios)
@@ -65,7 +70,7 @@ internal static class BenchRunner
                         await file.WriteLineAsync(record.ToLine()).ConfigureAwait(false);
                         Console.WriteLine($"[{run}/{options.Runs}] {scenario.Name,-17}{build.Label,-12}"
                             + (record.Error is null ? string.Join(" ", record.Metrics.Select(m => FormattableString.Invariant($"{m.Key}={m.Value:G6}"))) : "FAILED: " + record.Error)
-                            + FormattableString.Invariant($"   (bg cpu {record.BackgroundCpuPercent:F1}%{(record.BackgroundTop?.Length > 0 ? " " + record.BackgroundTop : "")})"));
+                            + FormattableString.Invariant($"   (bg cpu {(record.BackgroundCpuPercent is { } bg ? bg.ToString("F1", System.Globalization.CultureInfo.InvariantCulture) + "%" : "n/a")}{(record.BackgroundTop?.Length > 0 ? " " + record.BackgroundTop : "")})"));
                     }
             }
         }
@@ -104,6 +109,8 @@ internal static class BenchRunner
         {
             var metrics = await scenario.Run(context).ConfigureAwait(false);
             record.Metrics = metrics.Where(m => double.IsFinite(m.Value)).ToDictionary(m => m.Key, m => Math.Round(m.Value, 3));
+            // A load run that failed (BenchStats.FailureReason) is a failure, not numbers for the medians.
+            record.Error = BenchStats.FailureReason(record.Metrics);
         }
         catch (Exception) when (ct.IsCancellationRequested)
         {

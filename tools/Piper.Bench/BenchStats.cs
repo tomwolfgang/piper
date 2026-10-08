@@ -4,7 +4,37 @@ namespace Piper.Bench;
 /// this file and check it without starting a proxy.</summary>
 internal static class BenchStats
 {
-    public static double Median(IReadOnlyList<double> values) => Percentile(values, 0.5);
+    /// <summary>The median of the runs of one metric: the middle value, or the mean of the two middle
+    /// ones when the count is even (a failed run leaves 4 or 6). NaN when there are none. Latency
+    /// percentiles stay nearest-rank (<see cref="Percentile"/>): they must be a measured value.</summary>
+    public static double Median(IReadOnlyList<double> values)
+    {
+        if (values.Count == 0) return double.NaN;
+        var sorted = values.OrderBy(v => v).ToArray();
+        var middle = sorted.Length / 2;
+        // Halved before they are added, so two values near double.MaxValue do not overflow.
+        return sorted.Length % 2 == 1 ? sorted[middle] : sorted[middle - 1] / 2 + sorted[middle] / 2;
+    }
+
+    /// <summary>The fewest runs per build for which a "better" or "worse" verdict is given. Complete
+    /// separation of the ranges happens by chance 2/C(n+m,n) of the time: 33% at 2 runs each, 10% at 3,
+    /// 2.9% at 4.</summary>
+    public const int MinRunsForVerdict = 4;
+
+    /// <summary>The share of a load run's attempts (requests + errors + timeouts) that may fail.</summary>
+    public const int MaxFailedPercent = 1;
+
+    /// <summary>Why a load run (one with <c>rps</c>) failed, or null: no success, nothing attempted, a bad count or too many failures.</summary>
+    public static string? FailureReason(IReadOnlyDictionary<string, double> metrics)
+    {
+        if (!metrics.TryGetValue("rps", out var rps)) return null;
+        var failed = metrics.GetValueOrDefault("errors") + metrics.GetValueOrDefault("timeouts");
+        if (!(rps > 0)) return "no request succeeded";
+        if (!metrics.TryGetValue("requests", out var succeeded)) return null;
+        var attempted = succeeded + failed;
+        if (!(succeeded >= 0 && failed >= 0 && attempted > 0)) return "the request counts are not usable";
+        return failed * 100 > attempted * MaxFailedPercent ? FormattableString.Invariant($"{failed:F0} of {attempted:F0} requests failed") : null;
+    }
 
     /// <summary>Nearest-rank percentile of <paramref name="values"/>; NaN when there are none.</summary>
     public static double Percentile(IReadOnlyList<double> values, double quantile)

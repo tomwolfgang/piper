@@ -4,6 +4,8 @@ using Piper.Bench;
 
 if (args.Length > 0 && args[0] == "host") return await HostMode.RunAsync(args[1..]);
 
+Console.OutputEncoding = System.Text.Encoding.UTF8; // a label or path with non-ASCII characters prints as written
+
 if (args.Contains("--help") || args.Contains("-h"))
 {
     Console.WriteLine(BenchOptions.Usage);
@@ -34,7 +36,8 @@ try
 
     if (options.Compare is { } pair)
     {
-        Console.Write(BenchReport.Compare(BenchReport.Load(pair.A, out var skippedA), BenchReport.Load(pair.B, out var skippedB), pair.A, pair.B));
+        Console.Write(BenchReport.Compare(BenchReport.Load(pair.A, out var skippedA), BenchReport.Load(pair.B, out var skippedB), pair.A, pair.B,
+            BenchReport.LoadEnv(pair.A), BenchReport.LoadEnv(pair.B)));
         if (skippedA + skippedB > 0) Console.Error.WriteLine($"{skippedA + skippedB} unreadable line(s) skipped.");
         return 0;
     }
