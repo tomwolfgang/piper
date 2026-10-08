@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Net;
+using System.Net.NetworkInformation;
 using System.Net.Sockets;
 
 namespace Piper.Bench;
@@ -48,14 +49,20 @@ internal static class TlsScenarios
 
         var first = new List<double>();
         var repeat = new List<double>();
+        var chain = new List<double>();
         for (var i = 1; i <= Hosts; i++)
         {
-            first.Add(await TimedGetAsync(client, Url($"h{i}"), c.Token).ConfigureAwait(false));
+            // The client's own certificate check (~4 ms) runs inside the handshake: not the proxy's, so reported apart.
+            var checking = c.ValidationMilliseconds;
+            var elapsed = await TimedGetAsync(client, Url($"h{i}"), c.Token).ConfigureAwait(false);
+            chain.Add(c.ValidationMilliseconds - checking);
+            first.Add(elapsed - chain[^1]);
             repeat.Add(await TimedGetAsync(client, Url($"h{i}"), c.Token).ConfigureAwait(false));
         }
 
         return new()
         {
+            ["harness_chain_p50_ms"] = BenchStats.Percentile(chain, 0.5),
             ["first_p50_ms"] = BenchStats.Percentile(first, 0.5),
             ["first_max_ms"] = first.Max(),
             ["repeat_p50_ms"] = BenchStats.Percentile(repeat, 0.5),
@@ -65,6 +72,7 @@ internal static class TlsScenarios
 
     private static async Task<Dictionary<string, double>> Http2ParallelAsync(ScenarioContext c)
     {
+        await WaitForPortsAsync(c.Origin.TlsPort, c.Token).ConfigureAwait(false);
         await c.StartHostAsync(HostArguments()).ConfigureAwait(false);
         var url = $"https://h2.bench.test:{c.Origin.TlsPort}/small";
         HttpClient NewClient() => c.NewTlsClient(100, http2: true);
@@ -76,11 +84,30 @@ internal static class TlsScenarios
             throw new HttpRequestException("The response was not HTTP/2."); // counted as an error, not hidden
         }
 
-        // Bounded by request count as well as time: if upstream connections are not reused, every request
-        // takes a loopback port that stays in TIME_WAIT for minutes, and the whole machine (not just this
-        // tool) would run out of them. 3,000 requests keep that to a fraction of the range.
-        await LoadGenerator.RunAsync(c, 100, TimeSpan.Zero, TimeSpan.FromSeconds(3), SendAsync, NewClient, maxRequests: 300).ConfigureAwait(false);
-        return await LoadGenerator.RunAsync(c, 100, TimeSpan.Zero, c.Options.Duration, SendAsync, NewClient, maxRequests: 3000).ConfigureAwait(false);
+        // Bounded by request count as well as time, and paced between runs (WaitForPortsAsync).
+        await LoadGenerator.RunAsync(c, 100, TimeSpan.Zero, TimeSpan.FromSeconds(3), SendAsync, NewClient, maxRequests: 200).ConfigureAwait(false);
+        return await LoadGenerator.RunAsync(c, 100, TimeSpan.Zero, c.Options.Duration, SendAsync, NewClient, maxRequests: 2000).ConfigureAwait(false);
+    }
+
+    // Closed upstream connections sit in TIME_WAIT for ~2 minutes, each holding a dynamic port: two runs of 3,300
+    // requests left 6,720 and runs 3 to 5 failed 272, 3000 and 2999 of theirs. Wait for earlier runs' sockets to the
+    // origin to expire, or fail with a reason instead of recording a run the exhaustion ruined.
+    private const int MaxTimeWait = 2_500;
+    private static readonly TimeSpan TimeWaitPatience = TimeSpan.FromSeconds(150);
+
+    private static async Task WaitForPortsAsync(int originPort, CancellationToken ct)
+    {
+        var began = Stopwatch.GetTimestamp();
+        for (var announced = false; ; announced = true)
+        {
+            var waiting = IPGlobalProperties.GetIPGlobalProperties().GetActiveTcpConnections()
+                .Count(t => t.State == TcpState.TimeWait && (t.LocalEndPoint.Port == originPort || t.RemoteEndPoint.Port == originPort));
+            if (waiting <= MaxTimeWait) return;
+            if (Stopwatch.GetElapsedTime(began) > TimeWaitPatience)
+                throw new InvalidOperationException($"{waiting} sockets to the origin are still in TIME_WAIT after {TimeWaitPatience.TotalSeconds:F0} s (limit {MaxTimeWait}); the run would exhaust the machine's ports and is not measured.");
+            if (!announced) Console.WriteLine($"  h2_c100: waiting for {waiting} sockets in TIME_WAIT to expire (earlier runs used the ports)...");
+            await Task.Delay(TimeSpan.FromSeconds(5), ct).ConfigureAwait(false);
+        }
     }
 
     /// <summary>Reads <c>/big?mb=1024</c> through the proxy for at most max(--duration, 10 s) and reports the
@@ -118,6 +145,9 @@ internal static class TlsScenarios
         }
 
         if (began == 0) throw new InvalidOperationException("No response arrived within the window.");
+        // The body ended before the window did: all of it must have arrived, or a short answer would pass as a fast one.
+        const long expected = 1024L * 1048576;
+        if (!window.IsCancellationRequested && received < expected) throw new InvalidOperationException($"The response ended after {received} of {expected} bytes.");
         var seconds = Stopwatch.GetElapsedTime(began).TotalSeconds;
         var after = await host.StatsAsync(c.Token).ConfigureAwait(false);
         return new()

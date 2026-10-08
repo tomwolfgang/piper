@@ -1,4 +1,6 @@
+using System.Diagnostics;
 using System.Net;
+using System.Net.Security;
 using System.Net.Sockets;
 using System.Security.Cryptography.X509Certificates;
 
@@ -9,7 +11,7 @@ namespace Piper.Bench;
 internal sealed class ScenarioContext(BenchOptions options, Origin origin, string hostPath, string caDirectory, CancellationToken token) : IAsyncDisposable
 {
     private HostClient? _host;
-    private long _clientConnections;
+    private long _clientConnections, _validationTicks;
 
     public BenchOptions Options { get; } = options;
     public Origin Origin { get; } = origin;
@@ -20,6 +22,9 @@ internal sealed class ScenarioContext(BenchOptions options, Origin origin, strin
     public HostClient Host => _host ?? throw new InvalidOperationException("The proxy host has not been started.");
 
     public long ClientConnections => Interlocked.Read(ref _clientConnections);
+
+    /// <summary>Total time the client's own certificate check has taken so far.</summary>
+    public double ValidationMilliseconds => Stopwatch.GetElapsedTime(0, Interlocked.Read(ref _validationTicks)).TotalMilliseconds;
 
     public async Task<HostClient> StartHostAsync(params string[] hostArguments) =>
         _host ??= await HostClient.StartAsync(hostPath, caDirectory, Token, hostArguments).ConfigureAwait(false);
@@ -43,7 +48,14 @@ internal sealed class ScenarioContext(BenchOptions options, Origin origin, strin
     {
         var handler = NewHandler(maxConnections);
         var root = X509Certificate2.CreateFromPem(File.ReadAllText(Path.Combine(caDirectory, "Piper-Root.cer")));
-        handler.SslOptions.RemoteCertificateValidationCallback = (_, certificate, _, _) => certificate is not null && ChainsTo(root, certificate);
+        // Only chain errors are forgiven (the throwaway CA is no trusted root): a name mismatch or a missing certificate
+        // fails, so a proxy that reuses or mints the wrong leaf is noticed. The time spent here is kept apart.
+        handler.SslOptions.RemoteCertificateValidationCallback = (_, certificate, _, errors) =>
+        {
+            var began = Stopwatch.GetTimestamp();
+            try { return certificate is not null && (errors & ~SslPolicyErrors.RemoteCertificateChainErrors) == 0 && ChainsTo(root, certificate); }
+            finally { Interlocked.Add(ref _validationTicks, Stopwatch.GetTimestamp() - began); }
+        };
         handler.EnableMultipleHttp2Connections = !http2;
         var client = new HttpClient(handler, disposeHandler: true) { Timeout = TimeSpan.FromSeconds(30) };
         if (http2)
@@ -60,6 +72,7 @@ internal sealed class ScenarioContext(BenchOptions options, Origin origin, strin
         chain.ChainPolicy.TrustMode = X509ChainTrustMode.CustomRootTrust;
         chain.ChainPolicy.CustomTrustStore.Add(root);
         chain.ChainPolicy.RevocationMode = X509RevocationMode.NoCheck;
+        chain.ChainPolicy.DisableCertificateDownloads = true;
         using var certificate = new X509Certificate2(leaf);
         return chain.Build(certificate) && chain.ChainElements[^1].Certificate.Thumbprint == root.Thumbprint;
     }
