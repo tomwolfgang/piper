@@ -8,8 +8,6 @@ using Piper.Core.Http;
 using Piper.Core.Sessions;
 using ShimmyMySherbet.WinForms.ZoomableImgBox;
 using SixLabors.ImageSharp;
-using SixLabors.ImageSharp.Formats;
-using SixLabors.ImageSharp.Memory;
 using ImageSharpImage = SixLabors.ImageSharp.Image;
 
 namespace Piper.App.Controls;
@@ -671,7 +669,7 @@ public sealed class MessageInspector : UserControl
                 return;
             }
 
-            using var image = ImageSharpImage.Load(ImageDecoding, body);
+            using var image = ImageSharpImage.Load(ImageDecoding.Options, body);
             switch (format)
             {
                 case "jpg" or "jpeg": image.SaveAsJpeg(dialog.FileName); break;
@@ -1071,21 +1069,6 @@ public sealed class MessageInspector : UserControl
         _ => Strings.Units.Megabytes(size / (1024.0 * 1024)),
     };
 
-    // SkipMetadata stops the JPEG and WebP decoders from keeping an ICC profile, EXIF or XMP, but the
-    // PNG and BMP decoders in 3.1.12 keep a profile regardless (checked against the library), which
-    // is why ImageGuard refuses profiles itself. One frame is all the viewer shows.
-    // The allocator limit bounds what a header the guard could not check (a GIF frame descriptor,
-    // say) may ask for. The configuration is private to these calls, not the process default.
-    private static readonly DecoderOptions ImageDecoding = new()
-    {
-        SkipMetadata = true,
-        MaxFrames = 1,
-        Configuration = new Configuration
-        {
-            MemoryAllocator = MemoryAllocator.Create(new MemoryAllocatorOptions { AllocationLimitMegabytes = 512 }),
-        },
-    };
-
     private void RenderImage(HttpMessage message, bool force = false)
     {
         if (_imageView is null || _imageStatus is null) return;
@@ -1114,7 +1097,7 @@ public sealed class MessageInspector : UserControl
                     return;
             }
 
-            using var decoded = ImageSharpImage.Load(ImageDecoding, body);
+            using var decoded = ImageSharpImage.Load(ImageDecoding.Options, body);
             using var png = new MemoryStream();
             decoded.SaveAsPng(png);
             png.Position = 0;
