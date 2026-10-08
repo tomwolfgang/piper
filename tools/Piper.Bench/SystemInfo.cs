@@ -87,8 +87,8 @@ internal static class SystemInfo
         ["power_plan"] = PowerPlan(),
     };
 
-    // The commit of the checkout the driver was built in, from .git/HEAD and the ref it names (a
-    // worktree's .git is a file that points at the real folder). "unknown" outside a checkout.
+    // The commit of the checkout the driver was built in, from .git/HEAD and its ref (a
+    // worktree's .git is a file pointing at the real folder); "unknown" outside a checkout.
     private static string GitCommit()
     {
         try
@@ -116,14 +116,14 @@ internal static class SystemInfo
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
         {
-            // An unreadable .git folder: the commit is simply not recorded.
+            // An unreadable .git folder: no commit recorded.
         }
         return "unknown";
 
         static bool IsSha(string text) => text.Length >= 40 && text[..40].All(Uri.IsHexDigit);
     }
 
-    // A file of at most 4 KB, trimmed; null when it is missing or larger (a hostile .git is not read).
+    // A file of at most 4 KB, trimmed; null when missing or larger.
     private static string? ReadSmall(string path)
     {
         var info = new FileInfo(path);
@@ -143,7 +143,7 @@ internal static class SystemInfo
         _ => "custom",
     };
 
-    // One read-only string value of HKEY_LOCAL_MACHINE: nothing is created or changed.
+    // One read-only HKEY_LOCAL_MACHINE string value.
     private static string? ReadMachineValue(string subKey, string name)
     {
         if (!OperatingSystem.IsWindows()) return null;

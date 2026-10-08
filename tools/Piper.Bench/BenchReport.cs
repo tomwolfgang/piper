@@ -27,7 +27,6 @@ internal static class BenchReport
             if (record is null) { skipped++; continue; }
             if (record.Kind != "run") continue;
             (record.Scenario, record.Label) = (Clean(record.Scenario), Clean(record.Label));
-            if (record.Error is not null) record.Error = Clean(record.Error);
             var metrics = new Dictionary<string, double>();
             foreach (var (name, value) in record.Metrics ?? [])
                 if (double.IsFinite(value)) metrics[Clean(name)] = value;
@@ -47,7 +46,7 @@ internal static class BenchReport
         return hash > 0 ? (spec[..hash], spec[(hash + 1)..]) : (spec, null);
     }
 
-    /// <summary>The header lines of a results file. A field the file lacks (schema 1 has no build line)
+    /// <summary>The header lines of a results file. A field it lacks (schema 1 has no build line)
     /// is empty or zero and never compared.</summary>
     internal sealed record BenchEnv(string Machine, string[] Scenarios, int Runs, double DurationSeconds, string Cpu, string Configuration, string PowerPlan);
 
@@ -94,7 +93,7 @@ internal static class BenchReport
         static string Text(JsonElement root, string name) => root.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String ? Clean(value.GetString()) : "";
     }
 
-    /// <summary>Why a comparison of two files may mislead: they differ in machine, CPU, scenarios,
+    /// <summary>Why a comparison may mislead: the files differ in machine, CPU, scenarios,
     /// duration, runs, build configuration or power plan.</summary>
     public static List<string> EnvWarnings(BenchEnv? a, BenchEnv? b)
     {
@@ -155,7 +154,7 @@ internal static class BenchReport
         return map;
     }
 
-    // A value from a hostile file can be 1e308: past a trillion the cell switches to scientific notation.
+    // 1e308 from a hostile file: past a trillion the cell uses scientific notation.
     private static string Num(double v) =>
         double.IsNaN(v) ? "n/a" : Math.Abs(v) >= 1e12 ? v.ToString("0.##E+0", CultureInfo.InvariantCulture)
         : Math.Abs(v) >= 100 ? v.ToString("F0", CultureInfo.InvariantCulture)
@@ -197,7 +196,7 @@ internal static class BenchReport
         var left = Collect(a);
         var right = Collect(b);
         var text = new StringBuilder();
-        // Callers that pass no header (the tests of the table itself) get no environment check.
+        // No header, no environment check.
         if (envA is not null || envB is not null)
             foreach (var warning in EnvWarnings(envA, envB)) text.AppendLine("WARNING: " + warning);
         text.AppendLine($"A = {Clean(nameA)}   B = {Clean(nameB)}   delta = (B - A) / A on the medians; P(B>A) = chance a B run beats an A run");
@@ -220,7 +219,7 @@ internal static class BenchReport
             text.AppendLine($"{key.Scenario,-20}{key.Metric,-20}{Cell(x),-28}{Cell(y),-28}{deltaText,9}{BenchStats.ProbabilityGreater(y, x),8:F2}  {verdict} (n={x.Count}/{y.Count})");
         }
         text.AppendLine("Rows that are identical in every run of both builds are left out.");
-        // A metric one build never produced (an older file, a scenario that failed in every run) has no row above.
+        // A metric one build never produced has no row above.
         text.AppendLine($"Only in A: {Names(left.Keys.Except(right.Keys).OrderBy(k => k.Scenario, StringComparer.Ordinal).ThenBy(k => k.Metric, StringComparer.Ordinal).Select(k => k.Scenario + "/" + k.Metric))}");
         text.AppendLine($"Only in B: {Names(right.Keys.Except(left.Keys).OrderBy(k => k.Scenario, StringComparer.Ordinal).ThenBy(k => k.Metric, StringComparer.Ordinal).Select(k => k.Scenario + "/" + k.Metric))}");
         text.Append(Failures(a)).Append(Failures(b));

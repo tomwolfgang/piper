@@ -24,8 +24,6 @@ internal static class BenchRunner
 #if DEBUG
         Console.Error.WriteLine("WARNING: this driver is a Debug build: its numbers say little about Release. Run it with -c Release.");
 #endif
-        // A hard kill (or a power cut) leaves the folder above behind, and it holds a throwaway root key.
-        BenchTemp.DeleteStaleFolders(Path.GetTempPath(), TimeSpan.FromDays(1));
         var records = new List<BenchRecord>();
         var failures = 0;
 
@@ -58,7 +56,7 @@ internal static class BenchRunner
 
             for (var run = 1; run <= options.Runs; run++)
             {
-                // Once, before the first result: what built and ran the driver (commit, configuration, runtime, GC, CPU, power plan).
+                // Once, before the first result: what built and ran the driver.
                 if (run == 1) await file.WriteLineAsync(JsonSerializer.Serialize(SystemInfo.Provenance())).ConfigureAwait(false);
                 // A,B then B,A: a drift over the session (thermal, background tasks) does not favour one build.
                 var order = run % 2 == 1 ? options.Hosts : Enumerable.Reverse(options.Hosts).ToList();
@@ -111,8 +109,7 @@ internal static class BenchRunner
         {
             var metrics = await scenario.Run(context).ConfigureAwait(false);
             record.Metrics = metrics.Where(m => double.IsFinite(m.Value)).ToDictionary(m => m.Key, m => Math.Round(m.Value, 3));
-            // A load run in which nothing succeeded, or too many requests failed (BenchStats.FailureReason), is
-            // a failure, not a row of numbers that pollutes the medians, and not an exit code of 0.
+            // A load run that failed (BenchStats.FailureReason) is a failure, not numbers for the medians.
             record.Error = BenchStats.FailureReason(record.Metrics);
         }
         catch (Exception) when (ct.IsCancellationRequested)

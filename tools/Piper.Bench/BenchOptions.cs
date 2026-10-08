@@ -12,9 +12,8 @@ internal sealed class BenchOptions
           piper-bench [options]                    run the scenarios, write one JSON line per run, print a summary
           piper-bench --list                       list the scenarios
           piper-bench --summary results.jsonl      print median [min..max] per build
-          piper-bench --compare A.jsonl B.jsonl    print A against B (either may be file.jsonl#label); warns when the
-                                                   files differ in machine, scenarios, duration or runs, and lists
-                                                   the metrics only one of them has
+          piper-bench --compare A.jsonl B.jsonl    print A against B (either may be file.jsonl#label); warns when
+                                                   the files were not recorded alike
 
         options:
           --scenario a,b,...   scenarios to run (default: all)

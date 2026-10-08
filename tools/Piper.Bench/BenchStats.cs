@@ -21,21 +21,19 @@ internal static class BenchStats
     /// 2.9% at 4.</summary>
     public const int MinRunsForVerdict = 4;
 
-    /// <summary>The share of a load run's attempts (<c>requests</c> + <c>errors</c> + <c>timeouts</c>) that may
-    /// fail: beyond it the proxy was refusing or stalling and per-request CPU and memory divide by too few successes.</summary>
+    /// <summary>The share of a load run's attempts (requests + errors + timeouts) that may fail.</summary>
     public const int MaxFailedPercent = 1;
 
-    /// <summary>Why a load run (one with <c>rps</c>) failed, or null: no success (rate zero or NaN), nothing
-    /// attempted, a count that is not a number, or over <see cref="MaxFailedPercent"/> percent failed.</summary>
+    /// <summary>Why a load run (one with <c>rps</c>) failed, or null: no success, nothing attempted, a bad count or too many failures.</summary>
     public static string? FailureReason(IReadOnlyDictionary<string, double> metrics)
     {
         if (!metrics.TryGetValue("rps", out var rps)) return null;
         var failed = metrics.GetValueOrDefault("errors") + metrics.GetValueOrDefault("timeouts");
-        if (!(rps > 0)) return FormattableString.Invariant($"no request succeeded ({failed:F0} errors and timeouts)");
-        if (!metrics.TryGetValue("requests", out var succeeded)) return null; // not counted by this scenario or file
+        if (!(rps > 0)) return "no request succeeded";
+        if (!metrics.TryGetValue("requests", out var succeeded)) return null;
         var attempted = succeeded + failed;
         if (!(succeeded >= 0 && failed >= 0 && attempted > 0)) return "the request counts are not usable";
-        return failed * 100 > attempted * MaxFailedPercent ? FormattableString.Invariant($"{failed:F0} of {attempted:F0} requests failed (over {MaxFailedPercent}%)") : null;
+        return failed * 100 > attempted * MaxFailedPercent ? FormattableString.Invariant($"{failed:F0} of {attempted:F0} requests failed") : null;
     }
 
     /// <summary>Nearest-rank percentile of <paramref name="values"/>; NaN when there are none.</summary>
