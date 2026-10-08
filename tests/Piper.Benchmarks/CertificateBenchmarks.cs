@@ -23,6 +23,15 @@ public class CertificateBenchmarks
     [GlobalSetup]
     public void Setup()
     {
+        // A run that was killed leaves its folder (a throwaway root key, Piper-Root.pfx): remove the ones from earlier days.
+        foreach (var old in Directory.EnumerateDirectories(Path.GetTempPath(), "piper-benchmarks-????????????????????????????????"))
+        {
+            try { if (DateTime.UtcNow - Directory.GetCreationTimeUtc(old) > TimeSpan.FromDays(1)) Directory.Delete(old, recursive: true); }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                // In use by another run: left for the next one.
+            }
+        }
         _directory = Path.Combine(Path.GetTempPath(), "piper-benchmarks-" + Guid.NewGuid().ToString("N"));
         _ca = CertificateAuthority.LoadOrCreate(_directory);
     }
@@ -49,8 +58,15 @@ public class CertificateBenchmarks
     [Benchmark]
     public void RsaFreshKey() => Mint(NewHost(), RSA.Create(2048), ownsKey: true);
 
-    /// <summary>The same extensions, signature by the root and PFX round trip as <c>CertificateAuthority.MintLeaf</c>.</summary>
+    // A fresh key is released even when minting throws.
     private void Mint(string host, AsymmetricAlgorithm key, bool ownsKey)
+    {
+        try { MintCore(host, key); }
+        finally { if (ownsKey) key.Dispose(); }
+    }
+
+    /// <summary>The same extensions, signature by the root and PFX round trip as <c>CertificateAuthority.MintLeaf</c>.</summary>
+    private void MintCore(string host, AsymmetricAlgorithm key)
     {
         var request = key switch
         {
@@ -79,6 +95,5 @@ public class CertificateBenchmarks
             _ => throw new ArgumentException("Unsupported key type.", nameof(key)),
         };
         using var loaded = X509CertificateLoader.LoadPkcs12(withKey.Export(X509ContentType.Pfx, "bench"), "bench", X509KeyStorageFlags.Exportable);
-        if (ownsKey) key.Dispose();
     }
 }
