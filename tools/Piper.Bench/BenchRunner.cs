@@ -21,6 +21,11 @@ internal static class BenchRunner
         // the end, never the user's real one, never added to any trust store.
         var caDirectory = Path.Combine(Path.GetTempPath(), "piper-bench-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(caDirectory);
+#if DEBUG
+        Console.Error.WriteLine("WARNING: this driver is a Debug build: its numbers say little about Release. Run it with -c Release.");
+#endif
+        // A hard kill (or a power cut) leaves the folder above behind, and it holds a throwaway root key.
+        BenchTemp.DeleteStaleFolders(Path.GetTempPath(), TimeSpan.FromDays(1));
         var records = new List<BenchRecord>();
         var failures = 0;
 
@@ -51,6 +56,9 @@ internal static class BenchRunner
                 }
             }
 
+            // What built and ran the driver (commit, configuration, runtime, GC, CPU, power plan), one line.
+            await file.WriteLineAsync(JsonSerializer.Serialize(SystemInfo.Provenance())).ConfigureAwait(false);
+
             for (var run = 1; run <= options.Runs; run++)
             {
                 // A,B then B,A: a drift over the session (thermal, background tasks) does not favour one build.
@@ -65,7 +73,7 @@ internal static class BenchRunner
                         await file.WriteLineAsync(record.ToLine()).ConfigureAwait(false);
                         Console.WriteLine($"[{run}/{options.Runs}] {scenario.Name,-17}{build.Label,-12}"
                             + (record.Error is null ? string.Join(" ", record.Metrics.Select(m => FormattableString.Invariant($"{m.Key}={m.Value:G6}"))) : "FAILED: " + record.Error)
-                            + FormattableString.Invariant($"   (bg cpu {record.BackgroundCpuPercent:F1}%{(record.BackgroundTop?.Length > 0 ? " " + record.BackgroundTop : "")})"));
+                            + FormattableString.Invariant($"   (bg cpu {(record.BackgroundCpuPercent is { } bg ? bg.ToString("F1", System.Globalization.CultureInfo.InvariantCulture) + "%" : "n/a")}{(record.BackgroundTop?.Length > 0 ? " " + record.BackgroundTop : "")})"));
                     }
             }
         }
@@ -104,6 +112,9 @@ internal static class BenchRunner
         {
             var metrics = await scenario.Run(context).ConfigureAwait(false);
             record.Metrics = metrics.Where(m => double.IsFinite(m.Value)).ToDictionary(m => m.Key, m => Math.Round(m.Value, 3));
+            // A load run in which nothing succeeded is a failure, not a row of zeros and an exit code of 0.
+            if (BenchStats.NoSuccess(record.Metrics))
+                record.Error = FormattableString.Invariant($"no request succeeded (errors {record.Metrics.GetValueOrDefault("errors")}, timeouts {record.Metrics.GetValueOrDefault("timeouts")})");
         }
         catch (Exception) when (ct.IsCancellationRequested)
         {

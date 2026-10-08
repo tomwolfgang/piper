@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
+using System.Runtime.Versioning;
 
 namespace Piper.Bench;
 
@@ -67,6 +68,97 @@ internal static class SystemInfo
         var found = Process.GetProcessesByName(name);
         foreach (var process in found) process.Dispose();
         return found.Length > 0;
+    }
+
+    /// <summary>The second line of a results file (kind "build"): what built and ran the driver. Read
+    /// from files and two read-only registry values; no process is started; no name, no path.</summary>
+    public static Dictionary<string, string> Provenance() => new()
+    {
+        ["kind"] = "build",
+#if DEBUG
+        ["configuration"] = "Debug",
+#else
+        ["configuration"] = "Release",
+#endif
+        ["git_sha"] = GitCommit(),
+        ["runtime"] = $"{RuntimeInformation.FrameworkDescription} {RuntimeInformation.ProcessArchitecture}",
+        ["gc"] = $"{(System.Runtime.GCSettings.IsServerGC ? "server" : "workstation")}, {(!AppContext.TryGetSwitch("System.GC.Concurrent", out var concurrent) || concurrent ? "concurrent" : "non-concurrent")}",
+        ["cpu"] = Cpu(),
+        ["power_plan"] = PowerPlan(),
+    };
+
+    // The commit of the checkout the driver was built in, from .git/HEAD and the ref it names (a
+    // worktree's .git is a file that points at the real folder). "unknown" outside a checkout.
+    private static string GitCommit()
+    {
+        try
+        {
+            for (var folder = new DirectoryInfo(AppContext.BaseDirectory); folder is not null; folder = folder.Parent)
+            {
+                var dot = Path.Combine(folder.FullName, ".git");
+                var gitDir = Directory.Exists(dot) ? dot
+                    : ReadSmall(dot) is { } pointer && pointer.StartsWith("gitdir:", StringComparison.Ordinal) ? Path.GetFullPath(Path.Combine(folder.FullName, pointer[7..].Trim())) : null;
+                if (gitDir is null) continue;
+                var head = ReadSmall(Path.Combine(gitDir, "HEAD"));
+                if (head is null) return "unknown";
+                if (!head.StartsWith("ref: refs/", StringComparison.Ordinal)) return IsSha(head) ? head[..12] : "unknown";
+                var reference = head[5..].Trim();
+                if (reference.Contains("..", StringComparison.Ordinal)) return "unknown";
+                var common = ReadSmall(Path.Combine(gitDir, "commondir")) is { } relative ? Path.GetFullPath(Path.Combine(gitDir, relative)) : gitDir;
+                var loose = ReadSmall(Path.Combine(common, reference.Replace('/', Path.DirectorySeparatorChar)));
+                if (loose is not null) return IsSha(loose) ? loose[..12] : "unknown";
+                var packed = Path.Combine(common, "packed-refs");
+                if (File.Exists(packed) && new FileInfo(packed).Length <= (16 << 20))
+                    foreach (var line in File.ReadLines(packed).Take(200_000))
+                        if (line.Length > 41 && line[40] == ' ' && line.AsSpan(41).SequenceEqual(reference) && IsSha(line[..40])) return line[..12];
+                return "unknown";
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
+        {
+            // An unreadable .git folder: the commit is simply not recorded.
+        }
+        return "unknown";
+
+        static bool IsSha(string text) => text.Length >= 40 && text[..40].All(Uri.IsHexDigit);
+    }
+
+    // A file of at most 4 KB, trimmed; null when it is missing or larger (a hostile .git is not read).
+    private static string? ReadSmall(string path)
+    {
+        var info = new FileInfo(path);
+        return info.Exists && info.Length <= 4096 ? File.ReadAllText(path).Trim() : null;
+    }
+
+    private static string Cpu() => ReadMachineValue(@"HARDWARE\DESCRIPTION\System\CentralProcessor\0", "ProcessorNameString") is { Length: > 0 } name
+        ? string.Join(' ', name.Split(' ', StringSplitOptions.RemoveEmptyEntries)) : "unknown";
+
+    private static string PowerPlan() => ReadMachineValue(@"SYSTEM\CurrentControlSet\Control\Power\User\PowerSchemes", "ActivePowerScheme") switch
+    {
+        null or "" => "unknown",
+        "381b4222-f694-41f0-9685-ff5bb260df2e" => "balanced",
+        "8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c" => "high performance",
+        "a1841308-3541-4fab-bc81-f71556f20b4a" => "power saver",
+        "e9a42b02-d5df-448d-aa00-03f14749eb61" => "ultimate performance",
+        _ => "custom",
+    };
+
+    // One read-only string value of HKEY_LOCAL_MACHINE: nothing is created or changed.
+    private static string? ReadMachineValue(string subKey, string name)
+    {
+        if (!OperatingSystem.IsWindows()) return null;
+        try { return Read(subKey, name); }
+        catch (Exception ex) when (ex is System.Security.SecurityException or UnauthorizedAccessException or IOException)
+        {
+            return null;
+        }
+
+        [SupportedOSPlatform("windows")]
+        static string? Read(string subKey, string name)
+        {
+            using var key = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(subKey);
+            return (key?.GetValue(name) as string)?.Trim();
+        }
     }
 
     public static string Describe()
