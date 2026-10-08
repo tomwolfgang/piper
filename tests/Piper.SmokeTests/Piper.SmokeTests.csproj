@@ -28,6 +28,8 @@
     <Compile Include="..\..\tools\Piper.Bench\BenchStats.cs" Link="Bench\BenchStats.cs" />
     <Compile Include="..\..\tools\Piper.Bench\BenchRecord.cs" Link="Bench\BenchRecord.cs" />
     <Compile Include="..\..\tools\Piper.Bench\BenchReport.cs" Link="Bench\BenchReport.cs" />
+    <Compile Include="..\..\tools\Piper.Bench\BenchOptions.cs" Link="Bench\BenchOptions.cs" />
+    <Compile Include="..\..\tools\Piper.Bench\BenchHygiene.cs" Link="Bench\BenchHygiene.cs" />
   </ItemGroup>
 
 </Project>
