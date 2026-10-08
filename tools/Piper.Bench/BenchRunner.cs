@@ -17,6 +17,17 @@ internal static class BenchRunner
             ? Scenarios.All.ToList()
             : Scenarios.All.Where(s => options.Scenarios.Contains(s.Name)).ToList();
         var outPath = options.Out ?? $"piper-bench-{DateTime.UtcNow:yyyyMMdd-HHmmss}.jsonl";
+        // Fail before anything starts, and never overwrite: the file may be the only copy of a baseline.
+        if (File.Exists(outPath))
+        {
+            Console.Error.WriteLine($"{outPath} already exists and is not overwritten; choose another --out or delete it.");
+            return 2;
+        }
+        if (BenchHygiene.CheckOut(outPath) is { } unusable)
+        {
+            Console.Error.WriteLine(unusable);
+            return 2;
+        }
         // One certificate authority folder for every host process: in the temp folder, deleted at
         // the end, never the user's real one, never added to any trust store.
         var caDirectory = Path.Combine(Path.GetTempPath(), "piper-bench-" + Guid.NewGuid().ToString("N"));
@@ -27,18 +38,10 @@ internal static class BenchRunner
         try
         {
             await using var origin = await Origin.StartAsync().ConfigureAwait(false);
-            await using var file = new StreamWriter(new FileStream(outPath, FileMode.Create, FileAccess.Write, FileShare.Read)) { AutoFlush = true };
-            var machine = SystemInfo.Describe();
-            Console.WriteLine($"Machine: {machine}");
-            Console.WriteLine($"Results: {Path.GetFullPath(outPath)}");
-            await file.WriteLineAsync(JsonSerializer.Serialize(new
-            {
-                schema = BenchRecord.SchemaVersion, kind = "env", utc = DateTime.UtcNow.ToString("O", CultureInfo.InvariantCulture), machine,
-                hosts = options.Hosts, scenarios = scenarios.Select(s => s.Name), runs = options.Runs, duration_s = options.Duration.TotalSeconds,
-            })).ConfigureAwait(false);
 
             // The first start of a build creates the certificate authority and reads its files from disk.
-            // That is paid here, once, so the startup scenario measures a normal start.
+            // That is paid here, once, so the startup scenario measures a normal start. It also comes
+            // before the results file is created, so a build that cannot start leaves no file behind.
             foreach (var build in options.Hosts)
             {
                 Console.WriteLine($"Priming {build.Label}...");
@@ -50,6 +53,24 @@ internal static class BenchRunner
                     return 2;
                 }
             }
+
+            FileStream results;
+            try { results = BenchHygiene.CreateResultsFile(outPath); }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                Console.Error.WriteLine(ex.Message);
+                return 2;
+            }
+            await using var file = new StreamWriter(results) { AutoFlush = true };
+            var machine = SystemInfo.Describe();
+            Console.WriteLine($"Machine: {machine}");
+            Console.WriteLine($"Results: {Path.GetFullPath(outPath)}");
+            // Hosts are recorded by label and file name only: the folder they sit in names the user.
+            await file.WriteLineAsync(JsonSerializer.Serialize(new
+            {
+                schema = BenchRecord.SchemaVersion, kind = "env", utc = DateTime.UtcNow.ToString("O", CultureInfo.InvariantCulture), machine,
+                hosts = options.Hosts.Select(h => new { label = h.Label, file = Path.GetFileName(h.Path) }), scenarios = scenarios.Select(s => s.Name), runs = options.Runs, duration_s = options.Duration.TotalSeconds,
+            })).ConfigureAwait(false);
 
             for (var run = 1; run <= options.Runs; run++)
             {
@@ -71,7 +92,7 @@ internal static class BenchRunner
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
-            Console.Error.WriteLine("Cancelled; the results so far are in " + outPath);
+            Console.Error.WriteLine(File.Exists(outPath) ? "Cancelled; the results so far are in " + outPath : "Cancelled before any result was written.");
             return 130;
         }
         finally
@@ -115,7 +136,8 @@ internal static class BenchRunner
         catch (Exception ex)
         {
             // Recovery is to record the failure (a timeout is one) and carry on with the next run.
-            record.Error = ex is OperationCanceledException ? $"timed out after {options.Timeout.TotalSeconds:F0} s" : $"{ex.GetType().Name}: {ex.Message}";
+            // The results file is shared: the message goes through the scrub that removes paths.
+            record.Error = ex is OperationCanceledException ? $"timed out after {options.Timeout.TotalSeconds:F0} s" : BenchHygiene.Scrub($"{ex.GetType().Name}: {ex.Message}");
         }
         return record;
     }

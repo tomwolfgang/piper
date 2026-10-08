@@ -11,7 +11,7 @@ if (args.Contains("--help") || args.Contains("-h"))
 }
 
 var self = typeof(HostMode).Assembly.Location;
-if (!BenchOptions.TryParse(args, self, out var options, out var error))
+if (!BenchOptions.TryParse(args, self, name => Scenarios.All.Any(s => s.Name == name), out var options, out var error))
 {
     Console.Error.WriteLine(error);
     return 2;
