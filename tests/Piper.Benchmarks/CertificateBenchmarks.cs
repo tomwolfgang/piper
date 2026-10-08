@@ -23,17 +23,29 @@ public class CertificateBenchmarks
     [GlobalSetup]
     public void Setup()
     {
-        // A run that was killed leaves its folder (a throwaway root key, Piper-Root.pfx): remove the ones from earlier days.
-        foreach (var old in Directory.EnumerateDirectories(Path.GetTempPath(), "piper-benchmarks-????????????????????????????????"))
+        DeleteStaleFolders(Path.GetTempPath(), TimeSpan.FromDays(1));
+        _directory = Path.Combine(Path.GetTempPath(), "piper-benchmarks-" + Guid.NewGuid().ToString("N"));
+        _ca = CertificateAuthority.LoadOrCreate(_directory);
+    }
+
+    /// <summary>A run that was killed leaves its folder (a throwaway root key, Piper-Root.pfx). Removes the ones in
+    /// <paramref name="root"/> older than <paramref name="age"/>: a real folder named exactly
+    /// <c>piper-benchmarks-</c> and 32 lower-case hex digits, never a link (a junction is not followed or deleted).</summary>
+    public static int DeleteStaleFolders(string root, TimeSpan age)
+    {
+        var deleted = 0;
+        foreach (var path in Directory.EnumerateDirectories(root, "piper-benchmarks-*"))
         {
-            try { if (DateTime.UtcNow - Directory.GetCreationTimeUtc(old) > TimeSpan.FromDays(1)) Directory.Delete(old, recursive: true); }
+            var info = new DirectoryInfo(path);
+            if (!System.Text.RegularExpressions.Regex.IsMatch(info.Name, "^piper-benchmarks-[0-9a-f]{32}$") || info.LinkTarget is not null
+                || info.Attributes.HasFlag(FileAttributes.ReparsePoint) || DateTime.UtcNow - info.CreationTimeUtc <= age) continue;
+            try { info.Delete(recursive: true); deleted++; }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
                 // In use by another run: left for the next one.
             }
         }
-        _directory = Path.Combine(Path.GetTempPath(), "piper-benchmarks-" + Guid.NewGuid().ToString("N"));
-        _ca = CertificateAuthority.LoadOrCreate(_directory);
+        return deleted;
     }
 
     [GlobalCleanup]
