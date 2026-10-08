@@ -5,9 +5,6 @@ using Piper.App.Theme;
 using Piper.Core.Http;
 using Piper.Core.Proxy;
 using Piper.Core.Sessions;
-using SixLabors.ImageSharp;
-using SixLabors.ImageSharp.Formats.Webp;
-using SixLabors.ImageSharp.PixelFormats;
 
 // Regression: after Ctrl+X cleared a grid scrolled down to its newest rows, the next rows were drawn
 // partway down the grid or not at all, and stayed that way. The native ListView's scroll origin
@@ -47,7 +44,7 @@ internal static class Program
         Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
 
         RunTextBoxWordSelectionTest();
-        RunImageDecodingTest();
+        ImageDecodingTests.Run(Check);
 
         Run("clearing a scrolled grid shows the next rows from the top", (store, grid, list) =>
         {
@@ -107,38 +104,6 @@ internal static class Program
 
         Console.WriteLine(_failures == 0 ? "UI tests passed." : $"{_failures} UI check(s) failed.");
         return _failures == 0 ? 0 : 1;
-    }
-
-    // Regression guard for the inspector's decoder options: a bare Configuration registers no image
-    // formats, so every image failed to decode while the guard (which never calls the library) still
-    // allowed it. Decodes what ImageSharp itself encodes, through the options the inspector uses.
-    private static void RunImageDecodingTest()
-    {
-        Console.WriteLine("== the inspector's decoder options decode every allowed format");
-        using var source = new Image<Rgba32>(5, 3);
-        (string Name, Action<Image, Stream> Save)[] formats =
-        [
-            ("PNG", (image, stream) => image.SaveAsPng(stream)),
-            ("JPEG", (image, stream) => image.SaveAsJpeg(stream)),
-            ("GIF", (image, stream) => image.SaveAsGif(stream)),
-            ("BMP", (image, stream) => image.SaveAsBmp(stream)),
-            ("lossy WebP", (image, stream) => image.SaveAsWebp(stream, new WebpEncoder { FileFormat = WebpFileFormatType.Lossy })),
-            ("lossless WebP", (image, stream) => image.SaveAsWebp(stream, new WebpEncoder { FileFormat = WebpFileFormatType.Lossless })),
-        ];
-        foreach (var (name, save) in formats)
-        {
-            using var encoded = new MemoryStream();
-            save(source, encoded);
-            try
-            {
-                using var decoded = Image.Load(ImageDecoding.Options, encoded.ToArray());
-                Check(decoded.Width == 5 && decoded.Height == 3, $"{name} decodes to its size (got {decoded.Width} x {decoded.Height})");
-            }
-            catch (Exception ex)
-            {
-                Check(false, $"{name} decodes ({ex.GetType().Name})");
-            }
-        }
     }
 
     private static void RunTextBoxWordSelectionTest()
