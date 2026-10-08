@@ -661,7 +661,15 @@ public sealed class MessageInspector : UserControl
 
         try
         {
-            using var image = ImageSharpImage.Load(_message.DecodedBody);
+            var body = _message.DecodedBody;
+            if (ImageGuard.Check(body) != ImageGuardVerdict.Allowed)
+            {
+                MessageBox.Show(this, Strings.Inspector.ImageBlocked,
+                    Strings.App.Name, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            using var image = ImageSharpImage.Load(ImageDecoding.Options, body);
             switch (format)
             {
                 case "jpg" or "jpeg": image.SaveAsJpeg(dialog.FileName); break;
@@ -1076,7 +1084,20 @@ public sealed class MessageInspector : UserControl
         if (_imageForcePanel is not null) _imageForcePanel.Visible = false;
         try
         {
-            using var decoded = ImageSharpImage.Load(message.DecodedBody);
+            var body = message.DecodedBody;
+            switch (ImageGuard.Check(body))
+            {
+                case ImageGuardVerdict.Allowed:
+                    break;
+                case ImageGuardVerdict.Unrecognised:
+                    _imageStatus.Text = Strings.Inspector.ImageDecodeFailed;
+                    return;
+                default:
+                    _imageStatus.Text = Strings.Inspector.ImageBlocked;
+                    return;
+            }
+
+            using var decoded = ImageSharpImage.Load(ImageDecoding.Options, body);
             using var png = new MemoryStream();
             decoded.SaveAsPng(png);
             png.Position = 0;

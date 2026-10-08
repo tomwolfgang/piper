@@ -518,6 +518,7 @@
     "detectedImage": "Detected image (no Content-Type)",
     "imageDimensions": "{{width, N0}} x {{height, N0}} px\n{{label}}",
     "imageDecodeFailed": "Could not display this response as an image: unsupported or invalid image data.",
+    "imageBlocked": "This image was not decoded. Piper only decodes PNG, JPEG, GIF, BMP and WebP images that have no embedded colour profile and are at most 64 megapixels and 32 MB, because its image library has known security advisories that other images can trigger.",
     "imageFailed": "Could not display this response as an image: {{message}}",
 
     "notAVideoContentType": "Response does not have a video content type.",
