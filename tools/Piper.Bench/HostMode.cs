@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Reflection;
 using Piper.Core.Proxy;
 using Piper.Core.Security;
 using Piper.Core.Sessions;
@@ -16,7 +17,7 @@ namespace Piper.Bench;
 /// driver's client trusts the temporary CA in-process, nothing is installed), origin certificates not
 /// validated (the benchmark origin's is self-signed), and host remapping so many names reach the origin.
 ///
-/// stdout: <c>READY port startup_ms</c>, then one reply per command. stdin: <c>stats</c> | <c>gc</c> (the
+/// stdout: <c>READY port startup_ms configuration</c> (a host built before the last field existed omits it), then one reply per command. stdin: <c>stats</c> | <c>gc</c> (the
 /// same counters after a forced, compacting collection) | <c>capacity N</c> | <c>quit</c>; when stdin
 /// closes the host stops.
 /// </summary>
@@ -51,7 +52,7 @@ internal static class HostMode
         if (remap is not null) options.HostRemapping.Apply(new HostRemappingSettings { Enabled = true, Mappings = remap.Replace(';', '\n') });
         var proxy = new ProxyServer(options, ca, store);
         proxy.Start();
-        Console.WriteLine($"READY {proxy.Endpoint!.Port} {started.Elapsed.TotalMilliseconds:F1}");
+        Console.WriteLine($"READY {proxy.Endpoint!.Port} {started.Elapsed.TotalMilliseconds:F1} {Configuration()}");
         Console.Out.Flush();
 
         string? line;
@@ -76,6 +77,15 @@ internal static class HostMode
 
         await proxy.StopAsync();
         return 0;
+    }
+
+    // The configuration this proxy was built in: Piper.Core's (what is measured), or Debug when this host
+    // program's own build is. A build that carries no configuration attribute reports "unknown".
+    private static string Configuration()
+    {
+        var reported = new[] { typeof(ProxyServer).Assembly, typeof(HostMode).Assembly }
+            .Select(a => a.GetCustomAttribute<AssemblyConfigurationAttribute>()?.Configuration).ToList();
+        return reported.FirstOrDefault(BenchHygiene.IsDebug) ?? reported[0] ?? "unknown";
     }
 
     private static string Stats(string command, SessionStore store)

@@ -48,7 +48,7 @@ internal static class BenchReport
 
     /// <summary>The header lines of a results file. A field it lacks (schema 1 has no build line)
     /// is empty or zero and never compared.</summary>
-    internal sealed record BenchEnv(string Machine, string[] Scenarios, int Runs, double DurationSeconds, string Cpu, string Configuration, string PowerPlan);
+    internal sealed record BenchEnv(string Machine, string[] Scenarios, int Runs, double DurationSeconds, string Cpu, string Configuration, string PowerPlan, string[] DebugHosts);
 
     private const int EnvLinesRead = 20;
 
@@ -78,7 +78,11 @@ internal static class BenchReport
                         root.TryGetProperty("scenarios", out var names) && names.ValueKind == JsonValueKind.Array
                             ? names.EnumerateArray().Where(n => n.ValueKind == JsonValueKind.String).Select(n => Clean(n.GetString())).Take(200).ToArray() : [],
                         root.TryGetProperty("runs", out var runs) && runs.ValueKind == JsonValueKind.Number && runs.TryGetInt32(out var count) ? count : 0,
-                        root.TryGetProperty("duration_s", out var seconds) && seconds.ValueKind == JsonValueKind.Number && seconds.TryGetDouble(out var duration) ? duration : 0, "", "", "");
+                        root.TryGetProperty("duration_s", out var seconds) && seconds.ValueKind == JsonValueKind.Number && seconds.TryGetDouble(out var duration) ? duration : 0, "", "", "",
+                        // Hosts the file says were Debug builds (the field is absent from older files).
+                        root.TryGetProperty("hosts", out var hosts) && hosts.ValueKind == JsonValueKind.Array
+                            ? hosts.EnumerateArray().Where(h => h.ValueKind == JsonValueKind.Object && BenchHygiene.IsDebug(Text(h, "configuration")))
+                                .Select(h => Text(h, "label")).Take(50).ToArray() : []);
                 }
                 else if (kind.ValueKind == JsonValueKind.String && kind.GetString() == "build" && env is not null)
                     env = env with { Cpu = Text(root, "cpu"), Configuration = Text(root, "configuration"), PowerPlan = Text(root, "power_plan") };
@@ -118,6 +122,8 @@ internal static class BenchReport
             warnings.Add(FormattableString.Invariant($"the measured duration differs: A {a.DurationSeconds:G} s, B {b.DurationSeconds:G} s."));
         if (a.Configuration.Equals("Debug", StringComparison.OrdinalIgnoreCase) || b.Configuration.Equals("Debug", StringComparison.OrdinalIgnoreCase))
             warnings.Add("a file was recorded by a Debug build; its numbers say little about Release.");
+        foreach (var (name, hosts) in new[] { ("A", a.DebugHosts), ("B", b.DebugHosts) })
+            if (hosts.Length > 0) warnings.Add($"file {name} measured a Debug build of the proxy ({string.Join(", ", hosts.Take(5))}); its numbers say little about Release.");
         return warnings;
     }
 

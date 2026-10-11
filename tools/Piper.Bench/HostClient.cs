@@ -19,6 +19,9 @@ internal sealed class HostClient : IAsyncDisposable
     /// <summary>The host's own time from process entry to a listening proxy, including the CA load.</summary>
     public double StartMs { get; private set; }
 
+    /// <summary>The build configuration the host reported (<c>Release</c>, <c>Debug</c>), or <c>unknown</c>.</summary>
+    public string Configuration { get; private set; } = "unknown";
+
     /// <summary><paramref name="hostPath"/> is a <c>.dll</c> (run with <c>dotnet</c>) or an executable of
     /// a <c>piper-bench</c> build; the proxy it runs is whatever Piper.Core that build was made with.</summary>
     public static async Task<HostClient> StartAsync(string hostPath, string caDirectory, CancellationToken ct, IEnumerable<string>? hostArguments = null)
@@ -44,6 +47,8 @@ internal sealed class HostClient : IAsyncDisposable
             var ready = (await client.ReadAsync("READY", ct).ConfigureAwait(false)).Split(' ');
             client.Port = int.Parse(ready[1], CultureInfo.InvariantCulture);
             client.StartMs = double.Parse(ready[2], CultureInfo.InvariantCulture);
+            // Hosts built before the configuration was reported say nothing: unknown, not Release.
+            client.Configuration = ready.Length > 3 ? BenchHygiene.ConfigurationToken(ready[3]) : "unknown";
             return client;
         }
         catch
@@ -81,16 +86,21 @@ internal sealed class HostClient : IAsyncDisposable
         throw new IOException($"The proxy host exited while the driver waited for {prefix}.");
     }
 
-    private async Task<string> CommandAsync(string command, string prefix, CancellationToken ct)
+    private async Task<string> CommandAsync(string command, string prefix, CancellationToken ct, Action? beforeSend = null)
     {
+        beforeSend?.Invoke();
         await _process.StandardInput.WriteLineAsync(command.AsMemory(), ct).ConfigureAwait(false);
         await _process.StandardInput.FlushAsync(ct).ConfigureAwait(false);
         return await ReadAsync(prefix, ct).ConfigureAwait(false);
     }
 
-    /// <summary>Process counters of the proxy: ws, peakws, heap, alloc, cpums, threads, sessions, gcpausems.</summary>
-    public async Task<Dictionary<string, long>> StatsAsync(CancellationToken ct = default) =>
-        Parse(await CommandAsync("stats", "STATS", ct).ConfigureAwait(false));
+    /// <summary>Process counters of the proxy: ws, peakws, heap, alloc, cpums, threads, sessions, gcpausems.
+    /// The host takes them when it reads the command, a moment after <paramref name="beforeSend"/> (run just
+    /// before the command is written) and before the reply returns. A caller that counts requests over the same
+    /// interval flips its counter in <paramref name="beforeSend"/>, so the counters and the count share an edge
+    /// to within the host's wake-up time instead of the whole round trip.</summary>
+    public async Task<Dictionary<string, long>> StatsAsync(CancellationToken ct = default, Action? beforeSend = null) =>
+        Parse(await CommandAsync("stats", "STATS", ct, beforeSend).ConfigureAwait(false));
 
     /// <summary>The same counters after a forced, compacting collection (so <c>heap</c> is what is retained).</summary>
     public async Task<Dictionary<string, long>> CollectAsync(CancellationToken ct = default) =>

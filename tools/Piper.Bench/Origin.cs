@@ -45,13 +45,13 @@ internal sealed class Origin : IAsyncDisposable
     // Self-signed and never trusted by anything: the proxy under test is told not to validate it. The key
     // is not ephemeral because SChannel refuses an ephemeral key for a server certificate (the same reason
     // Piper's own leaf certificates are loaded this way); without PersistKeySet Windows deletes the
-    // temporary key container when the certificate is disposed.
+    // temporary key container when the certificate is disposed. Not exportable: the server only signs with it.
     private static X509Certificate2 NewCertificate()
     {
         using var key = RSA.Create(2048);
         var request = new CertificateRequest("CN=piper-bench-origin", key, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
         using var selfSigned = request.CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(1));
-        return X509CertificateLoader.LoadPkcs12(selfSigned.Export(X509ContentType.Pfx, "bench"), "bench", X509KeyStorageFlags.Exportable);
+        return X509CertificateLoader.LoadPkcs12(selfSigned.Export(X509ContentType.Pfx, "bench"), "bench", X509KeyStorageFlags.DefaultKeySet);
     }
 
     public int HttpPort { get; private set; }
@@ -67,29 +67,45 @@ internal sealed class Origin : IAsyncDisposable
 
     public static async Task<Origin> StartAsync()
     {
+        // The certificate holds a key container in the user's profile until it is disposed, so whatever
+        // fails below must dispose it (through the origin once there is one) before the exception goes on.
         var certificate = NewCertificate();
-        var builder = WebApplication.CreateSlimBuilder();
-        builder.Logging.ClearProviders();
-        builder.WebHost.ConfigureKestrel(options =>
+        Origin? origin = null;
+        var started = false;
+        try
         {
-            options.Listen(IPAddress.Loopback, 0, listen => listen.Protocols = HttpProtocols.Http1);
-            options.Listen(IPAddress.Loopback, 0, listen =>
+            var builder = WebApplication.CreateSlimBuilder();
+            builder.Logging.ClearProviders();
+            builder.WebHost.ConfigureKestrel(options =>
             {
-                listen.Protocols = HttpProtocols.Http1AndHttp2;
-                listen.UseHttps(certificate);
+                options.Listen(IPAddress.Loopback, 0, listen => listen.Protocols = HttpProtocols.Http1);
+                options.Listen(IPAddress.Loopback, 0, listen =>
+                {
+                    listen.Protocols = HttpProtocols.Http1AndHttp2;
+                    listen.UseHttps(certificate);
+                });
+                options.Limits.MaxRequestBodySize = null; // the upload scenario sends 64 MB
             });
-            options.Limits.MaxRequestBodySize = null; // the upload scenario sends 64 MB
-        });
-        var origin = new Origin(builder.Build(), certificate);
-        origin._app.Run(origin.HandleAsync);
-        await origin._app.StartAsync().ConfigureAwait(false);
-        var feature = origin._app.Services.GetRequiredService<IServer>().Features.Get<IServerAddressesFeature>();
-        origin.HttpPort = new Uri(feature!.Addresses.First(a => a.StartsWith("http://", StringComparison.Ordinal))).Port;
-        origin.TlsPort = new Uri(feature.Addresses.First(a => a.StartsWith("https://", StringComparison.Ordinal))).Port;
-        origin._tunnels.Start();
-        origin.TunnelPort = ((IPEndPoint)origin._tunnels.LocalEndpoint).Port;
-        _ = Task.Run(() => origin.AcceptTunnelsAsync(origin._stop.Token));
-        return origin;
+            origin = new Origin(builder.Build(), certificate);
+            origin._app.Run(origin.HandleAsync);
+            await origin._app.StartAsync().ConfigureAwait(false);
+            var feature = origin._app.Services.GetRequiredService<IServer>().Features.Get<IServerAddressesFeature>();
+            origin.HttpPort = new Uri(feature!.Addresses.First(a => a.StartsWith("http://", StringComparison.Ordinal))).Port;
+            origin.TlsPort = new Uri(feature.Addresses.First(a => a.StartsWith("https://", StringComparison.Ordinal))).Port;
+            origin._tunnels.Start();
+            origin.TunnelPort = ((IPEndPoint)origin._tunnels.LocalEndpoint).Port;
+            _ = Task.Run(() => origin.AcceptTunnelsAsync(origin._stop.Token));
+            started = true;
+            return origin;
+        }
+        finally
+        {
+            if (!started)
+            {
+                if (origin is not null) await origin.DisposeAsync().ConfigureAwait(false);
+                else certificate.Dispose();
+            }
+        }
     }
 
     private static readonly byte[] Small = Enumerable.Repeat((byte)'x', 256).ToArray();

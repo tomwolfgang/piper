@@ -56,11 +56,22 @@ build and carries `[n<5]` below 5; use 5 or more (15 for large transfers).
 A load run with more than 1% of its requests failed or timed out, or none succeeded, is a failure: it is
 left out of every median and listed in the summary with its error count.
 
+`cpu_per_req_us` and `alloc_per_req_bytes` are the growth of the proxy host's CPU time and allocated bytes
+over the measured window, divided by the requests counted in it. The load keeps running while the host
+answers a `stats` command, so the driver starts and stops counting just before it writes each command and
+the host reads its counters a moment later (its wake-up time). Each edge errs by that time, in opposite
+directions (a few requests too many in the divisor at the start, too few at the end), where earlier results
+also counted the host's whole stats round trip at both edges against requests that were not counted. On the
+machine this was measured on that moved `alloc_per_req_bytes` by about 0.5 to 0.7% (lower) for `get_c16`
+and `cpu_per_req_us` by less than its run-to-run noise. Re-record both builds before comparing these two
+metrics with a results file made before the change.
+
 ## Results files
 
 `--out` names a new file (default `piper-bench-<UTC time>.jsonl`); an existing file is never overwritten, and a
 device name or unwritable folder is refused before any host starts. Schema 2 is made to be shared: an `env`
 line, a `build` line (configuration, runtime, GC, CPU, power plan, commit of the driver's checkout), then one
-line per run, with no user, machine or folder name and no path (hosts by label and file name, paths removed
+line per run, with no user, machine or folder name and no path (hosts by label, file name and the build configuration each
+reports, warned about when it is Debug, at start and in `--compare`; files from before that read as unknown; paths removed
 from errors, only known noisy processes named). `--host label=path` **runs** that file with your rights: name
 only builds you made or trust.
