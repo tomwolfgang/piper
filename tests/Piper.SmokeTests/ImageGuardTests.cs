@@ -12,87 +12,96 @@ internal static class ImageGuardTests
 
     public static async Task RunAsync(TestRunner runner)
     {
+        // Every body in a table gets the same verdict; the name says what the body is.
+        void Expect(ImageGuardVerdict verdict, params (string Name, byte[] Bytes)[] bodies)
+        {
+            foreach (var (name, bytes) in bodies)
+                runner.AreEqual(verdict, ImageGuard.Check(bytes), name);
+        }
+
         await runner.RunAsync("image guard allows small PNG, JPEG, GIF, BMP and WebP", () =>
         {
-            foreach (var (name, bytes) in Valid())
-                runner.AreEqual(ImageGuardVerdict.Allowed, ImageGuard.Check(bytes), $"{name} is allowed");
-
-            runner.AreEqual(ImageGuardVerdict.Allowed, ImageGuard.Check(Png(8192, 8192)), "8192 x 8192 (exactly 64 Mi pixels) is allowed");
-            runner.AreEqual(ImageGuardVerdict.Allowed,
-                ImageGuard.Check(Jpeg(1, 1, extra: Concat(Segment(0xE2, "MPF\0"u8.ToArray()), Segment(0xE1, "Exif\0\0"u8.ToArray())))),
-                "JPEG APP1 and APP2 segments that are not ICC profiles are allowed");
+            Expect(ImageGuardVerdict.Allowed, [.. Valid(),
+                ("PNG 4096 x 4096 (exactly 16 Mi pixels)", Png(4096, 4096)),
+                ("JPEG APP1 and APP2 that are not ICC", Jpeg(1, 1, extra: Concat(Segment(0xE2, "MPF\0"u8.ToArray()), Segment(0xE1, "Exif\0\0"u8.ToArray())))),
+                ("a progressive JPEG with the most scans", JpegScans(ImageGuard.MaxScans)),
+                ("BMP v5 with sRGB and no profile", Bmp(2, 2, headerSize: 124, colourSpace: 0x73524742)),
+                ("BMP v4 with sRGB (no profile fields)", Bmp(8, 8, headerSize: 108, colourSpace: 0x42475273)),
+                ("WebP with EXIF but no profile", WebpFile(Riff("VP8X", Vp8X(2, 2, 0x08)), Riff("EXIF", [1, 2, 3]), Riff("VP8 ", Vp8(2, 2))))]);
             return Task.CompletedTask;
         });
 
         await runner.RunAsync("image guard refuses TIFF, BigTIFF and anything outside the allow-list", () =>
         {
-            byte[][] tiffs =
-            [
-                [0x49, 0x49, 0x2A, 0x00, 8, 0, 0, 0], [0x4D, 0x4D, 0x00, 0x2A, 0, 0, 0, 8],
-                BigTiff(0, littleEndian: true), BigTiff(0x00FFFFFFFFFFFFFF, littleEndian: true), BigTiff(0, littleEndian: false),
-                "II+\0"u8.ToArray(),
-            ];
-            foreach (var tiff in tiffs)
-                runner.AreEqual(ImageGuardVerdict.Tiff, ImageGuard.Check(tiff), $"TIFF header {Convert.ToHexString(tiff.AsSpan(0, 4))} ({tiff.Length} bytes)");
-
-            byte[][] others =
-            [
-                [], [0], "<html>not an image</html>"u8.ToArray(), "<svg xmlns='http://www.w3.org/2000/svg'/>"u8.ToArray(),
-                [0, 0, 1, 0, 1, 0], "P6 1 1 255 \0\0\0"u8.ToArray(), [0x89, 0x50, 0x4E, 0x47], "RIFF\0\0\0\0AVI "u8.ToArray(),
-            ];
-            foreach (var other in others)
-                runner.AreEqual(ImageGuardVerdict.Unrecognised, ImageGuard.Check(other), $"unknown format, {other.Length} bytes");
+            Expect(ImageGuardVerdict.Tiff,
+                ("II*", [0x49, 0x49, 0x2A, 0x00, 8, 0, 0, 0]), ("MM*", [0x4D, 0x4D, 0x00, 0x2A, 0, 0, 0, 8]),
+                ("BigTIFF little-endian", BigTiff(0, littleEndian: true)), ("BigTIFF big-endian", BigTiff(0, littleEndian: false)),
+                ("BigTIFF with an IFD count that never ends (hangs 3.1.12)", BigTiff(0x00FFFFFFFFFFFFFF, littleEndian: true)),
+                ("BigTIFF signature only", "II+\0"u8.ToArray()));
+            Expect(ImageGuardVerdict.Unrecognised,
+                ("empty", []), ("one byte", [0]), ("HTML", "<html>not an image</html>"u8.ToArray()), ("SVG", "<svg xmlns='http://www.w3.org/2000/svg'/>"u8.ToArray()),
+                ("ICO", [0, 0, 1, 0, 1, 0]), ("PBM", "P6 1 1 255 \0\0\0"u8.ToArray()), ("a PNG signature cut short", [0x89, 0x50, 0x4E, 0x47]), ("RIFF AVI", "RIFF\0\0\0\0AVI "u8.ToArray()));
             return Task.CompletedTask;
         });
 
         await runner.RunAsync("image guard refuses an embedded ICC profile in every container", () =>
         {
             var icc = "ICC_PROFILE\0\x01\x01"u8.ToArray();
-            ImageGuardVerdict profile = ImageGuardVerdict.EmbeddedProfile;
-            runner.AreEqual(profile, ImageGuard.Check(Png(2, 2, extra: Chunk("iCCP", "p\0\0"u8.ToArray()))), "PNG iCCP before the pixel data");
-            runner.AreEqual(profile, ImageGuard.Check(Png(2, 2, trailing: Chunk("iCCP", "p\0\0"u8.ToArray()))), "PNG iCCP after IDAT (decoders read chunks wherever they are)");
-            runner.AreEqual(profile, ImageGuard.Check(Jpeg(2, 2, extra: Segment(0xE2, icc))), "JPEG APP2 ICC_PROFILE");
-            runner.AreEqual(profile, ImageGuard.Check(Jpeg(2, 2, afterScan: Segment(0xE2, icc))), "JPEG APP2 ICC_PROFILE after the first scan");
-            runner.AreEqual(profile, ImageGuard.Check(Jpeg(2, 2, extra: Concat(Segment(0xE1, [1]), [0xFF, 0xFF, 0xFF], Segment(0xE2, icc)))), "JPEG with fill bytes before the marker");
-            runner.AreEqual(profile, ImageGuard.Check(WebpFile(Riff("VP8X", Vp8X(2, 2, 0)), Riff("ICCP", [1, 2, 3, 4]), Riff("VP8 ", Vp8(2, 2)))), "WebP ICCP chunk");
-            runner.AreEqual(profile, ImageGuard.Check(WebpFile(Riff("VP8X", Vp8X(2, 2, 0x20)), Riff("VP8 ", Vp8(2, 2)))), "WebP VP8X flag claiming a profile");
-            runner.AreEqual(profile, ImageGuard.Check(WebpFile(Riff("VP8L", Vp8L(2, 2)), Riff("ICCP", [1]))), "WebP ICCP after the image data");
-            runner.AreEqual(profile, ImageGuard.Check(Bmp(2, 2, headerSize: 124, colourSpace: 0x4D424544)), "BMP v5 PROFILE_EMBEDDED");
-            runner.AreEqual(profile, ImageGuard.Check(Bmp(2, 2, headerSize: 124, colourSpace: 0x4C494E4B)), "BMP v5 PROFILE_LINKED");
-            runner.AreEqual(profile, ImageGuard.Check(Bmp(2, 2, headerSize: 108, colourSpace: 0x4D424544)), "BMP v4 with the same marker");
-            runner.AreEqual(ImageGuardVerdict.Allowed, ImageGuard.Check(Bmp(2, 2, headerSize: 124, colourSpace: 0x73524742)), "BMP v5 with sRGB is allowed");
-            runner.AreEqual(ImageGuardVerdict.Allowed, ImageGuard.Check(WebpFile(Riff("VP8X", Vp8X(2, 2, 0x08)), Riff("EXIF", [1, 2, 3]), Riff("VP8 ", Vp8(2, 2)))), "WebP with EXIF but no profile is allowed");
+            var gib = 1u << 30;
+            Expect(ImageGuardVerdict.EmbeddedProfile,
+                ("PNG iCCP", Png(2, 2, extra: Chunk("iCCP", "p\0\0"u8.ToArray()))),
+                ("PNG iCCP after IDAT (decoders read chunks wherever they are)", Png(2, 2, trailing: Chunk("iCCP", "p\0\0"u8.ToArray()))),
+                ("JPEG APP2 ICC_PROFILE", Jpeg(2, 2, extra: Segment(0xE2, icc))),
+                ("JPEG APP2 ICC_PROFILE after the first scan", Jpeg(2, 2, afterScan: Segment(0xE2, icc))),
+                ("JPEG with fill bytes before the marker", Jpeg(2, 2, extra: Concat(Segment(0xE1, [1]), [0xFF, 0xFF, 0xFF], Segment(0xE2, icc)))),
+                ("WebP ICCP chunk", WebpFile(Riff("VP8X", Vp8X(2, 2, 0)), Riff("ICCP", [1, 2, 3, 4]), Riff("VP8 ", Vp8(2, 2)))),
+                ("WebP VP8X flag claiming a profile", WebpFile(Riff("VP8X", Vp8X(2, 2, 0x20)), Riff("VP8 ", Vp8(2, 2)))),
+                ("WebP ICCP after the image data", WebpFile(Riff("VP8L", Vp8L(2, 2)), Riff("ICCP", [1]))),
+                ("BMP v5 PROFILE_EMBEDDED", Bmp(2, 2, headerSize: 124, colourSpace: 0x4D424544)),
+                ("BMP v5 PROFILE_LINKED", Bmp(2, 2, headerSize: 124, colourSpace: 0x4C494E4B)),
+                ("BMP v4 with the same marker", Bmp(2, 2, headerSize: 108, colourSpace: 0x4D424544)));
+
+            // 3.1.12 keeps a V5 profile whenever ProfileData and ProfileSize are set, whatever the colour
+            // space says, and reads ProfileSize bytes into a plain array: a 330-byte file asked for 1 GiB.
+            runner.AreEqual(330, ReviewerBmp(0x42475273, 0x7C, gib).Length, "the reproducer is 330 bytes");
+            Expect(ImageGuardVerdict.EmbeddedProfile,
+                ("BMP v5 1 GiB profile, colour space sRGB", ReviewerBmp(0x42475273, 0x7C, gib)),
+                ("BMP v5 1 GiB profile, colour space zero", ReviewerBmp(0, 0x7C, gib)),
+                ("BMP v5 1 GiB profile, colour space 'Win '", ReviewerBmp(0x57696E20, 0x7C, gib)),
+                ("BMP v5 1-byte profile", ReviewerBmp(0x42475273, 0x7C, 1)), ("BMP v5 4 GiB profile", ReviewerBmp(0x42475273, 0x7C, 0xFFFFFFFF)),
+                ("BMP v5 profile offset but no size", ReviewerBmp(0x42475273, 0x7C, 0)), ("BMP v5 size but no offset", ReviewerBmp(0x42475273, 0, 64)));
+            Expect(ImageGuardVerdict.Allowed, ("BMP v5 with neither offset nor size", ReviewerBmp(0x42475273, 0, 0)));
             return Task.CompletedTask;
         });
 
         await runner.RunAsync("image guard refuses zero, overflowing and oversized dimensions", () =>
         {
-            (string Name, byte[] Bytes)[] cases =
-            [
-                ("PNG 0 x 0", Png(0, 0)), ("PNG 1 x 0", Png(1, 0)), ("PNG 65535 x 65535", Png(65535, 65535)),
-                ("PNG uint.MaxValue squared", Png(uint.MaxValue, uint.MaxValue)), ("PNG 8193 x 8192", Png(8193, 8192)),
-                ("JPEG 65535 x 65535", Jpeg(65535, 65535)), ("JPEG height 0", Jpeg(10, 0)), ("JPEG 8193 x 8192", Jpeg(8193, 8192)),
-                ("GIF 65535 x 65535", Gif(65535, 65535)), ("GIF 0 x 5", Gif(0, 5)),
-                ("BMP 100000 x 100000", Bmp(100000, 100000)), ("BMP negative width", Bmp(-5, 5)), ("BMP height int.MinValue", Bmp(5, int.MinValue)),
+            Expect(ImageGuardVerdict.BadDimensions,
+                ("PNG 0 x 0", Png(0, 0)), ("PNG 1 x 0", Png(1, 0)), ("PNG 65535 squared", Png(65535, 65535)), ("PNG uint.MaxValue squared", Png(uint.MaxValue, uint.MaxValue)),
+                ("PNG 4097 x 4096", Png(4097, 4096)), ("PNG 8192 squared", Png(8192, 8192)),
+                ("JPEG 65535 squared", Jpeg(65535, 65535)), ("JPEG height 0", Jpeg(10, 0)), ("JPEG 4097 x 4096", Jpeg(4097, 4096)),
+                ("GIF 65535 squared", Gif(65535, 65535)), ("GIF 0 x 5", Gif(0, 5)),
+                ("BMP 100000 squared", Bmp(100000, 100000)), ("BMP negative width", Bmp(-5, 5)), ("BMP height int.MinValue", Bmp(5, int.MinValue)),
                 ("BMP int.MaxValue squared", Bmp(int.MaxValue, int.MaxValue)), ("BMP 0 x 0", Bmp(0, 0)),
                 ("WebP VP8X 16777216 squared", WebpFile(Riff("VP8X", Vp8X(16777216, 16777216, 0)), Riff("VP8 ", Vp8(2, 2)))),
                 ("WebP VP8L 16384 squared", WebpFile(Riff("VP8L", Vp8L(16384, 16384)))), ("WebP VP8 16383 squared", WebpFile(Riff("VP8 ", Vp8(16383, 16383)))),
-                ("WebP frame 16777216 squared", WebpFile(Riff("VP8X", Vp8X(2, 2, 0x02)), Riff("ANMF", Anmf(16777216, 16777216)))),
-            ];
-            foreach (var (name, bytes) in cases)
-                runner.AreEqual(ImageGuardVerdict.BadDimensions, ImageGuard.Check(bytes), $"{name} is refused");
+                ("WebP frame 16777216 squared", WebpFile(Riff("VP8X", Vp8X(2, 2, 0x02)), Riff("ANMF", Anmf(16777216, 16777216)))));
             return Task.CompletedTask;
         });
 
-        await runner.RunAsync("image guard refuses a body above the byte cap", () =>
+        await runner.RunAsync("image guard refuses a body above the byte cap and a JPEG with too many scans", () =>
         {
             var atCap = Png(2, 2, padTo: ImageGuard.MaxBytes);
             runner.AreEqual(ImageGuard.MaxBytes, atCap.Length, "the sample is exactly the cap");
-            runner.AreEqual(ImageGuardVerdict.Allowed, ImageGuard.Check(atCap), "a body exactly at the cap is allowed");
-
             var over = new byte[ImageGuard.MaxBytes + 1];
             Array.Copy(atCap, over, 100);
-            runner.AreEqual(ImageGuardVerdict.TooLarge, ImageGuard.Check(over), "one byte over the cap is refused");
+            Expect(ImageGuardVerdict.Allowed, ("a body exactly at the cap", atCap));
+            Expect(ImageGuardVerdict.TooLarge, ("one byte over the cap", over));
+
+            // Each scan costs the decoder about a millisecond at 8192 x 8192: 65,000 of them took 78 s.
+            var started = Stopwatch.StartNew();
+            Expect(ImageGuardVerdict.Malformed, ("one scan more than the cap", JpegScans(ImageGuard.MaxScans + 1)), ("65,000 scans in about 0.5 MB", JpegScans(65_000)));
+            runner.IsTrue(started.Elapsed < Patience, $"decided in {started.ElapsedMilliseconds} ms");
             return Task.CompletedTask;
         });
 
@@ -104,7 +113,7 @@ internal static class ImageGuardTests
                 .. Valid().Select(v => v.Bytes),
                 Png(2, 2, extra: Chunk("iCCP", "p\0\0"u8.ToArray())), Jpeg(2, 2, extra: Segment(0xE2, "ICC_PROFILE\0\x01\x01"u8.ToArray())),
                 WebpFile(Riff("VP8X", Vp8X(2, 2, 0x22)), Riff("ICCP", [1, 2]), Riff("VP8 ", Vp8(2, 2))),
-                Bmp(2, 2, headerSize: 124, colourSpace: 0x4D424544), BigTiff(5, littleEndian: true),
+                Bmp(2, 2, headerSize: 124, colourSpace: 0x4D424544), ReviewerBmp(0x42475273, 0x7C, 1u << 30), JpegScans(3), BigTiff(5, littleEndian: true),
             ];
 
             var random = new Random(11);
@@ -144,20 +153,16 @@ internal static class ImageGuardTests
         await runner.RunAsync("image guard bounds hostile chunk lengths and chunk counts", () =>
         {
             var started = Stopwatch.StartNew();
-            var malformed = ImageGuardVerdict.Malformed;
-            runner.AreEqual(malformed, ImageGuard.Check(Png(2, 2, extra: Chunk("tEXt", [1], declaredLength: 0x7FFFFFFF))), "PNG chunk length past the buffer");
-            runner.AreEqual(malformed, ImageGuard.Check(Png(2, 2, extra: Chunk("iCCP", [1], declaredLength: 0xFFFFFFFF))), "PNG chunk length 0xFFFFFFFF");
-
-            // Millions of empty chunks or segments in a body that is within the byte cap.
-            runner.AreEqual(malformed, ImageGuard.Check(Repeat(Png(2, 2, noEnd: true), Chunk("tEXt", []))), "PNG chunk count far beyond the bound");
-            runner.AreEqual(malformed, ImageGuard.Check(Repeat(Jpeg(2, 2, noEnd: true), Segment(0xFE, []))), "JPEG segment count far beyond the bound");
-            runner.AreEqual(malformed, ImageGuard.Check(Repeat(WebpFile(Riff("VP8 ", Vp8(2, 2))), Riff("JUNK", []))), "WebP chunk count far beyond the bound");
-
-            var fill = Repeat([0xFF, 0xD8, 0xFF], [0xFF]);
-            runner.AreEqual(malformed, ImageGuard.Check(fill), "JPEG that is all 0xFF fill bytes");
-            var stuffed = Repeat(Concat(Jpeg(2, 2, noEnd: true), [0xFF, 0xDA, 0x00, 0x02]), [0xFF, 0x00]);
-            runner.AreEqual(ImageGuardVerdict.Allowed, ImageGuard.Check(stuffed), "a scan of stuffed bytes up to the cap is read in one pass");
-
+            Expect(ImageGuardVerdict.Malformed,
+                ("PNG chunk length past the buffer", Png(2, 2, extra: Chunk("tEXt", [1], declaredLength: 0x7FFFFFFF))),
+                ("PNG chunk length 0xFFFFFFFF", Png(2, 2, extra: Chunk("iCCP", [1], declaredLength: 0xFFFFFFFF))),
+                // Millions of empty chunks or segments in a body that is within the byte cap.
+                ("PNG chunk count far beyond the bound", Repeat(Png(2, 2, noEnd: true), Chunk("tEXt", []))),
+                ("JPEG segment count far beyond the bound", Repeat(Jpeg(2, 2, noEnd: true), Segment(0xFE, []))),
+                ("WebP chunk count far beyond the bound", Repeat(WebpFile(Riff("VP8 ", Vp8(2, 2))), Riff("JUNK", []))),
+                ("JPEG that is all 0xFF fill bytes", Repeat([0xFF, 0xD8, 0xFF], [0xFF])));
+            Expect(ImageGuardVerdict.Allowed,
+                ("a scan of stuffed bytes up to the cap, read in one pass", Repeat(Concat(Jpeg(2, 2, noEnd: true), [0xFF, 0xDA, 0x00, 0x02]), [0xFF, 0x00])));
             runner.IsTrue(started.Elapsed < Patience, $"every hostile body was decided in {started.ElapsedMilliseconds} ms");
             return Task.CompletedTask;
         });
@@ -182,6 +187,8 @@ internal static class ImageGuardTests
         for (var offset = prefix.Length; offset < data.Length; offset += unit.Length) unit.CopyTo(data, offset);
         return data;
     }
+
+    private static byte[] Repeat(byte[] prefix, byte[] unit, int count) => Concat(prefix, [.. Enumerable.Repeat(unit, count).SelectMany(u => u)]);
 
     private static byte[] Concat(params byte[][] parts) => [.. parts.SelectMany(p => p)];
 
@@ -212,6 +219,28 @@ internal static class ImageGuardTests
         Concat([0xFF, 0xD8], Segment(0xE0, "JFIF\0\x01\x01\0\0\x01\0\x01\0\0"u8.ToArray()), extra ?? [],
             Segment(0xC0, [8, (byte)(height >> 8), (byte)height, (byte)(width >> 8), (byte)width, 1, 1, 0x11, 0]),
             Segment(0xDA, [1, 1, 0, 0, 0x3F, 0]), scan ?? [0x12, 0x34], afterScan ?? [], noEnd ? [] : [0xFF, 0xD9]);
+
+    // A progressive-style JPEG whose scans are empty: only the markers matter to the guard.
+    private static byte[] JpegScans(int scans) =>
+        Concat(Repeat(Jpeg(2, 2, noEnd: true), Concat(Segment(0xDA, [1, 1, 0, 0, 0x3F, 0]), [0x12]), scans - 1), [0xFF, 0xD9]);
+
+    // The 330-byte file that made 3.1.12 allocate the declared profile size: a V5 8 x 8, 24 bpp bitmap
+    // with the given colour space, profile offset and profile size, and 192 zero pixel bytes.
+    private static byte[] ReviewerBmp(uint colourSpace, uint profileData, uint profileSize)
+    {
+        var file = new byte[330];
+        file[0] = 0x42; file[1] = 0x4D;
+        BinaryPrimitives.WriteUInt32LittleEndian(file.AsSpan(2), 330);
+        BinaryPrimitives.WriteUInt32LittleEndian(file.AsSpan(10), 138);
+        BinaryPrimitives.WriteUInt32LittleEndian(file.AsSpan(14), 124);
+        BinaryPrimitives.WriteInt32LittleEndian(file.AsSpan(18), 8);
+        BinaryPrimitives.WriteInt32LittleEndian(file.AsSpan(22), 8);
+        file[26] = 1; file[28] = 24;
+        BinaryPrimitives.WriteUInt32LittleEndian(file.AsSpan(0x46), colourSpace);
+        BinaryPrimitives.WriteUInt32LittleEndian(file.AsSpan(0x7E), profileData);
+        BinaryPrimitives.WriteUInt32LittleEndian(file.AsSpan(0x82), profileSize);
+        return file;
+    }
 
     private static byte[] Gif(int width, int height, string signature = "GIF89a") =>
         Concat(Encoding.ASCII.GetBytes(signature), [(byte)width, (byte)(width >> 8), (byte)height, (byte)(height >> 8), 0, 0, 0], [0x3B]);

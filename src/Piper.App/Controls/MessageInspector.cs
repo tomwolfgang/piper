@@ -638,7 +638,7 @@ public sealed class MessageInspector : UserControl
         _imageView.PanY = 0;
     }
 
-    private void SaveCurrentImage(string? requestedFormat)
+    private async void SaveCurrentImage(string? requestedFormat)
     {
         if (_message is null || _imageView?.Image is null) return;
 
@@ -659,29 +659,77 @@ public sealed class MessageInspector : UserControl
         var format = Path.GetExtension(dialog.FileName).TrimStart('.').ToLowerInvariant();
         if (format is not ("png" or "jpg" or "jpeg" or "webp")) format = requestedFormat ?? "png";
 
+        var path = dialog.FileName;
         try
         {
             var body = _message.DecodedBody;
-            if (ImageGuard.Check(body) != ImageGuardVerdict.Allowed)
+            if (RefusalText(ImageGuard.Check(body)) is { } refusal)
             {
-                MessageBox.Show(this, Strings.Inspector.ImageBlocked,
-                    Strings.App.Name, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                MessageBox.Show(this, refusal, Strings.App.Name, MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
 
-            using var image = ImageSharpImage.Load(ImageDecoding.Options, body);
-            switch (format)
-            {
-                case "jpg" or "jpeg": image.SaveAsJpeg(dialog.FileName); break;
-                case "webp": image.SaveAsWebp(dialog.FileName); break;
-                default: image.SaveAsPng(dialog.FileName); break;
-            }
+            // Decoding and re-encoding take seconds for a large image, so they run off the UI thread
+            // and into a buffer: a timeout or failure never leaves a half-written file behind.
+            using var timeout = new CancellationTokenSource(ImageWorkTimeout);
+            var encoded = await Task.Run(() => ConvertImage(body, format, timeout.Token), timeout.Token);
+            await File.WriteAllBytesAsync(path, encoded);
+        }
+        catch (OperationCanceledException)
+        {
+            if (!IsDisposed)
+                MessageBox.Show(this, Strings.Inspector.ImageTimedOut, Strings.App.Name, MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
         catch (Exception ex)
         {
-            MessageBox.Show(this, Strings.Inspector.SaveImageFailed(ex.Message),
-                Strings.App.Name, MessageBoxButtons.OK, MessageBoxIcon.Error);
+            if (!IsDisposed)
+                MessageBox.Show(this, Strings.Inspector.SaveImageFailed(ex.Message),
+                    Strings.App.Name, MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
+    }
+
+    private static byte[] ConvertImage(byte[] body, string format, CancellationToken cancellationToken)
+    {
+        using var stream = new MemoryStream(body, writable: false);
+        using var image = ImageSharpImage.Load(ImageDecoding.Options, stream);
+        cancellationToken.ThrowIfCancellationRequested();
+        using var output = new MemoryStream();
+        switch (format)
+        {
+            case "jpg" or "jpeg": image.SaveAsJpeg(output); break;
+            case "webp": image.SaveAsWebp(output); break;
+            default: image.SaveAsPng(output); break;
+        }
+
+        return output.ToArray();
+    }
+
+    /// <summary>The fixed text for a body the guard will not hand to the decoder, or null when allowed.</summary>
+    private static string? RefusalText(ImageGuardVerdict verdict) => verdict switch
+    {
+        ImageGuardVerdict.Allowed => null,
+        ImageGuardVerdict.Unrecognised => Strings.Inspector.ImageDecodeFailed,
+        ImageGuardVerdict.Tiff or ImageGuardVerdict.EmbeddedProfile => Strings.Inspector.ImageBlocked,
+        _ => Strings.Inspector.ImageRefused(ImageGuard.MaxPixels / (1024 * 1024), ImageGuard.MaxBytes / (1024 * 1024)),
+    };
+
+    // The most a decode or conversion may take before the inspector gives up on it.
+    private static readonly TimeSpan ImageWorkTimeout = TimeSpan.FromSeconds(30);
+
+    // Cancelled when another message is selected, the view is cleared or the control is disposed.
+    private CancellationTokenSource? _imageDecoding;
+
+    private void CancelImageDecoding()
+    {
+        var decoding = _imageDecoding;
+        _imageDecoding = null;
+        decoding?.Cancel();
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing) CancelImageDecoding();
+        base.Dispose(disposing);
     }
 
     private (string Name, string Value)? SelectedHeader => _headersView.SelectedItems.Count == 1
@@ -861,6 +909,7 @@ public sealed class MessageInspector : UserControl
         _hexSearchStatus.Text = string.Empty;
         if (_webFormsView is not null) _webFormsView.Items.Clear();
         if (_webFormsStatus is not null) _webFormsStatus.Text = string.Empty;
+        CancelImageDecoding();
         if (_imageView?.Image is { } image) image.Dispose();
         if (_imageView is not null) _imageView.Image = null;
         if (_imageStatus is not null) _imageStatus.Text = string.Empty;
@@ -1069,7 +1118,7 @@ public sealed class MessageInspector : UserControl
         _ => Strings.Units.Megabytes(size / (1024.0 * 1024)),
     };
 
-    private void RenderImage(HttpMessage message, bool force = false)
+    private async void RenderImage(HttpMessage message, bool force = false)
     {
         if (_imageView is null || _imageStatus is null) return;
 
@@ -1082,40 +1131,50 @@ public sealed class MessageInspector : UserControl
         }
 
         if (_imageForcePanel is not null) _imageForcePanel.Visible = false;
+        CancelImageDecoding();
+        var decoding = new CancellationTokenSource(ImageWorkTimeout);
         try
         {
             var body = message.DecodedBody;
-            switch (ImageGuard.Check(body))
+            if (RefusalText(ImageGuard.Check(body)) is { } refusal)
             {
-                case ImageGuardVerdict.Allowed:
-                    break;
-                case ImageGuardVerdict.Unrecognised:
-                    _imageStatus.Text = Strings.Inspector.ImageDecodeFailed;
-                    return;
-                default:
-                    _imageStatus.Text = Strings.Inspector.ImageBlocked;
-                    return;
+                _imageStatus.Text = refusal;
+                return;
             }
 
-            using var decoded = ImageSharpImage.Load(ImageDecoding.Options, body);
-            using var png = new MemoryStream();
-            decoded.SaveAsPng(png);
-            png.Position = 0;
-            using var source = System.Drawing.Image.FromStream(png);
+            _imageDecoding = decoding;
+            _imageStatus.Text = Strings.Inspector.ImageDecoding;
+            var bitmap = await Task.Run(() => ImageDecoding.DecodeToBitmap(body, decoding.Token), decoding.Token);
+            if (!ReferenceEquals(_imageDecoding, decoding) || IsDisposed)
+            {
+                bitmap.Dispose();
+                return;
+            }
+
             if (_imageView.Image is { } oldImage) oldImage.Dispose();
-            _imageView.Image = new System.Drawing.Bitmap(source);
+            _imageView.Image = bitmap;
             var label = message.ContentType ?? Strings.Inspector.DetectedImage;
-            _imageStatus.Text = Strings.Inspector.ImageDimensions(_imageView.Image.Width, _imageView.Image.Height, label);
+            _imageStatus.Text = Strings.Inspector.ImageDimensions(bitmap.Width, bitmap.Height, label);
+        }
+        catch (OperationCanceledException)
+        {
+            // Another message was selected (nothing to say), or the decode ran out of time.
+            if (ReferenceEquals(_imageDecoding, decoding) && !IsDisposed) _imageStatus.Text = Strings.Inspector.ImageTimedOut;
         }
         catch (UnknownImageFormatException)
         {
             // Servers sometimes label a response as image/* while returning an error page or
             // other non-image bytes. This is an inspection failure, not an application error.
-            _imageStatus.Text = Strings.Inspector.ImageDecodeFailed;
+            if (ReferenceEquals(_imageDecoding, decoding) && !IsDisposed) _imageStatus.Text = Strings.Inspector.ImageDecodeFailed;
         }
         catch (Exception ex)
         {
-            _imageStatus.Text = Strings.Inspector.ImageFailed(ex.Message);
+            if (ReferenceEquals(_imageDecoding, decoding) && !IsDisposed) _imageStatus.Text = Strings.Inspector.ImageFailed(ex.Message);
+        }
+        finally
+        {
+            if (ReferenceEquals(_imageDecoding, decoding)) _imageDecoding = null;
+            decoding.Dispose();
         }
     }
 

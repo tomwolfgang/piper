@@ -32,9 +32,11 @@ internal enum ImageGuardVerdict
 /// crafted file reaches (a BigTIFF IFD count that keeps the decoder spinning, an ICC profile whose
 /// CLUT allocates from unvalidated dimensions). 4.x fixes them but needs a licence key at build time,
 /// so until that is decided this refuses what reaches them: TIFF and anything outside the allow-list
-/// (PNG, JPEG, GIF, BMP, WebP), any embedded ICC profile, and out-of-bounds sizes. The ICC refusal is
-/// conservative: 3.1.12 parses a profile's tags only if a caller reads <c>IccProfile.Entries</c>, which
-/// Piper does not.
+/// (PNG, JPEG, GIF, BMP, WebP), every way those containers declare an ICC profile (PNG iCCP, JPEG APP2,
+/// WebP ICCP or the VP8X flag, a BMP V5 profile offset or size, or a BMP profile colour space), and
+/// out-of-bounds sizes and scan counts. The profile refusal is conservative for the CLUT advisory
+/// (3.1.12 parses a profile's tags only if a caller reads <c>IccProfile.Entries</c>, which Piper does
+/// not), but a BMP profile is also read into an unbounded array, so it must be refused.
 /// </summary>
 /// <remarks>
 /// Only container headers are read, never pixel data, and every walk is bounded by
@@ -47,8 +49,13 @@ internal static class ImageGuard
     /// <summary>The longest body that may be decoded (32 MiB).</summary>
     public const int MaxBytes = 32 * 1024 * 1024;
 
-    /// <summary>The most pixels a header may declare (64 Mi, so 8192 x 8192 fits).</summary>
-    public const long MaxPixels = 64L * 1024 * 1024;
+    /// <summary>The most pixels a header may declare (16 Mi, so 4096 x 4096 fits). Decoding a larger
+    /// image took seconds and over a gigabyte even off the UI thread.</summary>
+    public const long MaxPixels = 16L * 1024 * 1024;
+
+    /// <summary>The most scans a JPEG may have. A progressive file from libjpeg or mozjpeg has about
+    /// ten; a baseline one has one to four.</summary>
+    public const int MaxScans = 64;
 
     /// <summary>The most chunks or marker segments one walk visits.</summary>
     public const int MaxSegments = 65_536;
@@ -119,6 +126,7 @@ internal static class ImageGuard
     {
         var position = 2;
         var sawFrame = false;
+        var scans = 0;
         for (var count = 0; count < MaxSegments; count++)
         {
             // Where the data ends is fine once a frame header has been seen (a truncated download).
@@ -156,6 +164,9 @@ internal static class ImageGuard
             }
             else if (marker == 0xDA)
             {
+                // The decoder spends time per scan (about a millisecond each at 8192 x 8192), so a
+                // progressive file with tens of thousands of tiny scans would keep it busy for minutes.
+                if (++scans > MaxScans) return ImageGuardVerdict.Malformed;
                 position = SkipEntropyCodedData(data, position);
             }
         }
@@ -207,7 +218,15 @@ internal static class ImageGuard
         var verdict = CheckDimensions(width, height);
         if (verdict != ImageGuardVerdict.Allowed) return verdict;
 
-        // bV4CSType / bV5CSType, 56 bytes into a V4 or V5 header.
+        // 3.1.12 keeps a V5 header's profile whenever bV5ProfileData and bV5ProfileSize are both set,
+        // whatever bV5CSType says, reading ProfileSize bytes into a plain array that the allocator
+        // limit does not cover. So a V5 header must declare no profile at all (ProfileData is 112 bytes
+        // into the header, ProfileSize 116). V4 and V5 also refuse the profile colour-space types.
+        if (headerSize == 124
+            && (BinaryPrimitives.ReadUInt32LittleEndian(data[(14 + 112)..]) != 0
+                || BinaryPrimitives.ReadUInt32LittleEndian(data[(14 + 116)..]) != 0))
+            return ImageGuardVerdict.EmbeddedProfile;
+
         return headerSize >= 108 && BinaryPrimitives.ReadUInt32LittleEndian(data[(14 + 56)..]) is ProfileEmbedded or ProfileLinked
             ? ImageGuardVerdict.EmbeddedProfile
             : ImageGuardVerdict.Allowed;
