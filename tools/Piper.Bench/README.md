@@ -23,7 +23,7 @@ dotnet tools/Piper.Bench/bin/Release/net10.0/piper-bench.dll --runs 15 --out mai
 | `tunnel_ping`, `tunnel_down`, `tunnel_up` | CONNECT tunnel: setup plus a 1 KB round trip; 256 MB each way |
 | `sessions_100k` | 100,000 captured sessions: `session_bytes` per session, `heap_after_gc_mb`, `peak_ws_mb` |
 | `tls_handshake_30` | HTTPS to 30 new hosts: first request (CONNECT, both handshakes, a minted certificate) against a repeat on the same connection |
-| `h2_c100` | HTTP/2 through the proxy, one client connection, 100 parallel streams, 2,000 measured requests (or `--duration`, if that ends first; the ramp and the first stats round trip before the window do not count toward the 2,000, so `requests` is 2,000 unless some failed); a response that is not HTTP/2 counts as an error |
+| `h2_c100` | HTTP/2 through the proxy, one client connection, 100 parallel streams, 2,000 measured requests (or `--duration`, if that ends first; the ramp and the first stats round trip before the window do not count toward the 2,000, but are capped at 2,000 of their own, so `requests` is 2,000 unless some failed and the connections to the origin stay under 4,000); a response that is not HTTP/2 counts as an error |
 | `rtt50_h1`, `rtt50_h2` | up to 1 GB streamed from an origin 50 ms away (the proxy-to-origin leg goes through a delaying relay; `rtt_actual_ms` is the measured round trip), read for `max(--duration, 10 s)`; a response that ends early with fewer bytes is a failure, not a rate |
 
 Every scenario run starts a fresh host process and warms it up unmeasured. Tunnel payloads are 1 KB,

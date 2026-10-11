@@ -1,15 +1,25 @@
 namespace Piper.Bench;
 
-/// <summary>The request budget of one load run (<c>maxRequests</c>). Only requests that start while the
-/// measured window is open use it, so a ramp and the stats round trip before the window cannot exhaust
-/// it and leave the window short of the promised count. Thread-safe.</summary>
+/// <summary>What a worker does next (<see cref="RequestBudget.Take"/>).</summary>
+internal enum BudgetDecision { Go, Wait, Stop }
+
+/// <summary>The request budget of one load run (<c>maxRequests</c>). Requests that start before the measured
+/// window and requests that start inside it each have <c>limit</c>, so a ramp and the stats round trip cannot
+/// exhaust the window's share and leave it short of the promised count, and neither phase can send without
+/// bound (a proxy that opens an upstream connection per request would use up the ephemeral ports). Thread-safe.</summary>
 internal sealed class RequestBudget(long limit)
 {
-    private long _taken;
+    private long _before, _inWindow;
 
-    /// <summary>Whether a request may start now: always before the window, and while the window is open
-    /// until <c>limit</c> requests have started in it.</summary>
-    public bool TryTake(bool windowOpen) => !windowOpen || Interlocked.Increment(ref _taken) <= limit;
+    /// <summary>Before the window: <c>Go</c> for the first <c>limit</c> requests, then <c>Wait</c> (try again,
+    /// the window may open). In the window: <c>Go</c> for the first <c>limit</c>, then <c>Stop</c>.</summary>
+    public BudgetDecision Take(bool windowOpen)
+    {
+        if (windowOpen) return Interlocked.Increment(ref _inWindow) <= limit ? BudgetDecision.Go : BudgetDecision.Stop;
+        if (Interlocked.Increment(ref _before) <= limit) return BudgetDecision.Go;
+        Interlocked.Decrement(ref _before); // refused requests are not counted, so the counter stays near the limit
+        return BudgetDecision.Wait;
+    }
 }
 
 /// <summary>The arithmetic behind the summary and compare tables. Pure, so the smoke tests link

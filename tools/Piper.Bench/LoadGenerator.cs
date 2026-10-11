@@ -30,11 +30,18 @@ internal static class LoadGenerator
             var samples = latencies[w] = new List<long>(8192);
             while (!Volatile.Read(ref stop))
             {
-                // A request belongs to the window, and to the budget, by when it starts: the ramp and the
-                // stats round trip before the window do not use up maxRequests, and requests, errors and
-                // timeouts all count the same set.
+                // A request belongs to the window, and to the window's budget, by when it starts: the ramp and
+                // the stats round trip before the window do not use up maxRequests (they have a cap of their
+                // own), and requests, errors and timeouts all count the same set.
                 var counted = Volatile.Read(ref measuring);
-                if (!budget.TryTake(counted)) break;
+                var decision = budget.Take(counted);
+                if (decision == BudgetDecision.Stop) break;
+                if (decision == BudgetDecision.Wait)
+                {
+                    // The pre-window cap is spent: wait for the window instead of sending more.
+                    await Task.Delay(1, ct).ConfigureAwait(false);
+                    continue;
+                }
                 var began = Stopwatch.GetTimestamp();
                 try
                 {
