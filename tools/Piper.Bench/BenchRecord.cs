@@ -7,7 +7,8 @@ namespace Piper.Bench;
 /// unit as a suffix (<c>_ms</c>, <c>_us</c>, <c>_mb</c>, <c>_bytes</c>, <c>rps</c>, <c>mbps</c>).</summary>
 internal sealed class BenchRecord
 {
-    public const int SchemaVersion = 1;
+    /// <summary>2: the env record names hosts by label and file name only (snake_case keys), and bg_top names only known noisy processes. Version 1 files still load.</summary>
+    public const int SchemaVersion = 2;
 
     private static readonly JsonSerializerOptions Json = new() { DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull };
 

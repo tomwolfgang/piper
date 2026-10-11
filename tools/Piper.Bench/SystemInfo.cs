@@ -33,7 +33,8 @@ internal static class SystemInfo
         var self = Environment.ProcessId;
         var busy = after
             .Where(p => p.Key.Id != self && before.ContainsKey(p.Key))
-            .Select(p => (Name: p.Key.Name, Percent: (p.Value - before[p.Key]).TotalSeconds / seconds / Environment.ProcessorCount * 100))
+            // The results file is shared: a process is named only when it is a known noisy one, else "other".
+            .Select(p => (Name: BenchHygiene.ProcessLabel(p.Key.Name), Percent: (p.Value - before[p.Key]).TotalSeconds / seconds / Environment.ProcessorCount * 100))
             .Where(p => p.Percent >= 1)
             .GroupBy(p => p.Name)
             .Select(g => (Name: g.Key, Percent: g.Sum(p => p.Percent)))
