@@ -36,6 +36,15 @@ internal static class BenchStats
         return failed * 100 > attempted * MaxFailedPercent ? FormattableString.Invariant($"{failed:F0} of {attempted:F0} requests failed") : null;
     }
 
+    /// <summary>Why a time-limited streamed download is not a measurement, or null: no body byte arrived after
+    /// the headers (a rate of 0 is a stall, not a slow proxy), or the body ended before the window did with
+    /// fewer than <paramref name="expected"/> bytes (a short answer would pass as a fast one). A window that
+    /// ended with some bytes received is a rate.</summary>
+    public static string? DownloadFailure(long received, long expected, bool windowEnded) =>
+        received <= 0 ? "The response had headers but no body byte arrived."
+        : !windowEnded && received < expected ? FormattableString.Invariant($"The response ended after {received} of {expected} bytes.")
+        : null;
+
     /// <summary>What a scenario run stores: its finite metrics, rounded, and its failure reason. The reason
     /// is judged before the non-finite values are dropped: a NaN rate or count fails the run, it must not
     /// vanish from it and leave the run looking like a success.</summary>
