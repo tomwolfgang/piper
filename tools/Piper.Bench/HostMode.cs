@@ -12,6 +12,10 @@ namespace Piper.Bench;
 /// compete with the proxy for CPU. Only public Piper.Core API is used, so the same source builds
 /// against an older checkout.
 ///
+/// <c>host --ca-dir D [--decrypt] [--insecure-upstream] [--remap "ip name;ip name"]</c>: decryption on (the
+/// driver's client trusts the temporary CA in-process, nothing is installed), origin certificates not
+/// validated (the benchmark origin's is self-signed), and host remapping so many names reach the origin.
+///
 /// stdout: <c>READY port startup_ms</c>, then one reply per command. stdin: <c>stats</c> | <c>gc</c> (the
 /// same counters after a forced, compacting collection) | <c>capacity N</c> | <c>quit</c>; when stdin
 /// closes the host stops.
@@ -20,16 +24,32 @@ internal static class HostMode
 {
     public static async Task<int> RunAsync(string[] args)
     {
-        if (args is not ["--ca-dir", { Length: > 0 } caDirectory])
+        string? caDirectory = null, remap = null;
+        bool decrypt = false, insecureUpstream = false;
+        for (var i = 0; i < args.Length; i++)
         {
-            Console.Error.WriteLine("usage: piper-bench host --ca-dir <directory>");
+            switch (args[i])
+            {
+                case "--ca-dir" when i + 1 < args.Length: caDirectory = args[++i]; break;
+                case "--remap" when i + 1 < args.Length: remap = args[++i]; break;
+                case "--decrypt": decrypt = true; break;
+                case "--insecure-upstream": insecureUpstream = true; break;
+                default: caDirectory = null; i = args.Length; break;
+            }
+        }
+
+        if (string.IsNullOrWhiteSpace(caDirectory))
+        {
+            Console.Error.WriteLine("usage: piper-bench host --ca-dir <directory> [--decrypt] [--insecure-upstream] [--remap \"ip name;ip name\"]");
             return 2;
         }
 
         var started = Stopwatch.StartNew();
         using var ca = CertificateAuthority.LoadOrCreate(caDirectory);
         var store = new SessionStore();
-        var proxy = new ProxyServer(new ProxyOptions { Port = 0, DecryptHttps = false }, ca, store);
+        var options = new ProxyOptions { Port = 0, DecryptHttps = decrypt, ValidateUpstreamCertificates = !insecureUpstream };
+        if (remap is not null) options.HostRemapping.Apply(new HostRemappingSettings { Enabled = true, Mappings = remap.Replace(';', '\n') });
+        var proxy = new ProxyServer(options, ca, store);
         proxy.Start();
         Console.WriteLine($"READY {proxy.Endpoint!.Port} {started.Elapsed.TotalMilliseconds:F1}");
         Console.Out.Flush();

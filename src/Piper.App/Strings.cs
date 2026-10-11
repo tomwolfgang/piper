@@ -703,6 +703,11 @@ internal static class Strings
         public static string ImageDimensions(int width, int height, string label) =>
             I18n.T("inspector.imageDimensions", ("width", width), ("height", height), ("label", label));
         public static string ImageDecodeFailed => I18n.T("inspector.imageDecodeFailed");
+        public static string ImageBlocked => I18n.T("inspector.imageBlocked");
+        public static string ImageRefused(long megapixels, long megabytes) =>
+            I18n.T("inspector.imageRefused", ("megapixels", megapixels), ("megabytes", megabytes));
+        public static string ImageDecoding => I18n.T("inspector.imageDecoding");
+        public static string ImageTimedOut => I18n.T("inspector.imageTimedOut");
         public static string ImageFailed(string message) => I18n.T("inspector.imageFailed", ("message", message));
 
         public static string NotAVideoContentType => I18n.T("inspector.notAVideoContentType");

@@ -1,5 +1,7 @@
 using System.Net;
 using System.Net.Sockets;
+using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
@@ -29,13 +31,33 @@ internal sealed class Origin : IAsyncDisposable
     public const int MaxMegabytes = 2048;
 
     private readonly WebApplication _app;
+    private readonly X509Certificate2 _certificate;
     private readonly TcpListener _tunnels = new(IPAddress.Loopback, 0);
     private readonly CancellationTokenSource _stop = new();
     private readonly HashSet<string> _connectionIds = [];
 
-    private Origin(WebApplication app) => _app = app;
+    private Origin(WebApplication app, X509Certificate2 certificate)
+    {
+        _app = app;
+        _certificate = certificate;
+    }
+
+    // Self-signed and never trusted by anything: the proxy under test is told not to validate it. The key
+    // is not ephemeral because SChannel refuses an ephemeral key for a server certificate (the same reason
+    // Piper's own leaf certificates are loaded this way); without PersistKeySet Windows deletes the
+    // temporary key container when the certificate is disposed.
+    private static X509Certificate2 NewCertificate()
+    {
+        using var key = RSA.Create(2048);
+        var request = new CertificateRequest("CN=piper-bench-origin", key, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+        using var selfSigned = request.CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(1));
+        return X509CertificateLoader.LoadPkcs12(selfSigned.Export(X509ContentType.Pfx, "bench"), "bench", X509KeyStorageFlags.Exportable);
+    }
 
     public int HttpPort { get; private set; }
+
+    /// <summary>HTTPS (HTTP/1.1 and HTTP/2) with a throwaway self-signed certificate.</summary>
+    public int TlsPort { get; private set; }
     public int TunnelPort { get; private set; }
 
     /// <summary>Distinct connections the origin has accepted since <see cref="ResetConnectionCount"/>.</summary>
@@ -45,18 +67,25 @@ internal sealed class Origin : IAsyncDisposable
 
     public static async Task<Origin> StartAsync()
     {
+        var certificate = NewCertificate();
         var builder = WebApplication.CreateSlimBuilder();
         builder.Logging.ClearProviders();
         builder.WebHost.ConfigureKestrel(options =>
         {
             options.Listen(IPAddress.Loopback, 0, listen => listen.Protocols = HttpProtocols.Http1);
+            options.Listen(IPAddress.Loopback, 0, listen =>
+            {
+                listen.Protocols = HttpProtocols.Http1AndHttp2;
+                listen.UseHttps(certificate);
+            });
             options.Limits.MaxRequestBodySize = null; // the upload scenario sends 64 MB
         });
-        var origin = new Origin(builder.Build());
+        var origin = new Origin(builder.Build(), certificate);
         origin._app.Run(origin.HandleAsync);
         await origin._app.StartAsync().ConfigureAwait(false);
         var feature = origin._app.Services.GetRequiredService<IServer>().Features.Get<IServerAddressesFeature>();
-        origin.HttpPort = new Uri(feature!.Addresses.First()).Port;
+        origin.HttpPort = new Uri(feature!.Addresses.First(a => a.StartsWith("http://", StringComparison.Ordinal))).Port;
+        origin.TlsPort = new Uri(feature.Addresses.First(a => a.StartsWith("https://", StringComparison.Ordinal))).Port;
         origin._tunnels.Start();
         origin.TunnelPort = ((IPEndPoint)origin._tunnels.LocalEndpoint).Port;
         _ = Task.Run(() => origin.AcceptTunnelsAsync(origin._stop.Token));
@@ -177,6 +206,7 @@ internal sealed class Origin : IAsyncDisposable
         _tunnels.Stop();
         await _app.StopAsync().ConfigureAwait(false);
         await _app.DisposeAsync().ConfigureAwait(false);
+        _certificate.Dispose();
         _stop.Dispose();
     }
 }
