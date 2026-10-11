@@ -688,17 +688,17 @@ public sealed class MessageInspector : UserControl
         }
     }
 
-    private static byte[] ConvertImage(byte[] body, string format, CancellationToken cancellationToken)
+    // The token reaches both the decoder and the encoder, so the timeout stops the work, not just the wait.
+    private static async Task<byte[]> ConvertImage(byte[] body, string format, CancellationToken cancellationToken)
     {
         using var stream = new MemoryStream(body, writable: false);
-        using var image = ImageSharpImage.Load(ImageDecoding.Options, stream);
-        cancellationToken.ThrowIfCancellationRequested();
+        using var image = await ImageSharpImage.LoadAsync(ImageDecoding.Options, stream, cancellationToken);
         using var output = new MemoryStream();
         switch (format)
         {
-            case "jpg" or "jpeg": image.SaveAsJpeg(output); break;
-            case "webp": image.SaveAsWebp(output); break;
-            default: image.SaveAsPng(output); break;
+            case "jpg" or "jpeg": await image.SaveAsJpegAsync(output, cancellationToken); break;
+            case "webp": await image.SaveAsWebpAsync(output, cancellationToken); break;
+            default: await image.SaveAsPngAsync(output, cancellationToken); break;
         }
 
         return output.ToArray();

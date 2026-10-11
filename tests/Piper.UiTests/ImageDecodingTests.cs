@@ -59,6 +59,25 @@ internal static class ImageDecodingTests
             check(true, "a cancelled decode throws OperationCanceledException");
         }
 
+        // Save-as: the private converter re-encodes through the same options, and the token stops it.
+        var convert = typeof(MessageInspector).GetMethod("ConvertImage", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
+        foreach (var format in new[] { "png", "jpg", "webp" })
+        {
+            var converted = ((Task<byte[]>)convert.Invoke(null, [png.ToArray(), format, CancellationToken.None])!).GetAwaiter().GetResult();
+            using var reloaded = ImageDecoding.DecodeToBitmap(converted, CancellationToken.None);
+            check(reloaded.Width == 5 && reloaded.Height == 3, $"Save as {format} converts to an image of the same size");
+        }
+
+        try
+        {
+            ((Task<byte[]>)convert.Invoke(null, [png.ToArray(), "png", cancelled.Token])!).GetAwaiter().GetResult();
+            check(false, "a cancelled conversion throws");
+        }
+        catch (OperationCanceledException)
+        {
+            check(true, "a cancelled conversion throws OperationCanceledException");
+        }
+
         Console.WriteLine("== the inspector shows a decoded image, refuses a hostile one and survives closing mid-decode");
         var hostile = new byte[330]; // a V5 BMP asking for a 1 GiB profile, with colour space sRGB
         hostile[0] = 0x42; hostile[1] = 0x4D; hostile[2] = 0x4A; hostile[3] = 0x01; hostile[10] = 0x8A;
