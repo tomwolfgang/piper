@@ -46,6 +46,8 @@ internal static class BenchReportTests
         // 1e999 is either rejected (line skipped) or read as infinity (metric dropped): either way no infinity gets through.
         runner.AreEqual(5, parsed.Count + skipped, "every non-blank, non-header line is either parsed or counted as skipped");
         runner.IsTrue(parsed.Count >= 1 && skipped >= 3, "junk, an array and null are skipped");
+        // After the first record, the only one that can survive is the 1e999 line, and then with no metrics left.
+        runner.IsTrue(parsed.Skip(1).All(r => r.Metrics.Count == 0), "the record with the infinite metric has none left, or its line was skipped");
         runner.IsTrue(parsed.All(r => r.Metrics.Values.All(double.IsFinite)), "a metric that is not finite never reaches a table");
         runner.AreEqual(3000.5, parsed[0].Metrics["rps"], "the metric round trips");
         runner.AreEqual("main", parsed[0].Label, "the label round trips");
