@@ -163,7 +163,8 @@ internal static class SystemInfo
     }
 
     /// <summary>The folder the machine-wide .NET install registered (<c>dotnet.exe</c> is in it), or null.</summary>
-    public static string? RegisteredDotnetFolder() => ReadMachineValue(@"SOFTWARE\dotnet\Setup\InstalledVersions\x64", "InstallLocation");
+    public static string? RegisteredDotnetFolder() => ReadMachineValue(
+        @"SOFTWARE\dotnet\Setup\InstalledVersions\" + RuntimeInformation.OSArchitecture.ToString().ToLowerInvariant(), "InstallLocation");
 
     public static string Describe()
     {
