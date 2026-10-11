@@ -18,14 +18,16 @@ internal sealed class BenchOptions
         options:
           --scenario a,b,...   scenarios to run (default: all)
           --runs N             runs of every scenario, 1..1000 (default 5; use 15 for large transfers)
-          --duration S         seconds measured by the get_* and hdr_* scenarios, 1..600 (default 8)
+          --duration S         whole seconds measured by get_*, hdr_* and h2_c100 (which also ends at 2,000
+                               requests); rtt50_* read for max(S, 10) s; 1..600 (default 8)
           --host label=path    a piper-bench build to measure (its .dll or .exe); repeat to alternate
                                builds A,B,B,A; "self" is this build (default: current=self). The file is
                                RUN, with your rights: name only builds you made or trust.
           --out file           new results file (default: piper-bench-<UTC time>.jsonl); an existing
                                file is never overwritten
           --timeout S          longest one scenario run may take, 10..3600 (default 300)
-          --wait-quiet PCT     before each run, wait up to 60 s for system CPU to fall under PCT
+          --wait-quiet PCT     before each run, wait up to 60 s for system CPU to fall under PCT, a whole
+                               number 1..100 (no decimals)
         """;
 
     public List<string> Scenarios { get; } = [];

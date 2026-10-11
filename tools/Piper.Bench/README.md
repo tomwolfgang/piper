@@ -33,8 +33,32 @@ never a few bytes: ESET buffers loopback HTTP and stalls tiny payloads with or w
 decrypts it. `tls_handshake_30` leaves the client's own certificate check out of the first request
 (`harness_chain_p50_ms`). `h2_c100` makes the proxy open one upstream connection per request (a known gap),
 and each closed one holds a loopback port in TIME_WAIT for about two minutes, so before a run it waits (up to
-150 s) until fewer than 2,500 such sockets to the origin remain, and fails with that reason instead of recording
+150 s) until at most 2,500 such sockets to the origin remain, and fails with that reason instead of recording
 a run the exhausted ports ruined.
+
+## Options worth knowing
+
+`--wait-quiet PCT` waits, up to 60 s before each run, for the system CPU to fall under `PCT`; it takes a whole
+number from 1 to 100 (decimals are refused), and the background CPU of each run is recorded either way.
+`--duration S` is whole seconds too: the time `get_*` and `hdr_*` measure, the limit of `h2_c100` (it also ends at
+its 2,000 requests), and the floor of the 10 s window `rtt50_*` read for.
+
+## Measuring an older build
+
+`--host label=path` takes any piper-bench build, and the host program uses only public Piper.Core API, so an older
+release is measured by building this tool inside its checkout, which gives a proxy host with that checkout's
+Piper.Core while the driver and origin stay the current ones (this is how v0.9.0 was measured against main):
+
+```powershell
+git worktree add ..\piper-v0.9.0 v0.9.0
+robocopy tools\Piper.Bench ..\piper-v0.9.0\tools\Piper.Bench /E /XD bin obj   # exit codes 0 to 7 are success
+dotnet build ..\piper-v0.9.0\tools\Piper.Bench\Piper.Bench.csproj -c Release
+dotnet tools/Piper.Bench/bin/Release/net10.0/piper-bench.dll --runs 15 --out v0.9.0-vs-main.jsonl `
+  --host before=..\piper-v0.9.0\tools\Piper.Bench\bin\Release\net10.0\piper-bench.dll --host after=self
+```
+
+Hosts alternate A,B,B,A, so a drift over the session does not favour one build. If the older checkout's public API
+no longer matches `HostMode.cs` the copy does not build: adapt the copy, not this tree.
 
 ## Not covered
 
