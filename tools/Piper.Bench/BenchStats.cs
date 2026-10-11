@@ -45,6 +45,11 @@ internal static class BenchStats
         return (rounded.Where(m => double.IsFinite(m.Value)).ToDictionary(m => m.Key, m => m.Value), FailureReason(rounded));
     }
 
+    /// <summary>A host counter's growth over the measured window (<paramref name="delta"/>, times
+    /// <paramref name="scale"/> for a unit change) per counted request; 0 when no request was counted.</summary>
+    public static double PerRequest(double delta, double requests, double scale = 1) =>
+        requests > 0 ? delta * scale / requests : 0;
+
     /// <summary>Nearest-rank percentile of <paramref name="values"/>; NaN when there are none.</summary>
     public static double Percentile(IReadOnlyList<double> values, double quantile)
     {

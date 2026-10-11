@@ -69,16 +69,21 @@ internal sealed class HostClient : IAsyncDisposable
         throw new IOException($"The proxy host exited while the driver waited for {prefix}.");
     }
 
-    private async Task<string> CommandAsync(string command, string prefix, CancellationToken ct)
+    private async Task<string> CommandAsync(string command, string prefix, CancellationToken ct, Action? beforeSend = null)
     {
+        beforeSend?.Invoke();
         await _process.StandardInput.WriteLineAsync(command.AsMemory(), ct).ConfigureAwait(false);
         await _process.StandardInput.FlushAsync(ct).ConfigureAwait(false);
         return await ReadAsync(prefix, ct).ConfigureAwait(false);
     }
 
-    /// <summary>Process counters of the proxy: ws, peakws, heap, alloc, cpums, threads, sessions, gcpausems.</summary>
-    public async Task<Dictionary<string, long>> StatsAsync(CancellationToken ct = default) =>
-        Parse(await CommandAsync("stats", "STATS", ct).ConfigureAwait(false));
+    /// <summary>Process counters of the proxy: ws, peakws, heap, alloc, cpums, threads, sessions, gcpausems.
+    /// The host takes them when it reads the command, a moment after <paramref name="beforeSend"/> (run just
+    /// before the command is written) and before the reply returns. A caller that counts requests over the same
+    /// interval flips its counter in <paramref name="beforeSend"/>, so the counters and the count share an edge
+    /// to within the host's wake-up time instead of the whole round trip.</summary>
+    public async Task<Dictionary<string, long>> StatsAsync(CancellationToken ct = default, Action? beforeSend = null) =>
+        Parse(await CommandAsync("stats", "STATS", ct, beforeSend).ConfigureAwait(false));
 
     /// <summary>The same counters after a forced, compacting collection (so <c>heap</c> is what is retained).</summary>
     public async Task<Dictionary<string, long>> CollectAsync(CancellationToken ct = default) =>
