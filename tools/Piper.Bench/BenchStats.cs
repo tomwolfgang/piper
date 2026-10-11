@@ -29,11 +29,20 @@ internal static class BenchStats
     {
         if (!metrics.TryGetValue("rps", out var rps)) return null;
         var failed = metrics.GetValueOrDefault("errors") + metrics.GetValueOrDefault("timeouts");
-        if (!(rps > 0)) return "no request succeeded";
+        if (!(rps > 0 && double.IsFinite(rps))) return "no request succeeded";
         if (!metrics.TryGetValue("requests", out var succeeded)) return null;
         var attempted = succeeded + failed;
-        if (!(succeeded >= 0 && failed >= 0 && attempted > 0)) return "the request counts are not usable";
+        if (!(succeeded >= 0 && failed >= 0 && attempted > 0 && double.IsFinite(attempted))) return "the request counts are not usable";
         return failed * 100 > attempted * MaxFailedPercent ? FormattableString.Invariant($"{failed:F0} of {attempted:F0} requests failed") : null;
+    }
+
+    /// <summary>What a scenario run stores: its finite metrics, rounded, and its failure reason. The reason
+    /// is judged before the non-finite values are dropped: a NaN rate or count fails the run, it must not
+    /// vanish from it and leave the run looking like a success.</summary>
+    public static (Dictionary<string, double> Metrics, string? Error) Settle(IReadOnlyDictionary<string, double> raw)
+    {
+        var rounded = raw.ToDictionary(m => m.Key, m => Math.Round(m.Value, 3));
+        return (rounded.Where(m => double.IsFinite(m.Value)).ToDictionary(m => m.Key, m => m.Value), FailureReason(rounded));
     }
 
     /// <summary>Nearest-rank percentile of <paramref name="values"/>; NaN when there are none.</summary>

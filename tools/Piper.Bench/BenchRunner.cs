@@ -108,9 +108,8 @@ internal static class BenchRunner
         try
         {
             var metrics = await scenario.Run(context).ConfigureAwait(false);
-            record.Metrics = metrics.Where(m => double.IsFinite(m.Value)).ToDictionary(m => m.Key, m => Math.Round(m.Value, 3));
             // A load run that failed (BenchStats.FailureReason) is a failure, not numbers for the medians.
-            record.Error = BenchStats.FailureReason(record.Metrics);
+            (record.Metrics, record.Error) = BenchStats.Settle(metrics);
         }
         catch (Exception) when (ct.IsCancellationRequested)
         {

@@ -22,8 +22,13 @@ internal static class BenchComparisonTests
             (Load(0, 200, rps: 0), true, "a rate of zero"), (Load(99, 1), false, "exactly 1% failed"), (Load(9899, 101), true, "just over 1% failed"),
             (Load(98, 0, 2), true, "2 timeouts in 100"), (Load(1, 2999, rps: 0.439), true, "0.439 rps, 2999 errors"), (Load(0, 0, rps: 5), true, "nothing attempted"),
             (Load(100, 0, rps: double.NaN), true, "a NaN rate"), (Load(100, double.NaN), true, "a NaN count"), (new Dictionary<string, double> { ["rps"] = 0.5 }, false, "uncounted successes"),
+            (Load(double.NaN, 0), true, "a NaN request count"), (Load(double.PositiveInfinity, 0), true, "an infinite count"), (Load(100, 0, rps: double.PositiveInfinity), true, "an infinite rate"),
         })
-            runner.IsTrue((BenchStats.FailureReason(metrics) is not null) == failed, $"a load run with {what} is {(failed ? "a failure" : "kept")}");
+        {
+            // Settle is what the runner calls: the verdict is reached before the non-finite values are dropped from what is stored.
+            var (stored, error) = BenchStats.Settle(metrics);
+            runner.IsTrue((error is not null) == failed && stored.Values.All(double.IsFinite), $"a load run with {what} is {(failed ? "a failure" : "kept")}");
+        }
 
         var four = new[] { 1.0, 2, 3, 4 };
         runner.IsTrue(BenchReport.Summary(four.Select((v, i) => Run("a", i, v)).ToList()).Contains("2.50 [1.00..4.00]"), "the summary shows the median");

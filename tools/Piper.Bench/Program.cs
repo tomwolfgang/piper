@@ -4,7 +4,23 @@ using Piper.Bench;
 
 if (args.Length > 0 && args[0] == "host") return await HostMode.RunAsync(args[1..]);
 
-Console.OutputEncoding = System.Text.Encoding.UTF8; // a label or path with non-ASCII characters prints as written
+// A label or path with non-ASCII characters prints as written. The code page belongs to the parent shell and
+// outlives this process, so it is set only on a console and put back when the process exits (every return,
+// Ctrl+C included, ends here); with no console it is left alone.
+if (!Console.IsOutputRedirected)
+{
+    try
+    {
+        var prior = Console.OutputEncoding;
+        Console.OutputEncoding = System.Text.Encoding.UTF8;
+        AppDomain.CurrentDomain.ProcessExit += (_, _) =>
+        {
+            try { Console.OutputEncoding = prior; }
+            catch (IOException) { /* the console is gone: nothing to restore */ }
+        };
+    }
+    catch (IOException) { /* no console to change */ }
+}
 
 if (args.Contains("--help") || args.Contains("-h"))
 {
