@@ -9,6 +9,7 @@ internal static class LatencyRelayTests
     public static Task RunAsync(TestRunner runner) => runner.RunAsync("bench latency relay: delay, order, half-close and disposal", async () =>
     {
         using var cancel = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+        using var stopServers = new CancelOnDispose(cancel); // disposing a token source does not cancel it: end the two listeners when the test ends
         var ct = cancel.Token;
         // An echo server, and one that answers with the byte count once its client has finished sending.
         var echo = Serve(async s => { var b = new byte[4096]; int n; while ((n = await s.ReceiveAsync(b, ct)) > 0) await s.SendAsync(b.AsMemory(0, n), ct); }, ct);
@@ -70,6 +71,11 @@ internal static class LatencyRelayTests
         var socket = new Socket(SocketType.Stream, ProtocolType.Tcp) { NoDelay = true };
         await socket.ConnectAsync(IPAddress.Loopback, port, ct);
         return socket;
+    }
+
+    private sealed class CancelOnDispose(CancellationTokenSource source) : IDisposable
+    {
+        public void Dispose() => source.Cancel();
     }
 
     // A loopback server running handle for each connection until the token ends; returns its port.
