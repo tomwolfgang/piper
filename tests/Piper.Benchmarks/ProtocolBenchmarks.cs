@@ -44,16 +44,12 @@ public class HttpParserBenchmarks
     }
 }
 
-/// <summary>Decoding a header block that <see cref="HpackEncoder"/> wrote, and the Huffman coder alone.</summary>
+/// <summary>Decoding a header block that <see cref="HpackEncoder"/> wrote.</summary>
 [MemoryDiagnoser]
 public class HpackBenchmarks
 {
     private readonly HpackDecoder _decoder = new();
     private byte[] _block = [];
-    private byte[] _huffman = [];
-
-    [Params(32, 512)]
-    public int HuffmanLength { get; set; }
 
     [GlobalSetup]
     public void Setup()
@@ -66,14 +62,26 @@ public class HpackBenchmarks
             ("cookie", "session=" + new string('a', 120) + "; theme=dark"), ("authorization", "Bearer " + new string('t', 100)),
         ];
         _block = HpackEncoder.Encode(fields);
-        _huffman = Huffman.Encode(Encoding.ASCII.GetBytes(string.Concat(Enumerable.Repeat("www.example.com/path?q=", 40))[..HuffmanLength]));
     }
 
     [Benchmark]
     public List<(string Name, string Value)> DecodeHeaderBlock() => _decoder.Decode(_block);
+}
+
+/// <summary>The Huffman coder alone, on its own class so its length parameter does not multiply the header-block benchmark.</summary>
+[MemoryDiagnoser]
+public class HuffmanBenchmarks
+{
+    private byte[] _encoded = [];
+
+    [Params(32, 512)]
+    public int Length { get; set; }
+
+    [GlobalSetup]
+    public void Setup() => _encoded = Huffman.Encode(Encoding.ASCII.GetBytes(string.Concat(Enumerable.Repeat("www.example.com/path?q=", 40))[..Length]));
 
     [Benchmark]
-    public byte[] HuffmanDecode() => Huffman.Decode(_huffman);
+    public byte[] Decode() => Huffman.Decode(_encoded);
 }
 
 /// <summary>Reading a stream of 16 KB DATA frames, the shape of a large HTTP/2 download.</summary>

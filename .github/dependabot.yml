@@ -10,7 +10,10 @@ updates:
     open-pull-requests-limit: 5
 
   - package-ecosystem: nuget
-    directory: /
+    # tests/Piper.Benchmarks is not in Piper.slnx, so the root alone never sees its BenchmarkDotNet reference.
+    directories:
+      - /
+      - /tests/Piper.Benchmarks
     schedule:
       interval: weekly
       day: monday

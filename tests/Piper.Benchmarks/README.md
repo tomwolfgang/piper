@@ -14,10 +14,11 @@ dotnet run -c Release --project tests/Piper.Benchmarks -- --filter "*" --exporte
 | Class | Measures |
 |---|---|
 | `HttpParserBenchmarks` | request and response head parse (15 headers), including making the stream reader |
-| `HpackBenchmarks` | decoding a 9-field header block; `Huffman.Decode` of 32 and 512 bytes |
+| `HpackBenchmarks` | decoding a 9-field header block |
+| `HuffmanBenchmarks` | `Huffman.Decode` of 32 and 512 bytes |
 | `Http2FrameReaderBenchmarks` | reading 64 DATA frames of 16 KB (1 MB) |
 | `ContentCodecBenchmarks` | `ContentCodec.Decode` of a 1 MB body, gzip / deflate / br |
-| `SearchQueryBenchmarks` | `SearchQuery.Matches` over 100,000 sessions, four queries |
+| `SearchQueryBenchmarks` | `SearchQuery.Matches` over 100,000 sessions, four queries (1%, 6%, 2% and 91% of sessions match), repeated (`MatchAll`) and as the first search with nothing cached (`FirstSearch`) |
 | `SessionStoreBenchmarks` | `SessionStore.Add` of 100,000 sessions, `CopyTo` of the full store |
 | `CertificateBenchmarks` | `CertificateAuthority.GetCertificateFor` for a new host (RSA-2048, one shared leaf key) against the same certificate with a shared ECDSA key, a fresh ECDSA key and a fresh RSA key per host |
 
@@ -25,8 +26,14 @@ Notes:
 
 - The benchmarks run in this process (`InProcessNoEmit`) rather than in a generated project that
   BenchmarkDotNet would restore and build over the network, so a run downloads and builds nothing.
+  A command-line job (`--job`, `--runtimes`, `--inProcess` and the like) would add a second job built
+  out of process (checked with `--job Dry`: it generated and built a project), so those flags are
+  refused. For a quick run use `--warmupCount 1 --iterationCount 3 --launchCount 1 --iterationTime 20`,
+  which adjusts the in-process job itself.
 - The certificate benchmarks make their authority in a temporary folder, deleted afterwards. They
   never use the real one and install nothing. Windows deletes each leaf's temporary key container
-  when the certificate is released; a run killed halfway can leave a few small key files behind.
+  when the certificate is released. A run killed halfway leaves `%TEMP%\piper-benchmarks-<guid>`
+  (a throwaway `Piper-Root.pfx` with its key) and a few small key files; the next run deletes such
+  folders older than a day.
 - Close other programs first and trust a difference only when the intervals in the table do not
   overlap. The same rules as `tools/Piper.Bench` apply.
