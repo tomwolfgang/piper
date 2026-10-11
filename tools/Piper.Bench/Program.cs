@@ -4,6 +4,24 @@ using Piper.Bench;
 
 if (args.Length > 0 && args[0] == "host") return await HostMode.RunAsync(args[1..]);
 
+// A label or path with non-ASCII characters prints as written. The code page belongs to the parent shell and
+// outlives this process, so it is set only on a console and put back when the process exits (every return,
+// Ctrl+C included, ends here); with no console it is left alone.
+if (!Console.IsOutputRedirected)
+{
+    try
+    {
+        var prior = Console.OutputEncoding;
+        Console.OutputEncoding = System.Text.Encoding.UTF8;
+        AppDomain.CurrentDomain.ProcessExit += (_, _) =>
+        {
+            try { Console.OutputEncoding = prior; }
+            catch (IOException) { /* the console is gone: nothing to restore */ }
+        };
+    }
+    catch (IOException) { /* no console to change */ }
+}
+
 if (args.Contains("--help") || args.Contains("-h"))
 {
     Console.WriteLine(BenchOptions.Usage);
@@ -11,7 +29,7 @@ if (args.Contains("--help") || args.Contains("-h"))
 }
 
 var self = typeof(HostMode).Assembly.Location;
-if (!BenchOptions.TryParse(args, self, out var options, out var error))
+if (!BenchOptions.TryParse(args, self, name => Scenarios.All.Any(s => s.Name == name), out var options, out var error))
 {
     Console.Error.WriteLine(error);
     return 2;
@@ -34,7 +52,8 @@ try
 
     if (options.Compare is { } pair)
     {
-        Console.Write(BenchReport.Compare(BenchReport.Load(pair.A, out var skippedA), BenchReport.Load(pair.B, out var skippedB), pair.A, pair.B));
+        Console.Write(BenchReport.Compare(BenchReport.Load(pair.A, out var skippedA), BenchReport.Load(pair.B, out var skippedB), pair.A, pair.B,
+            BenchReport.LoadEnv(pair.A), BenchReport.LoadEnv(pair.B)));
         if (skippedA + skippedB > 0) Console.Error.WriteLine($"{skippedA + skippedB} unreadable line(s) skipped.");
         return 0;
     }
