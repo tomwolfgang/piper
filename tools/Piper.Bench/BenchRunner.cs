@@ -45,16 +45,23 @@ internal static class BenchRunner
             // The first start of a build creates the certificate authority and reads its files from disk.
             // That is paid here, once, so the startup scenario measures a normal start. It also comes
             // before the results file is created, so a build that cannot start leaves no file behind.
+            var configurations = new Dictionary<string, string>();
             foreach (var build in options.Hosts)
             {
                 Console.WriteLine($"Priming {build.Label}...");
-                try { await using var primed = await HostClient.StartAsync(build.Path, caDirectory, ct).ConfigureAwait(false); }
+                try
+                {
+                    await using var primed = await HostClient.StartAsync(build.Path, caDirectory, ct).ConfigureAwait(false);
+                    configurations[build.Label] = primed.Configuration;
+                }
                 catch (Exception ex) when (ex is TimeoutException or IOException or FormatException or IndexOutOfRangeException or InvalidOperationException or System.ComponentModel.Win32Exception)
                 {
                     // A build that cannot start, or does not say READY, is a usage problem: say which one.
                     Console.Error.WriteLine($"Could not start the proxy host of '{build.Label}' ({build.Path}): {ex.Message}");
                     return 2;
                 }
+                if (BenchHygiene.IsDebug(configurations[build.Label]))
+                    Console.Error.WriteLine($"WARNING: the proxy host of '{build.Label}' is a Debug build: its numbers say little about Release. Build it with -c Release.");
             }
 
             FileStream results;
@@ -72,7 +79,7 @@ internal static class BenchRunner
             await file.WriteLineAsync(JsonSerializer.Serialize(new
             {
                 schema = BenchRecord.SchemaVersion, kind = "env", utc = DateTime.UtcNow.ToString("O", CultureInfo.InvariantCulture), machine,
-                hosts = options.Hosts.Select(h => new { label = h.Label, file = Path.GetFileName(h.Path) }), scenarios = scenarios.Select(s => s.Name), runs = options.Runs, duration_s = options.Duration.TotalSeconds,
+                hosts = options.Hosts.Select(h => new { label = h.Label, file = Path.GetFileName(h.Path), configuration = configurations[h.Label] }), scenarios = scenarios.Select(s => s.Name), runs = options.Runs, duration_s = options.Duration.TotalSeconds,
             })).ConfigureAwait(false);
 
             for (var run = 1; run <= options.Runs; run++)

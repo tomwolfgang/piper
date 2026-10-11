@@ -145,9 +145,10 @@ internal static class TlsScenarios
         }
 
         if (began == 0) throw new InvalidOperationException("No response arrived within the window.");
-        // The body ended before the window did: all of it must have arrived, or a short answer would pass as a fast one.
+        // Headers alone are not a measurement (a stalled body would pass as mbps=0), and a body that ended
+        // before the window did must be all there, or a short answer would pass as a fast one.
         const long expected = 1024L * 1048576;
-        if (!window.IsCancellationRequested && received < expected) throw new InvalidOperationException($"The response ended after {received} of {expected} bytes.");
+        if (BenchStats.DownloadFailure(received, expected, window.IsCancellationRequested) is { } failure) throw new InvalidOperationException(failure);
         var seconds = Stopwatch.GetElapsedTime(began).TotalSeconds;
         var after = await host.StatsAsync(c.Token).ConfigureAwait(false);
         return new()
