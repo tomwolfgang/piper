@@ -26,9 +26,9 @@
        build time; the secretless CI cannot build it, so the restore audit (NU1902/NU1903 as errors)
        failed every pull request. Whether to remove ImageSharp or license 4.x is still open.
        Decoder advisories a hostile captured body can reach through the inspector's image viewer. They
-       are mitigated by ImageGuard (src/Piper.App/Controls/ImageGuard.cs, the companion "S11 bridge
-       (2/2)" change), which refuses TIFF/BigTIFF and any embedded ICC profile before the library sees
-       the bytes; until that lands they are suppressed but NOT mitigated:
+       are mitigated by ImageGuard (src/Piper.App/Controls/ImageGuard.cs, PR #108 "S11 bridge (2/2)",
+       which must merge together with this change), which refuses TIFF/BigTIFF, every way PNG, JPEG,
+       WebP and BMP declare an ICC profile, and out-of-bounds sizes before the library sees the bytes:
          GHSA-gwg2-r3hj-4w44  ICC CLUT parsing allocates from unvalidated dimensions (Piper never
                               reads IccProfile.Entries, so this path is not reached even unguarded)
          GHSA-wmxv-xphr-5c9g  BigTIFF IFD count keeps a decoder thread in a non-progressing loop
