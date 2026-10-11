@@ -7,8 +7,8 @@ namespace Piper.Bench;
 internal static class LoadGenerator
 {
     // Bounds the memory a long --duration can use; the count of completed requests is not capped.
-    // maxRequests bounds a call by the number of requests it sends instead: a proxy that opens an upstream
-    // connection per request (h2_c100) would otherwise use up the machine's ephemeral ports for minutes.
+    // maxRequests bounds a call by the number of requests it measures instead (RequestBudget): a proxy that
+    // opens an upstream connection per request (h2_c100) would otherwise use up the machine's ephemeral ports.
     private const int MaxSamplesPerWorker = 250_000;
 
     public static async Task<Dictionary<string, double>> RunAsync(ScenarioContext context, int concurrency, TimeSpan ramp, TimeSpan duration,
@@ -19,7 +19,8 @@ internal static class LoadGenerator
         using var client = newClient?.Invoke() ?? context.NewClient(concurrency);
         context.ResetConnectionCounts();
 
-        long errors = 0, timeouts = 0, issued = 0;
+        long errors = 0, timeouts = 0;
+        var budget = new RequestBudget(maxRequests);
         var measuring = false;
         var stop = false;
         var latencies = new List<long>[concurrency];
@@ -27,30 +28,34 @@ internal static class LoadGenerator
         var workers = Enumerable.Range(0, concurrency).Select(w => Task.Run(async () =>
         {
             var samples = latencies[w] = new List<long>(8192);
-            while (!Volatile.Read(ref stop) && Interlocked.Increment(ref issued) <= maxRequests)
+            while (!Volatile.Read(ref stop))
             {
+                // A request belongs to the window, and to the budget, by when it starts: the ramp and the
+                // stats round trip before the window do not use up maxRequests, and requests, errors and
+                // timeouts all count the same set.
+                var counted = Volatile.Read(ref measuring);
+                if (!budget.TryTake(counted)) break;
                 var began = Stopwatch.GetTimestamp();
                 try
                 {
                     using var response = await send(client, ct).ConfigureAwait(false);
                     await response.Content.ReadAsByteArrayAsync(ct).ConfigureAwait(false);
+                    if (!counted) continue;
                     if ((int)response.StatusCode != 200) Interlocked.Increment(ref errors);
-                    else if (Volatile.Read(ref measuring))
+                    else
                     {
                         completed[w]++;
                         if (samples.Count < MaxSamplesPerWorker) samples.Add(Stopwatch.GetTimestamp() - began);
                     }
                 }
-                catch (OperationCanceledException) when (!ct.IsCancellationRequested) { Interlocked.Increment(ref timeouts); }
-                catch (HttpRequestException) { Interlocked.Increment(ref errors); }
+                catch (OperationCanceledException) when (!ct.IsCancellationRequested) { if (counted) Interlocked.Increment(ref timeouts); }
+                catch (HttpRequestException) { if (counted) Interlocked.Increment(ref errors); }
             }
         }, CancellationToken.None)).ToArray();
 
         try
         {
             await Task.Delay(ramp, ct).ConfigureAwait(false);
-            Interlocked.Exchange(ref errors, 0);
-            Interlocked.Exchange(ref timeouts, 0);
             var before = await host.StatsAsync(ct).ConfigureAwait(false);
             var began = Stopwatch.GetTimestamp();
             Volatile.Write(ref measuring, true);

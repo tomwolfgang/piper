@@ -1,5 +1,17 @@
 namespace Piper.Bench;
 
+/// <summary>The request budget of one load run (<c>maxRequests</c>). Only requests that start while the
+/// measured window is open use it, so a ramp and the stats round trip before the window cannot exhaust
+/// it and leave the window short of the promised count. Thread-safe.</summary>
+internal sealed class RequestBudget(long limit)
+{
+    private long _taken;
+
+    /// <summary>Whether a request may start now: always before the window, and while the window is open
+    /// until <c>limit</c> requests have started in it.</summary>
+    public bool TryTake(bool windowOpen) => !windowOpen || Interlocked.Increment(ref _taken) <= limit;
+}
+
 /// <summary>The arithmetic behind the summary and compare tables. Pure, so the smoke tests link
 /// this file and check it without starting a proxy.</summary>
 internal static class BenchStats
