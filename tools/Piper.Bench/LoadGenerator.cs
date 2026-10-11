@@ -63,15 +63,26 @@ internal static class LoadGenerator
         try
         {
             await Task.Delay(ramp, ct).ConfigureAwait(false);
-            var before = await host.StatsAsync(ct).ConfigureAwait(false);
-            var began = Stopwatch.GetTimestamp();
-            Volatile.Write(ref measuring, true);
+            // The proxy's CPU and allocation counters and the request count must cover the same window, but a
+            // stats round trip takes milliseconds while the load keeps running. So `measuring` flips just before
+            // each command is written, and the host reads the counters a moment later: each edge errs by that
+            // wake-up time, in opposite directions (a few requests too many in the divisor at the start, too few
+            // at the end), instead of both erring upward by the whole round trip.
+            long began = 0;
+            var before = await host.StatsAsync(ct, () =>
+            {
+                began = Stopwatch.GetTimestamp();
+                Volatile.Write(ref measuring, true);
+            }).ConfigureAwait(false);
             // Ends at the duration, or earlier when every worker has used up maxRequests.
             await Task.WhenAny(Task.WhenAll(workers), Task.Delay(duration, ct)).ConfigureAwait(false);
             ct.ThrowIfCancellationRequested();
-            Volatile.Write(ref measuring, false);
-            var seconds = Stopwatch.GetElapsedTime(began).TotalSeconds;
-            var after = await host.StatsAsync(ct).ConfigureAwait(false);
+            var seconds = 0.0;
+            var after = await host.StatsAsync(ct, () =>
+            {
+                Volatile.Write(ref measuring, false);
+                seconds = Stopwatch.GetElapsedTime(began).TotalSeconds;
+            }).ConfigureAwait(false);
             Volatile.Write(ref stop, true);
             await Task.WhenAll(workers).ConfigureAwait(false);
 
@@ -85,8 +96,8 @@ internal static class LoadGenerator
                 ["p99_ms"] = BenchStats.Percentile(millis, 0.99),
                 ["errors"] = Interlocked.Read(ref errors),
                 ["timeouts"] = Interlocked.Read(ref timeouts),
-                ["cpu_per_req_us"] = total == 0 ? 0 : (after["cpums"] - before["cpums"]) * 1000.0 / total,
-                ["alloc_per_req_bytes"] = total == 0 ? 0 : (after["alloc"] - before["alloc"]) / (double)total,
+                ["cpu_per_req_us"] = BenchStats.PerRequest(after["cpums"] - before["cpums"], total, 1000.0),
+                ["alloc_per_req_bytes"] = BenchStats.PerRequest(after["alloc"] - before["alloc"], total),
                 ["client_conns"] = context.ClientConnections,
                 ["upstream_conns"] = context.Origin.ConnectionCount,
             };
