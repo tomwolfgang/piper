@@ -53,6 +53,14 @@ build and carries `[n<5]` below 5; use 5 or more (15 for large transfers).
 A load run with more than 1% of its requests failed or timed out, or none succeeded, is a failure: it is
 left out of every median and listed in the summary with its error count.
 
+A request is counted (in `requests`, `errors`, `timeouts`, the latencies and the `maxRequests` budget) by when
+it starts: the ones already in flight when the window opens belong to the ramp, and the ones that start inside
+it are counted even if they finish after it closes. For a time-limited scenario the difference from counting by
+completion is about `concurrency` requests out of thousands. `h2_c100` ends when its 2,000 requests are done and
+has no ramp, so its first 100 (cold) requests start before the window opens: their work now falls inside the
+window without being counted, and its `rps` reads up to 100/2,000 = 5% lower than in results recorded before this
+change. Re-record the baseline before comparing `h2_c100` `rps` across it.
+
 ## Results files
 
 `--out` names a new file (default `piper-bench-<UTC time>.jsonl`); an existing file is never overwritten, and a
