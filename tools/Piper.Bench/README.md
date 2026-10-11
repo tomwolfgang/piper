@@ -68,6 +68,7 @@ metrics with a results file made before the change.
 `--out` names a new file (default `piper-bench-<UTC time>.jsonl`); an existing file is never overwritten, and a
 device name or unwritable folder is refused before any host starts. Schema 2 is made to be shared: an `env`
 line, a `build` line (configuration, runtime, GC, CPU, power plan, commit of the driver's checkout), then one
-line per run, with no user, machine or folder name and no path (hosts by label and file name, paths removed
+line per run, with no user, machine or folder name and no path (hosts by label, file name and the build configuration each
+reports, warned about when it is Debug, at start and in `--compare`; files from before that read as unknown; paths removed
 from errors, only known noisy processes named). `--host label=path` **runs** that file with your rights: name
 only builds you made or trust.

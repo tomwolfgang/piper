@@ -55,6 +55,14 @@ internal static partial class BenchHygiene
     [GeneratedRegex(@"^(?:CON|PRN|AUX|NUL|(?:COM|LPT)[1-9\u00B9\u00B2\u00B3]|CONIN\$|CONOUT\$)$", RegexOptions.IgnoreCase)]
     private static partial Regex DeviceName();
 
+    /// <summary>A build configuration a host reported, as it may be shown and recorded: 1 to 16 letters, digits,
+    /// '.', '_' or '-', else <c>unknown</c>. The READY line comes from a file the user chose to run.</summary>
+    public static string ConfigurationToken(string? reported) =>
+        reported is { Length: > 0 and <= 16 } && reported.All(c => char.IsAsciiLetterOrDigit(c) || c is '.' or '_' or '-') ? reported : "unknown";
+
+    /// <summary>Whether <paramref name="configuration"/> is a Debug build.</summary>
+    public static bool IsDebug(string? configuration) => string.Equals(configuration, "Debug", StringComparison.OrdinalIgnoreCase);
+
     /// <summary>Why <paramref name="path"/> cannot be the results file, or null when a file can be created
     /// there. Checked before any proxy host is started, so the user learns at once, not after the run.</summary>
     public static string? CheckOut(string path)

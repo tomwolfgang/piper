@@ -19,6 +19,9 @@ internal sealed class HostClient : IAsyncDisposable
     /// <summary>The host's own time from process entry to a listening proxy, including the CA load.</summary>
     public double StartMs { get; private set; }
 
+    /// <summary>The build configuration the host reported (<c>Release</c>, <c>Debug</c>), or <c>unknown</c>.</summary>
+    public string Configuration { get; private set; } = "unknown";
+
     /// <summary><paramref name="hostPath"/> is a <c>.dll</c> (run with <c>dotnet</c>) or an executable of
     /// a <c>piper-bench</c> build; the proxy it runs is whatever Piper.Core that build was made with.</summary>
     public static async Task<HostClient> StartAsync(string hostPath, string caDirectory, CancellationToken ct, IEnumerable<string>? hostArguments = null)
@@ -44,6 +47,8 @@ internal sealed class HostClient : IAsyncDisposable
             var ready = (await client.ReadAsync("READY", ct).ConfigureAwait(false)).Split(' ');
             client.Port = int.Parse(ready[1], CultureInfo.InvariantCulture);
             client.StartMs = double.Parse(ready[2], CultureInfo.InvariantCulture);
+            // Hosts built before the configuration was reported say nothing: unknown, not Release.
+            client.Configuration = ready.Length > 3 ? BenchHygiene.ConfigurationToken(ready[3]) : "unknown";
             return client;
         }
         catch
