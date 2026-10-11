@@ -55,6 +55,21 @@ internal static partial class BenchHygiene
     [GeneratedRegex(@"^(?:CON|PRN|AUX|NUL|(?:COM|LPT)[1-9\u00B9\u00B2\u00B3]|CONIN\$|CONOUT\$)$", RegexOptions.IgnoreCase)]
     private static partial Regex DeviceName();
 
+    /// <summary>The first of <paramref name="candidates"/> that is a fully qualified path to <c>dotnet.exe</c>
+    /// (or <c>dotnet</c>) that exists, or null. Starting <c>dotnet</c> by name would let CreateProcess take a
+    /// <c>dotnet.exe</c> from the current directory first, so the driver only ever starts a path it chose.</summary>
+    public static string? ChooseDotnet(IEnumerable<string?> candidates, Func<string, bool> exists)
+    {
+        foreach (var candidate in candidates)
+        {
+            if (string.IsNullOrWhiteSpace(candidate) || !Path.IsPathFullyQualified(candidate)) continue;
+            var name = Path.GetFileName(candidate);
+            if (!name.Equals("dotnet.exe", StringComparison.OrdinalIgnoreCase) && !name.Equals("dotnet", StringComparison.OrdinalIgnoreCase)) continue;
+            if (exists(candidate)) return candidate;
+        }
+        return null;
+    }
+
     /// <summary>Why <paramref name="path"/> cannot be the results file, or null when a file can be created
     /// there. Checked before any proxy host is started, so the user learns at once, not after the run.</summary>
     public static string? CheckOut(string path)

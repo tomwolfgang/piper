@@ -24,7 +24,7 @@ internal sealed class HostClient : IAsyncDisposable
     public static async Task<HostClient> StartAsync(string hostPath, string caDirectory, CancellationToken ct, IEnumerable<string>? hostArguments = null)
     {
         var isDll = hostPath.EndsWith(".dll", StringComparison.OrdinalIgnoreCase);
-        var startInfo = new ProcessStartInfo(isDll ? "dotnet" : hostPath)
+        var startInfo = new ProcessStartInfo(isDll ? FindDotnet() : hostPath)
         {
             RedirectStandardInput = true,
             RedirectStandardOutput = true,
@@ -52,6 +52,18 @@ internal sealed class HostClient : IAsyncDisposable
             throw;
         }
     }
+
+    /// <summary>The <c>dotnet.exe</c> that runs a host <c>.dll</c>, as a full path: this process's own when it is
+    /// <c>dotnet</c>, else the SDK's <c>DOTNET_HOST_PATH</c>, else the registered or default install. Never the bare
+    /// name, which CreateProcess would resolve in the current directory first.</summary>
+    private static string FindDotnet() => BenchHygiene.ChooseDotnet(
+        [
+            Environment.ProcessPath,
+            Environment.GetEnvironmentVariable("DOTNET_HOST_PATH"),
+            SystemInfo.RegisteredDotnetFolder() is { } folder ? Path.Combine(folder, "dotnet.exe") : null,
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "dotnet", "dotnet.exe"),
+        ], File.Exists)
+        ?? throw new InvalidOperationException("Could not find dotnet.exe to run a host .dll; run the driver with dotnet, set DOTNET_HOST_PATH, or pass a host .exe.");
 
     private async Task<string> ReadAsync(string prefix, CancellationToken ct)
     {
