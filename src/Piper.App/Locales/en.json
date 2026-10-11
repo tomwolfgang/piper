@@ -518,10 +518,6 @@
     "detectedImage": "Detected image (no Content-Type)",
     "imageDimensions": "{{width, N0}} x {{height, N0}} px\n{{label}}",
     "imageDecodeFailed": "Could not display this response as an image: unsupported or invalid image data.",
-    "imageBlocked": "This image was not decoded. Piper does not decode TIFF images or images with an embedded colour profile, because its image library has known security advisories that they can trigger.",
-    "imageRefused": "This image was not decoded: it is corrupt, or larger than {{megapixels, N0}} megapixels or {{megabytes, N0}} MB.",
-    "imageDecoding": "Decoding image...",
-    "imageTimedOut": "Decoding this image took too long and was stopped.",
     "imageFailed": "Could not display this response as an image: {{message}}",
 
     "notAVideoContentType": "Response does not have a video content type.",
