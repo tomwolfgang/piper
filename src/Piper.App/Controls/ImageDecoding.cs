@@ -34,6 +34,19 @@ internal static class ImageDecoding
     }
 
     /// <summary>
+    /// Runs <see cref="ImageGuard"/> and, only when it allows the body, decodes it. Both steps belong
+    /// off the UI thread: on a hostile 32 MiB JPEG the guard's scan alone costs about 100 ms. The
+    /// bitmap is null exactly when the verdict is not <see cref="ImageGuardVerdict.Allowed"/>.
+    /// </summary>
+    public static (Bitmap? Bitmap, ImageGuardVerdict Verdict) GuardAndDecode(byte[] body, CancellationToken cancellationToken)
+    {
+        var verdict = ImageGuard.Check(body);
+        return verdict == ImageGuardVerdict.Allowed
+            ? (DecodeToBitmap(body, cancellationToken), verdict)
+            : (null, verdict);
+    }
+
+    /// <summary>
     /// Decodes straight into a GDI+ bitmap, row by row. Safe to call off the UI thread, and the
     /// decoder observes <paramref name="cancellationToken"/>. Going through a PNG encode and decode
     /// first (the earlier approach) cost up to 28 s of a 37 s total for a noisy 8192 x 8192 JPEG.
