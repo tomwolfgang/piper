@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using Piper.App.Controls;
 using Piper.Core.Http;
 using SixLabors.ImageSharp;
@@ -100,6 +101,61 @@ internal static class ImageDecodingTests
             check(TextOf(inspector).Contains("This image was not decoded."), "a BMP declaring a 1 GiB profile is refused with the fixed message");
         }
 
+        Console.WriteLine("== the guard scan of a hostile 32 MiB JPEG does not block the UI thread");
+        using (var form = new Form { Width = 700, Height = 500 })
+        {
+            var inspector = new MessageInspector("test", showImageViewer: true) { Dock = DockStyle.Fill };
+            form.Controls.Add(inspector);
+            form.Show();
+
+            // A tiny baseline frame whose one scan is 32 MiB of 0xFF 0x00 stuffing: the guard visits every
+            // pair, which is its slowest walk. The control has the same size and shape but nothing to visit
+            // (IndexOf skips zeros at memory speed), so SetMessage's other work on 32 MiB (the text and hex
+            // views) cancels out and only the guard's cost is left. Both are measured on this machine.
+            var slow = HostileJpeg(ImageGuard.MaxBytes, stuffed: true);
+            var control = HostileJpeg(ImageGuard.MaxBytes, stuffed: false);
+            double Guard(byte[] body) => Enumerable.Range(0, 3).Min(_ =>
+            {
+                var watch = Stopwatch.StartNew();
+                ImageGuard.Check(body);
+                return watch.Elapsed.TotalMilliseconds;
+            });
+            var guardCost = Guard(slow) - Guard(control);
+            check(ImageGuard.Check(slow) == ImageGuardVerdict.Allowed && ImageGuard.Check(control) == ImageGuardVerdict.Allowed,
+                "both JPEGs pass the guard, so the whole body is scanned");
+
+            double UiThreadBlocked(byte[] body)
+            {
+                var watch = Stopwatch.StartNew();
+                inspector.SetMessage(Response("image/jpeg", body), "jpg");
+                var blocked = watch.Elapsed.TotalMilliseconds;
+                pumpUntil(() => !TextOf(inspector).Contains("Decoding image..."));
+                check(!TextOf(inspector).Contains("Decoding image..."), "the decode finishes or is refused");
+                return blocked;
+            }
+
+            UiThreadBlocked(control); // warms the view code paths
+            var baseline = Enumerable.Range(0, 3).Min(_ => UiThreadBlocked(control));
+            var blockedByHostile = Enumerable.Range(0, 3).Min(_ => UiThreadBlocked(slow));
+            Console.WriteLine($"   guard scan {guardCost:N0} ms; SetMessage held the UI thread {blockedByHostile:N0} ms (control {baseline:N0} ms)");
+            if (guardCost < 20) Console.WriteLine("   (the guard scan is too fast on this machine to tell the threads apart; bound not asserted)");
+            else check(blockedByHostile - baseline < guardCost / 2, $"SetMessage does not run the guard scan on the UI thread ({blockedByHostile - baseline:N0} ms extra against a {guardCost:N0} ms scan)");
+
+            // Refusals still reach the status line with the fixed texts, now from the worker's verdict.
+            (string Name, byte[] Body, string Expected)[] refused =
+            [
+                ("a body over the byte cap", new byte[ImageGuard.MaxBytes + 1], "larger than 16 megapixels or 32 MB."),
+                ("a TIFF", [0x49, 0x49, 0x2A, 0x00, 8, 0, 0, 0], "Piper does not decode TIFF images"),
+                ("bytes that are not an image", "<html>not an image</html>"u8.ToArray(), "unsupported or invalid image data."),
+            ];
+            foreach (var (name, body, expected) in refused)
+            {
+                inspector.SetMessage(Response("image/png", body), "png");
+                pumpUntil(() => TextOf(inspector).Contains(expected));
+                check(TextOf(inspector).Contains(expected), $"{name} is refused with the fixed message");
+            }
+        }
+
         using (var form = new Form { Width = 700, Height = 500 })
         {
             var inspector = new MessageInspector("test", showImageViewer: true) { Dock = DockStyle.Fill };
@@ -111,6 +167,19 @@ internal static class ImageDecodingTests
         var ticks = 0;
         pumpUntil(() => ++ticks > 30);
         check(true, "closing the window while an image decodes raises nothing");
+    }
+
+    // SOI, a baseline 8 x 8 frame, one scan, then 0xFF 0x00 pairs (or zeros) up to the given length, then EOI.
+    private static byte[] HostileJpeg(int length, bool stuffed)
+    {
+        byte[] head = [0xFF, 0xD8, 0xFF, 0xC0, 0, 11, 8, 0, 8, 0, 8, 1, 1, 0x11, 0, 0xFF, 0xDA, 0, 8, 1, 1, 0, 0, 0x3F, 0];
+        var data = new byte[length];
+        head.CopyTo(data, 0);
+        if (stuffed)
+            for (var i = head.Length; i + 1 < length - 2; i += 2) data[i] = 0xFF;
+        data[length - 2] = 0xFF;
+        data[length - 1] = 0xD9;
+        return data;
     }
 
     private static HttpResponseData Response(string contentType, byte[] body)

@@ -663,16 +663,17 @@ public sealed class MessageInspector : UserControl
         try
         {
             var body = _message.DecodedBody;
-            if (RefusalText(ImageGuard.Check(body)) is { } refusal)
+
+            // The guard, decoding and re-encoding take up to seconds for a large image, so they run off
+            // the UI thread and into a buffer: a timeout or failure never leaves a half-written file behind.
+            using var timeout = new CancellationTokenSource(ImageWorkTimeout);
+            var (encoded, verdict) = await Task.Run(() => GuardAndConvertImage(body, format, timeout.Token), timeout.Token);
+            if (encoded is null)
             {
-                MessageBox.Show(this, refusal, Strings.App.Name, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                MessageBox.Show(this, RefusalText(verdict)!, Strings.App.Name, MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
 
-            // Decoding and re-encoding take seconds for a large image, so they run off the UI thread
-            // and into a buffer: a timeout or failure never leaves a half-written file behind.
-            using var timeout = new CancellationTokenSource(ImageWorkTimeout);
-            var encoded = await Task.Run(() => ConvertImage(body, format, timeout.Token), timeout.Token);
             await File.WriteAllBytesAsync(path, encoded);
         }
         catch (OperationCanceledException)
@@ -686,6 +687,14 @@ public sealed class MessageInspector : UserControl
                 MessageBox.Show(this, Strings.Inspector.SaveImageFailed(ex.Message),
                     Strings.App.Name, MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
+    }
+
+    // The encoded bytes are null exactly when the guard refused the body.
+    private static async Task<(byte[]? Encoded, ImageGuardVerdict Verdict)> GuardAndConvertImage(
+        byte[] body, string format, CancellationToken cancellationToken)
+    {
+        var verdict = ImageGuard.Check(body);
+        return verdict == ImageGuardVerdict.Allowed ? (await ConvertImage(body, format, cancellationToken), verdict) : (null, verdict);
     }
 
     // The token reaches both the decoder and the encoder, so the timeout stops the work, not just the wait.
@@ -1136,18 +1145,21 @@ public sealed class MessageInspector : UserControl
         try
         {
             var body = message.DecodedBody;
-            if (RefusalText(ImageGuard.Check(body)) is { } refusal)
+            _imageDecoding = decoding;
+            _imageStatus.Text = Strings.Inspector.ImageDecoding;
+
+            // The guard scans the whole body (about 100 ms for a hostile 32 MiB JPEG), so it shares the
+            // decoder's thread, timeout and cancellation rather than running here.
+            var (bitmap, verdict) = await Task.Run(() => ImageDecoding.GuardAndDecode(body, decoding.Token), decoding.Token);
+            if (!ReferenceEquals(_imageDecoding, decoding) || IsDisposed)
             {
-                _imageStatus.Text = refusal;
+                bitmap?.Dispose();
                 return;
             }
 
-            _imageDecoding = decoding;
-            _imageStatus.Text = Strings.Inspector.ImageDecoding;
-            var bitmap = await Task.Run(() => ImageDecoding.DecodeToBitmap(body, decoding.Token), decoding.Token);
-            if (!ReferenceEquals(_imageDecoding, decoding) || IsDisposed)
+            if (bitmap is null)
             {
-                bitmap.Dispose();
+                _imageStatus.Text = RefusalText(verdict);
                 return;
             }
 
