@@ -25,8 +25,7 @@ internal static class BenchTempTests
             var notHex = Make("piper-bench-" + new string('z', 32), old: true);
             var target = Make("junction-target", old: true);
             var junction = Path.Combine(root, "piper-bench-" + new string('d', 32));
-            var made = Process.Start(new ProcessStartInfo("cmd", $"/c mklink /J \"{junction}\" \"{target}\"") { CreateNoWindow = true, RedirectStandardOutput = true })!;
-            made.WaitForExit();
+            MakeJunction(junction, target);
             Directory.SetCreationTimeUtc(junction, DateTime.UtcNow.AddDays(-3));
             var asFile = Path.Combine(root, "piper-bench-" + new string('e', 32) + ".jsonl");
             File.WriteAllText(asFile, "x");
@@ -89,8 +88,7 @@ internal static class BenchTempTests
             File.WriteAllText(Path.Combine(outside, "precious.txt"), "keep");
             Directory.CreateDirectory(Path.GetDirectoryName(link)!);
             Directory.SetCreationTimeUtc(Path.GetDirectoryName(link)!, DateTime.UtcNow.AddDays(-3));
-            var made = Process.Start(new ProcessStartInfo("cmd", $"/c mklink /J \"{link}\" \"{outside}\"") { CreateNoWindow = true, RedirectStandardOutput = true })!;
-            made.WaitForExit();
+            MakeJunction(link, outside);
             runner.IsTrue(Directory.Exists(link), "the test could make a junction inside a run folder");
 
             // Whether the OS lets the folder go with the link in it is not the point (this .NET refuses, so it stays); the target must survive either way.
@@ -105,4 +103,10 @@ internal static class BenchTempTests
         }
         return Task.CompletedTask;
     });
+
+    private static void MakeJunction(string link, string target)
+    {
+        using var made = Process.Start(new ProcessStartInfo("cmd", $"/c mklink /J \"{link}\" \"{target}\"") { CreateNoWindow = true, RedirectStandardOutput = true })!;
+        if (!made.WaitForExit(TimeSpan.FromSeconds(30))) made.Kill(true);
+    }
 }
