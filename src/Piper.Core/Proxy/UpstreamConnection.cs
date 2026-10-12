@@ -28,6 +28,12 @@ internal sealed class UpstreamConnection : IDisposable
     public TcpClient Client { get; }
     public Stream Stream { get; }
     public HttpStreamReader Reader { get; }
+
+    private HttpStreamReader? _responseBodyReader;
+
+    /// <summary>An HTTP/2 response is read through a reader of its own, which lives and dies with
+    /// this connection: its idle deadline holds a registration on the caller's token until disposed.</summary>
+    public void AdoptResponseBodyReader(HttpStreamReader reader) => _responseBodyReader = reader;
     public string Host { get; }
     public int Port { get; }
     public bool IsTls { get; }
@@ -136,6 +142,7 @@ internal sealed class UpstreamConnection : IDisposable
     public void Dispose()
     {
         Reader.Dispose();
+        _responseBodyReader?.Dispose();
         try { Stream.Dispose(); } catch { /* already torn down */ }
         try { Client.Dispose(); } catch { /* already torn down */ }
     }

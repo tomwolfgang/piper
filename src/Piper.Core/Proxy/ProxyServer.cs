@@ -582,7 +582,8 @@ public sealed class ProxyServer : IAsyncDisposable
         var clientEndpoint = client.Client.RemoteEndPoint?.ToString() ?? "?";
         var processName = ClientProcessLookup.Resolve(client.Client.RemoteEndPoint as IPEndPoint);
 
-        var clientStream = new GuardedClientStream(client.GetStream(), _options.IdleTimeout);
+        // Disposed with the connection: its deadline holds a registration on the run's token until then.
+        await using var clientStream = new GuardedClientStream(client.GetStream(), _options.IdleTimeout);
         using var reader = new HttpStreamReader(clientStream);
         using var slot = new ConnectionSlot();
 
@@ -804,7 +805,7 @@ public sealed class ProxyServer : IAsyncDisposable
             return;
         }
 
-        var tunnel = new GuardedClientStream(ssl, _options.IdleTimeout);
+        await using var tunnel = new GuardedClientStream(ssl, _options.IdleTimeout);
         using var tlsReader = new HttpStreamReader(tunnel);
         using var slot = new ConnectionSlot();
 

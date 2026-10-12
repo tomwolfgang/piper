@@ -18,6 +18,7 @@ namespace Piper.Core.Proxy;
 /// </remarks>
 internal sealed class GuardedClientStream(Stream inner, TimeSpan writeTimeout) : Stream
 {
+    private readonly IoDeadline _deadline = new();
     private bool _floorArmed;
     private TimeSpan _window;
     private long _minimum;
@@ -81,17 +82,24 @@ internal sealed class GuardedClientStream(Stream inner, TimeSpan writeTimeout) :
 
     public override async ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken = default)
     {
-        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        deadline.CancelAfter(writeTimeout);
+        // One deadline for the life of the stream, started only for a write that did not complete on
+        // the spot (see IoDeadline), rather than a source and a timer for every write.
+        var lease = _deadline.Begin(writeTimeout, cancellationToken);
         try
         {
-            await inner.WriteAsync(buffer, deadline.Token).ConfigureAwait(false);
+            var write = inner.WriteAsync(buffer, lease.Token);
+            if (!write.IsCompleted) lease.Arm();
+            await write.ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
             // An IOException, so every path that already handles a client that went away handles this.
             throw new IOException(
                 $"The client did not read for {writeTimeout.TotalSeconds:0.#}s; treating the connection as stalled.");
+        }
+        finally
+        {
+            lease.End();
         }
     }
 
@@ -127,12 +135,18 @@ internal sealed class GuardedClientStream(Stream inner, TimeSpan writeTimeout) :
 
     protected override void Dispose(bool disposing)
     {
-        if (disposing) inner.Dispose();
+        if (disposing)
+        {
+            _deadline.Dispose();
+            inner.Dispose();
+        }
+
         base.Dispose(disposing);
     }
 
     public override async ValueTask DisposeAsync()
     {
+        _deadline.Dispose();
         await inner.DisposeAsync().ConfigureAwait(false);
         await base.DisposeAsync().ConfigureAwait(false);
     }

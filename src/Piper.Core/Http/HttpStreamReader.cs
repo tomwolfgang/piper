@@ -18,6 +18,7 @@ public sealed class HttpStreamReader : IDisposable
     private int _start;   // first unconsumed byte
     private int _end;     // one past last valid byte
     private bool _disposed;
+    private IoDeadline? _deadline;
 
     public HttpStreamReader(Stream stream, int bufferSize = DefaultBufferSize)
     {
@@ -85,11 +86,15 @@ public sealed class HttpStreamReader : IDisposable
         if (IdleTimeout == Timeout.InfiniteTimeSpan)
             return await _stream.ReadAsync(destination, ct).ConfigureAwait(false);
 
-        using var idle = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        idle.CancelAfter(IdleTimeout);
+        // One deadline for the life of the reader, started only for a read that did not complete
+        // on the spot (see IoDeadline), rather than a source and a timer for every read.
+        var idle = IdleTimeout;
+        var lease = (_deadline ??= new IoDeadline()).Begin(idle, ct);
         try
         {
-            return await _stream.ReadAsync(destination, idle.Token).ConfigureAwait(false);
+            var read = _stream.ReadAsync(destination, lease.Token);
+            if (!read.IsCompleted) lease.Arm();
+            return await read.ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {
@@ -97,7 +102,11 @@ public sealed class HttpStreamReader : IDisposable
             // named reason: a silently abandoned read is indistinguishable from the hang it exists
             // to prevent.
             throw new HttpStalledException(
-                $"No data received for {IdleTimeout.TotalSeconds:0.#}s; treating the connection as stalled.");
+                $"No data received for {idle.TotalSeconds:0.#}s; treating the connection as stalled.");
+        }
+        finally
+        {
+            lease.End();
         }
     }
 
@@ -228,6 +237,7 @@ public sealed class HttpStreamReader : IDisposable
     {
         if (_disposed) return;
         _disposed = true;
+        _deadline?.Dispose();
         ArrayPool<byte>.Shared.Return(_buffer);
         _buffer = [];
     }
