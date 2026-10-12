@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Text;
 
 namespace Piper.Core.Http;
@@ -125,6 +126,12 @@ public sealed class HttpRequestData : HttpMessage
 
     public override string StartLine => $"{Method} {RequestTarget} {HttpVersion}";
 
+    /// <summary>
+    /// A copy whose headers, method, target and URL can be changed without touching this message.
+    /// The body array is shared, not copied: a body is replaced, never written into (see
+    /// <see cref="HttpMessage.Body"/>), so the two messages cannot disturb each other, and a
+    /// large upload is not held in memory twice for the length of the exchange.
+    /// </summary>
     public HttpRequestData Clone() => new()
     {
         Method = Method,
@@ -132,12 +139,17 @@ public sealed class HttpRequestData : HttpMessage
         HttpVersion = HttpVersion,
         Url = Url,
         Headers = Headers.Clone(),
-        Body = (byte[])Body.Clone(),
+        Body = Body,
         BodyTotalLength = BodyTotalLength,
     };
 
-    /// <summary>Serialises in origin-form, which is what an upstream origin server expects.</summary>
-    public byte[] ToOriginFormBytes()
+    /// <summary>A body this small is copied behind its head and sent in one write; a larger one is
+    /// written from its own array, which costs a second write instead of a second copy of it.</summary>
+    private const int SingleWriteBodyBytes = 16 * 1024;
+
+    /// <summary>Writes the request in origin-form, which is what an upstream origin server expects: the
+    /// head, then the body. The body is not copied into a buffer of its own to do so.</summary>
+    public async ValueTask WriteOriginFormAsync(Stream stream, CancellationToken ct)
     {
         var target = Url is not null ? Url.PathAndQuery : RequestTarget;
         var sb = new StringBuilder();
@@ -145,11 +157,27 @@ public sealed class HttpRequestData : HttpMessage
         sb.Append(Headers.ToRawString());
         sb.Append("\r\n");
         var head = Encoding.Latin1.GetBytes(sb.ToString());
-        if (Body.Length == 0) return head;
-        var full = new byte[head.Length + Body.Length];
-        Buffer.BlockCopy(head, 0, full, 0, head.Length);
-        Buffer.BlockCopy(Body, 0, full, head.Length, Body.Length);
-        return full;
+
+        if (Body.Length == 0 || Body.Length > SingleWriteBodyBytes)
+        {
+            await stream.WriteAsync(head, ct).ConfigureAwait(false);
+            if (Body.Length > 0) await stream.WriteAsync(Body, ct).ConfigureAwait(false);
+            return;
+        }
+
+        // Small bodies keep the single write they had: a second one is a second packet (and TLS
+        // record) for a few hundred bytes. The copy is of at most 16 KiB.
+        var combined = ArrayPool<byte>.Shared.Rent(head.Length + Body.Length);
+        try
+        {
+            head.CopyTo(combined, 0);
+            Body.CopyTo(combined, head.Length);
+            await stream.WriteAsync(combined.AsMemory(0, head.Length + Body.Length), ct).ConfigureAwait(false);
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(combined);
+        }
     }
 }
 

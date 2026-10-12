@@ -62,7 +62,7 @@ public sealed class RequestExecutor(ProxyOptions options, SessionStore store)
 
             PrepareHeaders(request, url, labelJsonBody);
 
-            await upstream.Stream.WriteAsync(request.ToOriginFormBytes(), ct).ConfigureAwait(false);
+            await request.WriteOriginFormAsync(upstream.Stream, ct).ConfigureAwait(false);
             await upstream.Stream.FlushAsync(ct).ConfigureAwait(false);
 
             session.State = SessionState.AwaitingResponse;

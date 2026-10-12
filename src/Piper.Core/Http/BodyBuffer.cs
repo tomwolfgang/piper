@@ -41,6 +41,18 @@ internal sealed class BodyBuffer
     /// <summary>Records that <paramref name="count"/> bytes were written into what <see cref="Reserve"/> returned.</summary>
     public void Advance(int count) => Length += count;
 
+    /// <summary>Adds bytes that are already in hand, such as the payload of a DATA frame.</summary>
+    public void Append(ReadOnlySpan<byte> data)
+    {
+        while (!data.IsEmpty)
+        {
+            var room = Reserve(data.Length);
+            data[..room.Length].CopyTo(room.Span);
+            Advance(room.Length);
+            data = data[room.Length..];
+        }
+    }
+
     /// <summary>Hands over the body and empties this buffer: the array itself when exactly full, else a right-sized copy.</summary>
     public byte[] ToArray()
     {

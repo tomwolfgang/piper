@@ -66,7 +66,7 @@ internal sealed class UpstreamConnection : IDisposable
     }
 
     /// <param name="allowHttp2">Set false to force h1.1 regardless of <see cref="ProxyOptions.EnableHttp2Upstream"/>.
-    /// The Composer needs this: it sends verbatim wire bytes via <c>HttpRequestData.ToOriginFormBytes()</c>,
+    /// The Composer needs this: it sends verbatim wire bytes via <c>HttpRequestData.WriteOriginFormAsync</c>,
     /// which has no HTTP/2 equivalent, so it must never end up with an ALPN-negotiated h2 connection.</param>
     public static async Task<UpstreamConnection> ConnectAsync(
         string host, int port, bool isTls, ProxyOptions options, CancellationToken ct, bool allowHttp2 = true)
