@@ -61,6 +61,18 @@ internal sealed class IoDeadline : IDisposable
                 _link = caller.CanBeCanceled ? caller.UnsafeRegister(static s => ((CancellationTokenSource)s!).Cancel(), _source) : default;
                 _linkedTo = caller;
             }
+
+            // The previous caller's token can cancel the idle source after End looked at it and
+            // before this call; that cancellation is not this call's, so start from a fresh source.
+            // (Any earlier registration is disposed by now, so this check cannot race with it.)
+            if (_source.IsCancellationRequested)
+            {
+                _link.Dispose();
+                _source.Dispose();
+                _source = new CancellationTokenSource();
+                _link = caller.CanBeCanceled ? caller.UnsafeRegister(static s => ((CancellationTokenSource)s!).Cancel(), _source) : default;
+                _linkedTo = caller;
+            }
         }
         catch
         {

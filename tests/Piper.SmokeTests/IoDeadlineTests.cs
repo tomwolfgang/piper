@@ -67,6 +67,29 @@ internal static class IoDeadlineTests
             return Task.CompletedTask;
         });
 
+        await runner.RunAsync("a token cancelled between two calls cannot cancel the next call", () =>
+        {
+            using var deadline = new IoDeadline();
+            using var first = new CancellationTokenSource();
+            var lease = deadline.Begin(Hour, first.Token);
+            lease.End();
+            first.Cancel();                                      // after End, before the next Begin
+
+            using var second = new CancellationTokenSource();
+            var next = deadline.Begin(Hour, second.Token);
+            runner.IsTrue(!next.Token.IsCancellationRequested, "the next call, under a live token, is not cancelled");
+            second.Cancel();
+            runner.IsTrue(next.Token.IsCancellationRequested, "its own token still cancels it");
+            next.End();
+
+            using var live = new CancellationTokenSource();
+            var again = deadline.Begin(Hour, live.Token);
+            first.Cancel();
+            runner.IsTrue(!again.Token.IsCancellationRequested, "and the cancelled ones stay out of the calls after");
+            again.End();
+            return Task.CompletedTask;
+        });
+
         await runner.RunAsync("a call that overlaps another has a deadline of its own", async () =>
         {
             using var deadline = new IoDeadline();
