@@ -269,8 +269,9 @@ internal static class ClientProcessLookupTests
 
                 var response = await client.GetAsync($"http://127.0.0.1:{origin.Port}/who");
                 runner.AreEqual(200, (int)response.StatusCode, $"the request is proxied ({address.AddressFamily})");
-                runner.IsTrue(await Poll.UntilAsync(() => store.Snapshot().Any(s => s.Path == "/who")), "and captured");
-                runner.AreEqual(self, store.Snapshot().First(s => s.Path == "/who").ProcessName, $"the session names this process ({address.AddressFamily})");
+                Session? captured = null;
+                runner.IsTrue(await Poll.UntilAsync(() => (captured = store.Snapshot().FirstOrDefault(s => s.Path == "/who")) is not null), "and captured");
+                runner.AreEqual(self, captured?.ProcessName ?? "(no session)", $"the session names this process ({address.AddressFamily})");
             }
         });
     }
