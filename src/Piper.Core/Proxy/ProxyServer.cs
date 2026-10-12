@@ -580,7 +580,8 @@ public sealed class ProxyServer : IAsyncDisposable
     {
         client.NoDelay = true;
         var clientEndpoint = client.Client.RemoteEndPoint?.ToString() ?? "?";
-        var processName = ClientProcessLookup.Resolve(client.Client.RemoteEndPoint as IPEndPoint);
+        var processName = ClientProcessLookup.Resolve(
+            client.Client.RemoteEndPoint as IPEndPoint, client.Client.LocalEndPoint as IPEndPoint);
 
         // Disposed with the connection: its deadline holds a registration on the run's token until then.
         await using var clientStream = new GuardedClientStream(client.GetStream(), _options.IdleTimeout);
