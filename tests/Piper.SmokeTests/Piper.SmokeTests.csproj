@@ -34,6 +34,9 @@
     <Compile Include="..\..\tools\Piper.Bench\BenchReport.cs" Link="Bench\BenchReport.cs" />
     <Compile Include="..\..\tools\Piper.Bench\BenchOptions.cs" Link="Bench\BenchOptions.cs" />
     <Compile Include="..\..\tools\Piper.Bench\BenchHygiene.cs" Link="Bench\BenchHygiene.cs" />
+    <!-- The driver's handle on a proxy host process, and the dotnet.exe lookup behind it (a fake host and injected lookups exercise them). -->
+    <Compile Include="..\..\tools\Piper.Bench\HostClient.cs" Link="Bench\HostClient.cs" />
+    <Compile Include="..\..\tools\Piper.Bench\SystemInfo.cs" Link="Bench\SystemInfo.cs" />
   </ItemGroup>
 
 </Project>
