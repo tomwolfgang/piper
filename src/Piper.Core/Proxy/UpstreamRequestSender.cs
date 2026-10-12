@@ -41,6 +41,7 @@ internal static class UpstreamRequestSender
             var h2 = new Http2ClientConnection(upstream.Stream, upstream.Reader.IdleTimeout);
             var h2Head = await h2.SendRequestHeadAsync(outbound, ct).ConfigureAwait(false);
             var bodyReader = new HttpStreamReader(h2.ResponseBody) { IdleTimeout = upstream.Reader.IdleTimeout };
+            upstream.AdoptResponseBodyReader(bodyReader);
             return new UpstreamResponse(h2Head, DescribeHttp2Body(h2Head, outbound.Method), IsBuffered: false, bodyReader);
         }
 
