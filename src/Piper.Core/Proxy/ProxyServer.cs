@@ -553,8 +553,7 @@ public sealed class ProxyServer : IAsyncDisposable
         admission.Add(state);
         try
         {
-            // Everything past this point runs on the thread pool rather than on the accept loop:
-            // working out which process owns the socket is synchronous and must not hold up accepting.
+            // Everything past this point runs on the thread pool rather than on the accept loop.
             await Task.Yield();
             await HandleClientAsync(client, state, ct).ConfigureAwait(false);
         }
@@ -580,8 +579,11 @@ public sealed class ProxyServer : IAsyncDisposable
     {
         client.NoDelay = true;
         var clientEndpoint = client.Client.RemoteEndPoint?.ToString() ?? "?";
-        var processName = ClientProcessLookup.Resolve(
-            client.Client.RemoteEndPoint as IPEndPoint, client.Client.LocalEndPoint as IPEndPoint);
+        // Looked up beside reading the request, not before it: the table read is a blocking system
+        // call, and the name is only needed once a session is created. It never throws or hangs.
+        var clientIp = client.Client.RemoteEndPoint as IPEndPoint;
+        var proxyIp = client.Client.LocalEndPoint as IPEndPoint;
+        var processName = Task.Run(() => ClientProcessLookup.Resolve(clientIp, proxyIp), CancellationToken.None);
 
         // Disposed with the connection: its deadline holds a registration on the run's token until then.
         await using var clientStream = new GuardedClientStream(client.GetStream(), _options.IdleTimeout);
@@ -643,7 +645,7 @@ public sealed class ProxyServer : IAsyncDisposable
     /// <returns>The request, or null when the connection should be closed.</returns>
     private async Task<HttpRequestData?> ReadRequestAsync(
         HttpStreamReader reader, GuardedClientStream clientStream, ConnectionState state, bool first, bool isHttps,
-        Func<HttpRequestData, Uri?>? locate, string clientEndpoint, string processName, CancellationToken ct)
+        Func<HttpRequestData, Uri?>? locate, string clientEndpoint, Task<string> processName, CancellationToken ct)
     {
         reader.IdleTimeout = Timeout.InfiniteTimeSpan; // stages 1 and 2 have clocks of their own
         var evicted = state.BeginIdle();
@@ -750,7 +752,7 @@ public sealed class ProxyServer : IAsyncDisposable
                 Response = reply,
                 IsHttps = isHttps,
                 ClientEndpoint = clientEndpoint,
-                ProcessName = processName,
+                ProcessName = await processName.ConfigureAwait(false),
                 State = SessionState.Failed,
                 Error = error,
                 Completed = DateTimeOffset.Now,
@@ -783,7 +785,7 @@ public sealed class ProxyServer : IAsyncDisposable
 
     private async Task HandleConnectAsync(
         HttpRequestData connect, Stream clientStream, Socket clientSocket, ConnectionState state,
-        string clientEndpoint, string processName, CancellationToken ct)
+        string clientEndpoint, Task<string> processName, CancellationToken ct)
     {
         var (host, port) = SplitAuthority(connect.RequestTarget, defaultPort: 443);
 
@@ -848,7 +850,7 @@ public sealed class ProxyServer : IAsyncDisposable
     /// failed session so the cause is visible, and the stream is disposed.
     /// </summary>
     private async Task<bool> AuthenticateClientAsync(
-        SslStream ssl, HttpRequestData connect, string host, int port, string clientEndpoint, string processName,
+        SslStream ssl, HttpRequestData connect, string host, int port, string clientEndpoint, Task<string> processName,
         CancellationToken ct)
     {
         using var handshakeBudget = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -882,7 +884,7 @@ public sealed class ProxyServer : IAsyncDisposable
                 IsHttps = true,
                 State = SessionState.Failed,
                 ClientEndpoint = clientEndpoint,
-                ProcessName = processName,
+                ProcessName = await processName.ConfigureAwait(false),
                 ServerEndpoint = $"{host}:{port}",
                 Error = timedOut
                     ? $"TLS handshake with client failed: no handshake within {_options.TlsHandshakeTimeout.TotalSeconds:0.#}s"
@@ -898,10 +900,11 @@ public sealed class ProxyServer : IAsyncDisposable
     /// <summary>Runs one browser-facing HTTP/2 connection. Each stream is forwarded independently
     /// (see <see cref="Http2RequestForwarder"/>) and recorded as its own <see cref="Session"/>,
     /// exactly like an HTTP/1.1 request -- the multiplexing is invisible below this point.</summary>
-    private async Task RunHttp2Async(SslStream ssl, string clientEndpoint, string processName, CancellationToken ct)
+    private async Task RunHttp2Async(SslStream ssl, string clientEndpoint, Task<string> processName, CancellationToken ct)
     {
         var connection = new Http2Connection(ssl,
-            (request, streamCt) => Http2RequestForwarder.ForwardAsync(request, _options, _store, _altSvc, clientEndpoint, processName, streamCt))
+            async (request, streamCt) => await Http2RequestForwarder.ForwardAsync(
+                request, _options, _store, _altSvc, clientEndpoint, await processName.ConfigureAwait(false), streamCt).ConfigureAwait(false))
         {
             Log = message => Log?.Invoke(this, $"Request from {clientEndpoint} refused: {message}"),
         };
@@ -922,7 +925,7 @@ public sealed class ProxyServer : IAsyncDisposable
 
     private async Task BlindTunnelAsync(
         HttpRequestData connect, string host, int port, Stream clientStream, Socket clientSocket,
-        string clientEndpoint, string processName, CancellationToken ct)
+        string clientEndpoint, Task<string> processName, CancellationToken ct)
     {
         var session = new Session
         {
@@ -931,7 +934,7 @@ public sealed class ProxyServer : IAsyncDisposable
             IsHttps = true,
             State = SessionState.Tunnel,
             ClientEndpoint = clientEndpoint,
-            ProcessName = processName,
+            ProcessName = await processName.ConfigureAwait(false),
             ServerEndpoint = $"{host}:{port}",
         };
         _store.Add(session);
@@ -1055,14 +1058,14 @@ public sealed class ProxyServer : IAsyncDisposable
     /// <summary>Forwards one request and writes the response back. Returns false when the connection must close.</summary>
     private async Task<bool> HandleRequestAsync(
         HttpRequestData request, Stream clientStream, HttpStreamReader clientReader, Socket clientSocket,
-        ConnectionSlot slot, string clientEndpoint, string processName, bool isHttps, CancellationToken ct)
+        ConnectionSlot slot, string clientEndpoint, Task<string> processName, bool isHttps, CancellationToken ct)
     {
         var session = new Session
         {
             Request = request,
             IsHttps = isHttps,
             ClientEndpoint = clientEndpoint,
-            ProcessName = processName,
+            ProcessName = await processName.ConfigureAwait(false),
             State = SessionState.SendingRequest,
         };
 

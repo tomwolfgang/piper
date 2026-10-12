@@ -4,11 +4,13 @@ using System.Net;
 using System.Net.Sockets;
 using System.Runtime.InteropServices;
 using Piper.Core.Proxy;
+using Piper.Core.Security;
+using Piper.Core.Sessions;
 
 // Naming the process on the other end of an accepted connection: against the real connection table
 // over IPv4 and IPv6, against hand-built tables (matching, several rows, malformed and hostile
 // ones), against a table read that fails or keeps growing, and for the cache and the handle the old
-// lookup leaked.
+// lookup leaked. The proxy path is checked end to end with a real proxied request.
 internal static class ClientProcessLookupTests
 {
     private static readonly IPEndPoint Server4 = new(IPAddress.Loopback, 8888);
@@ -236,6 +238,41 @@ internal static class ClientProcessLookupTests
 
             runner.AreEqual(1501L, lookup.NameReads, "every one of them read the process");
             runner.IsTrue(growth < 100, $"1500 lookups grew the handle count by {growth} (a leak would be 1500 or more)");
+        });
+
+        await runner.RunAsync("a proxied request records the client's process name over IPv4 and IPv6", async () =>
+        {
+            await using var origin = new TestRawOrigin(async (head, stream, ct) =>
+            {
+                await stream.WriteAsync("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"u8.ToArray(), ct);
+                return false;
+            });
+            using var ca = CertificateAuthority.LoadOrCreate(Path.Combine(Path.GetTempPath(), "Piper-SmokeTest-ProcessLookup-Certs"));
+
+            foreach (var address in new[] { IPAddress.Loopback, IPAddress.IPv6Loopback })
+            {
+                if (address.AddressFamily == AddressFamily.InterNetworkV6 && (!Socket.OSSupportsIPv6 || !CanBind(address)))
+                {
+                    runner.ToolMissing("this machine has no IPv6 loopback (::1); a proxy listening on it was not exercised");
+                    continue;
+                }
+
+                var store = new SessionStore();
+                await using var proxy = new ProxyServer(new ProxyOptions { Port = 0, ListenAddress = address, DecryptHttps = false }, ca, store);
+                proxy.Start();
+                var host = address.AddressFamily == AddressFamily.InterNetworkV6 ? "[::1]" : "127.0.0.1";
+                using var client = new HttpClient(new SocketsHttpHandler
+                {
+                    Proxy = new WebProxy($"http://{host}:{proxy.Endpoint!.Port}", BypassOnLocal: false),
+                    UseProxy = true,
+                }) { Timeout = TimeSpan.FromSeconds(20) };
+
+                var response = await client.GetAsync($"http://127.0.0.1:{origin.Port}/who");
+                runner.AreEqual(200, (int)response.StatusCode, $"the request is proxied ({address.AddressFamily})");
+                Session? captured = null;
+                runner.IsTrue(await Poll.UntilAsync(() => (captured = store.Snapshot().FirstOrDefault(s => s.Path == "/who")) is not null), "and captured");
+                runner.AreEqual(self, captured?.ProcessName ?? "(no session)", $"the session names this process ({address.AddressFamily})");
+            }
         });
     }
 
