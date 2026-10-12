@@ -22,4 +22,34 @@ internal static class BenchDotnetTests
         runner.IsTrue(BenchHygiene.ChooseDotnet([real], _ => false) is null, "none existing gives null");
         return Task.CompletedTask;
     });
+
+    // The order the driver looks for dotnet.exe in, and the registry views behind the registered install, with the
+    // environment, the file system and the registry replaced by lambdas (the real registry is never read).
+    public static Task RunDotnetLookupOrderAsync(TestRunner runner) => runner.RunAsync("bench dotnet lookup: driver, DOTNET_HOST_PATH, registry (64-bit then 32-bit view), Program Files", () =>
+    {
+        const string self = @"C:\sdk\dotnet.exe", env = @"D:\env\dotnet.exe", registered = @"E:\reg\dotnet.exe", programFiles = @"C:\Program Files\dotnet\dotnet.exe";
+        var registryReads = 0;
+        string? RegisteredFolder() { registryReads++; return @"E:\reg"; }
+        string? Find(string? processPath, string? hostPath, params string[] existing) =>
+            HostClient.FindDotnet(processPath, hostPath, RegisteredFolder, @"C:\Program Files", path => existing.Contains(path));
+
+        runner.AreEqual(self, Find(self, env, self, env, registered, programFiles), "the dotnet that runs the driver comes first");
+        runner.AreEqual(0, registryReads, "the registry is not read once an earlier candidate is usable");
+        runner.AreEqual(env, Find(@"C:\tools\piper-bench.exe", env, env, registered, programFiles), "an apphost driver falls through to DOTNET_HOST_PATH");
+        runner.AreEqual(registered, Find(@"C:\tools\piper-bench.exe", env, registered, programFiles), "then the registered install when DOTNET_HOST_PATH is missing on disk");
+        runner.AreEqual(registered, Find(null, null, registered, programFiles), "and when it is not set");
+        runner.AreEqual(programFiles, Find(null, null, programFiles), "the default Program Files install is last");
+        runner.IsTrue(Find(null, null) is null, "nothing found is null");
+        runner.AreEqual(programFiles, HostClient.FindDotnet(null, null, () => null, @"C:\Program Files", path => path == programFiles), "no registered install is skipped, not an error");
+
+        var views = new List<SystemInfo.RegistryBits>();
+        string? Folder(Func<SystemInfo.RegistryBits, string?> read) { views.Clear(); return SystemInfo.RegisteredDotnetFolder(v => { views.Add(v); return read(v); }); }
+        runner.AreEqual(@"C:\x64", Folder(_ => @"C:\x64"), "the 64-bit view answers first");
+        runner.IsTrue(views.SequenceEqual([SystemInfo.RegistryBits.Bits64]), "and the 32-bit view is then not read");
+        runner.AreEqual(@"C:\x86", Folder(v => v == SystemInfo.RegistryBits.Bits32 ? @"C:\x86" : null), "a value only in the 32-bit view is found (a 32-bit process, or an x86 install)");
+        runner.IsTrue(views.SequenceEqual([SystemInfo.RegistryBits.Bits64, SystemInfo.RegistryBits.Bits32]), "64-bit view before 32-bit view");
+        runner.AreEqual(@"C:\x86", Folder(v => v == SystemInfo.RegistryBits.Bits32 ? @"C:\x86" : "  "), "a blank 64-bit value does not count");
+        runner.IsTrue(Folder(_ => null) is null && views.Count == 2, "no value in either view is null, after trying both");
+        return Task.CompletedTask;
+    });
 }

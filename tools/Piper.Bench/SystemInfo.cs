@@ -144,27 +144,41 @@ internal static class SystemInfo
         _ => "custom",
     };
 
+    /// <summary>The registry view a machine-wide value is read from: the process's own, or one named.</summary>
+    internal enum RegistryBits { Default, Bits64, Bits32 }
+
     // One read-only HKEY_LOCAL_MACHINE string value.
-    private static string? ReadMachineValue(string subKey, string name)
+    private static string? ReadMachineValue(string subKey, string name, RegistryBits bits = RegistryBits.Default)
     {
         if (!OperatingSystem.IsWindows()) return null;
-        try { return Read(subKey, name); }
+        try { return Read(subKey, name, bits); }
         catch (Exception ex) when (ex is System.Security.SecurityException or UnauthorizedAccessException or IOException)
         {
             return null;
         }
 
         [SupportedOSPlatform("windows")]
-        static string? Read(string subKey, string name)
+        static string? Read(string subKey, string name, RegistryBits bits)
         {
-            using var key = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(subKey);
+            using var hive = Microsoft.Win32.RegistryKey.OpenBaseKey(Microsoft.Win32.RegistryHive.LocalMachine, bits switch
+            {
+                RegistryBits.Bits64 => Microsoft.Win32.RegistryView.Registry64,
+                RegistryBits.Bits32 => Microsoft.Win32.RegistryView.Registry32,
+                _ => Microsoft.Win32.RegistryView.Default,
+            });
+            using var key = hive.OpenSubKey(subKey);
             return (key?.GetValue(name) as string)?.Trim();
         }
     }
 
     /// <summary>The folder the machine-wide .NET install registered (<c>dotnet.exe</c> is in it), or null.</summary>
-    public static string? RegisteredDotnetFolder() => ReadMachineValue(
-        @"SOFTWARE\dotnet\Setup\InstalledVersions\" + RuntimeInformation.OSArchitecture.ToString().ToLowerInvariant(), "InstallLocation");
+    public static string? RegisteredDotnetFolder() => RegisteredDotnetFolder(bits => ReadMachineValue(
+        @"SOFTWARE\dotnet\Setup\InstalledVersions\" + RuntimeInformation.OSArchitecture.ToString().ToLowerInvariant(), "InstallLocation", bits));
+
+    /// <summary>The first non-blank value <paramref name="read"/> gives for the 64-bit registry view, then the 32-bit
+    /// one (a 32-bit process would otherwise see only the latter). The 32-bit view is not read once the 64-bit one answers.</summary>
+    internal static string? RegisteredDotnetFolder(Func<RegistryBits, string?> read) =>
+        new[] { RegistryBits.Bits64, RegistryBits.Bits32 }.Select(read).FirstOrDefault(folder => !string.IsNullOrWhiteSpace(folder));
 
     public static string Describe()
     {

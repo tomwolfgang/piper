@@ -44,11 +44,7 @@ internal sealed class HostClient : IAsyncDisposable
         process.BeginErrorReadLine();
         try
         {
-            var ready = (await client.ReadAsync("READY", ct).ConfigureAwait(false)).Split(' ');
-            client.Port = int.Parse(ready[1], CultureInfo.InvariantCulture);
-            client.StartMs = double.Parse(ready[2], CultureInfo.InvariantCulture);
-            // Hosts built before the configuration was reported say nothing: unknown, not Release.
-            client.Configuration = ready.Length > 3 ? BenchHygiene.ConfigurationToken(ready[3]) : "unknown";
+            (client.Port, client.StartMs, client.Configuration) = ParseReady(await client.ReadAsync("READY", ct).ConfigureAwait(false));
             return client;
         }
         catch
@@ -58,16 +54,39 @@ internal sealed class HostClient : IAsyncDisposable
         }
     }
 
+    /// <summary>The <c>READY port startup_ms [configuration]</c> line a host prints once it listens. The line comes from
+    /// a file the user chose to run, so a short, non-numeric or out-of-range one is an <see cref="InvalidDataException"/>
+    /// that quotes it (paths scrubbed, cut), never an index or format exception. A host built before the configuration
+    /// was reported says nothing: unknown, not Release.</summary>
+    internal static (int Port, double StartMs, string Configuration) ParseReady(string line)
+    {
+        var fields = line.Split(' ');
+        if (fields.Length < 3 || fields[0] != "READY"
+            || !int.TryParse(fields[1], NumberStyles.None, CultureInfo.InvariantCulture, out var port) || port is < 1 or > 65535
+            || !double.TryParse(fields[2], NumberStyles.Float, CultureInfo.InvariantCulture, out var startMs) || !double.IsFinite(startMs) || startMs < 0)
+            throw new InvalidDataException($"The proxy host's READY line is not 'READY port startup_ms [configuration]': {BenchHygiene.Scrub(line)}");
+        return (port, startMs, fields.Length > 3 ? BenchHygiene.ConfigurationToken(fields[3]) : "unknown");
+    }
+
     /// <summary>The <c>dotnet.exe</c> that runs a host <c>.dll</c>, as a full path: this process's own when it is
     /// <c>dotnet</c>, else the SDK's <c>DOTNET_HOST_PATH</c>, else the registered or default install. Never the bare
-    /// name, which CreateProcess would resolve in the current directory first.</summary>
-    private static string FindDotnet() => BenchHygiene.ChooseDotnet(
-        [
-            Environment.ProcessPath,
-            Environment.GetEnvironmentVariable("DOTNET_HOST_PATH"),
-            SystemInfo.RegisteredDotnetFolder() is { } folder ? Path.Combine(folder, "dotnet.exe") : null,
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "dotnet", "dotnet.exe"),
-        ], File.Exists)
+    /// name, which CreateProcess would resolve in the current directory first. <paramref name="registeredFolder"/>
+    /// is only called when neither earlier candidate is usable.</summary>
+    internal static string? FindDotnet(string? processPath, string? hostPathVariable, Func<string?> registeredFolder, string programFiles, Func<string, bool> exists)
+    {
+        IEnumerable<string?> Candidates()
+        {
+            yield return processPath;
+            yield return hostPathVariable;
+            if (registeredFolder() is { } folder) yield return Path.Combine(folder, "dotnet.exe");
+            yield return Path.Combine(programFiles, "dotnet", "dotnet.exe");
+        }
+        return BenchHygiene.ChooseDotnet(Candidates(), exists);
+    }
+
+    private static string FindDotnet() => FindDotnet(
+        Environment.ProcessPath, Environment.GetEnvironmentVariable("DOTNET_HOST_PATH"), SystemInfo.RegisteredDotnetFolder,
+        Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), File.Exists)
         ?? throw new InvalidOperationException("Could not find dotnet.exe to run a host .dll; run the driver with dotnet, set DOTNET_HOST_PATH, or pass a host .exe.");
 
     private async Task<string> ReadAsync(string prefix, CancellationToken ct)
