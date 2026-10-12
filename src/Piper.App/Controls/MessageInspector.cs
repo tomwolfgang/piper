@@ -17,7 +17,7 @@ public sealed class MessageInspector : UserControl
 {
     private const int MaxRenderBytes = 4 * 1024 * 1024;
 
-    private readonly TabControl _tabs;
+    private readonly DarkTabControl _tabs;
     private readonly ListView _headersView;
     private readonly TextBox _headersSearch;
     private readonly Label _headersMatchCount;
@@ -841,7 +841,7 @@ public sealed class MessageInspector : UserControl
         {
             RenderHeaders();
             ClearDeferredViews();
-            if (_showImageViewer) _tabs.SelectedIndex = 0;
+            if (_showImageViewer) _tabs.SelectWithoutFocus(0);
             return;
         }
 
@@ -1586,32 +1586,32 @@ public sealed class MessageInspector : UserControl
     {
         if (_message is null || _message.Body.Length == 0)
         {
-            _tabs.SelectedIndex = 0;
+            _tabs.SelectWithoutFocus(0);
             return;
         }
 
         var contentType = _message.ContentType ?? string.Empty;
         if (_showImageViewer && contentType.StartsWith("image/", StringComparison.OrdinalIgnoreCase))
         {
-            _tabs.SelectedIndex = 5;
+            _tabs.SelectWithoutFocus(5);
             return;
         }
 
         if (_showImageViewer && contentType.StartsWith("video/", StringComparison.OrdinalIgnoreCase))
         {
-            _tabs.SelectedIndex = 6;
+            _tabs.SelectWithoutFocus(6);
             return;
         }
 
         if (IsJsonContentType(contentType))
         {
-            _tabs.SelectedIndex = 4;
+            _tabs.SelectWithoutFocus(4);
             return;
         }
 
         // Response inspection should start at headers unless its content advertises one of
         // the specialised viewers above. The body/raw/hex views remain available explicitly.
-        _tabs.SelectedIndex = 0;
+        _tabs.SelectWithoutFocus(0);
     }
 
     private static bool IsJsonContentType(string? contentType) => contentType?.Contains("json", StringComparison.OrdinalIgnoreCase) == true;

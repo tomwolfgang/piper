@@ -91,6 +91,32 @@ internal sealed class DarkTabControl : TabControl
         Invalidate(); // repaint the strip so the accent follows the selection
     }
 
+    /// <summary>
+    /// Selects a tab for the program rather than the user. Assigning <see cref="TabControl.SelectedIndex"/>
+    /// runs the same leave-page validation as a click, which moves keyboard focus onto this control,
+    /// so a session grid that re-renders the inspector on every arrow key lost focus to its tabs.
+    /// Setting the native selection skips that step; the page swap and the change event still run.
+    /// </summary>
+    public void SelectWithoutFocus(int index)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(index);
+        ArgumentOutOfRangeException.ThrowIfGreaterThanOrEqual(index, TabCount);
+        if (index == SelectedIndex) return;
+        if (!IsHandleCreated)
+        {
+            SelectedIndex = index; // no window yet, so nothing to focus
+            return;
+        }
+
+        SendMessage(Handle, TcmSetCurSel, index, 0);
+        OnSelectedIndexChanged(EventArgs.Empty);
+    }
+
+    private const int TcmSetCurSel = 0x1300 + 12;
+
+    [System.Runtime.InteropServices.DllImport("user32.dll", EntryPoint = "SendMessageW")]
+    private static extern nint SendMessage(nint hwnd, int msg, nint wParam, nint lParam);
+
     /// <summary>Displays a checkbox glyph beside tabs representing an active toggleable feature.</summary>
     public void SetTabChecked(TabPage tab, bool isChecked)
     {

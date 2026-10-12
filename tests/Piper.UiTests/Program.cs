@@ -98,6 +98,7 @@ internal static class Program
             Check(list.VirtualListSize == 1, $"live traffic stays hidden (got {list.VirtualListSize})");
         });
 
+        RunArrowKeysKeepFocus("arrowing through sessions keeps the keyboard focus in the grid");
         RunPanel("an AutoResponder rule whose pattern timed out is marked broken in the panel");
         RunWindowActivation("a second launch restores the existing Piper window");
         RunAboutDialog("the About dialog identifies the running Piper version");
@@ -369,6 +370,62 @@ internal static class Program
             "the running application version is visible");
         Check(Descendants(dialog).OfType<Button>().Any(button => button.DialogResult == DialogResult.OK),
             "the dialog has a close action");
+    }
+
+    /// <summary>Selecting a session renders it in the inspector, which must not take the focus from the grid.</summary>
+    private static void RunArrowKeysKeepFocus(string name)
+    {
+        Console.WriteLine($"== {name}");
+        var store = new SessionStore();
+        using var form = new Form { Width = 1200, Height = 700, ShowInTaskbar = false, StartPosition = FormStartPosition.Manual, Location = new Point(0, 0) };
+        var split = new SplitContainer { Dock = DockStyle.Fill };
+        var grid = new SessionListView(store) { Dock = DockStyle.Fill };
+        var inspector = new InspectorPanel { Dock = DockStyle.Fill };
+        split.Panel1.Controls.Add(grid);
+        split.Panel2.Controls.Add(inspector);
+        form.Controls.Add(split);
+        grid.SelectionChanged += (_, session) => inspector.Show(session); // as MainForm wires it
+        form.Show();
+        var list = FindListView(grid);
+
+        (string? type, string body)[] responses =
+        [
+            ("text/html", "<html>one</html>"),
+            ("application/json", "{\"a\":1}"),
+            (null, ""),
+            ("text/plain", "plain"),
+            ("image/png", "not really a png"),
+            ("application/json", "{\"b\":2}"),
+            ("text/html", "<html>two</html>"),
+        ];
+        foreach (var (type, body) in responses)
+        {
+            var response = new HttpResponseData { StatusCode = 200, Body = System.Text.Encoding.UTF8.GetBytes(body) };
+            if (type is not null) response.Headers.Add("Content-Type", type);
+            var session = new Session
+            {
+                Request = new HttpRequestData { Method = "GET", Url = new Uri($"http://example.test/{_next++}") },
+                Response = response,
+            };
+            session.Completed = DateTimeOffset.Now;
+            store.Add(session);
+        }
+        PumpUntil(() => list.VirtualListSize == responses.Length);
+
+        list.Focus();
+        list.SelectedIndices.Add(0);
+        list.FocusedItem = list.Items[0];
+        PumpFor(100);
+        for (var i = 1; i < responses.Length; i++)
+        {
+            SendMessage(list.Handle, WmKeyDown, (nint)Keys.Down, 0);
+            SendMessage(list.Handle, WmKeyUp, (nint)Keys.Down, 0);
+            PumpFor(100);
+            var focused = Descendants(form).FirstOrDefault(control => control.Focused);
+            Check(list.Focused && list.SelectedIndices.Count == 1 && list.SelectedIndices[0] == i,
+                $"after Down #{i} row {i} is selected and the grid has focus (focus: {focused?.GetType().Name ?? "none"} '{focused?.Name}', parent {focused?.Parent?.GetType().Name})");
+        }
+        form.Close();
     }
 
     /// <summary>A rule that was skipped for timing out says so in its Last match cell, until it is edited.</summary>
