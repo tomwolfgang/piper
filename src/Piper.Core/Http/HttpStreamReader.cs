@@ -151,19 +151,20 @@ public sealed class HttpStreamReader : IDisposable
     }
 
     /// <summary>Reads exactly <paramref name="count"/> bytes, throwing if the stream ends early.</summary>
+    /// <remarks>Sized by what arrives (see <see cref="BodyBuffer"/>), not by <paramref name="count"/>.</remarks>
     public async ValueTask<byte[]> ReadExactlyAsync(int count, CancellationToken ct)
     {
         ArgumentOutOfRangeException.ThrowIfNegative(count);
         if (count == 0) return [];
-        var result = new byte[count];
-        var offset = 0;
-        while (offset < count)
+
+        var body = new BodyBuffer(count);
+        while (body.Length < count)
         {
-            var n = await ReadAsync(result.AsMemory(offset, count - offset), ct).ConfigureAwait(false);
-            if (n == 0) throw new HttpPeerClosedException($"Stream ended after {offset} of {count} expected body bytes.");
-            offset += n;
+            var n = await ReadAsync(body.Reserve(count - body.Length), ct).ConfigureAwait(false);
+            if (n == 0) throw new HttpPeerClosedException($"Stream ended after {body.Length} of {count} expected body bytes.");
+            body.Advance(n);
         }
-        return result;
+        return body.ToArray();
     }
 
     /// <summary>Reads into <paramref name="destination"/>, draining the internal buffer first.</summary>
@@ -248,6 +249,12 @@ public class HttpParseException : Exception
     public HttpParseException(string message) : base(message) { }
     public HttpParseException(string message, Exception inner) : base(message, inner) { }
 }
+
+/// <summary>
+/// A body is larger than the limit it was read under. A <see cref="HttpParseException"/>, so existing
+/// handlers still treat it as a failed read; a type of its own so a proxy can answer 413, not 400.
+/// </summary>
+public sealed class HttpBodyTooLargeException(string message) : HttpParseException(message);
 
 /// <summary>
 /// The peer sent nothing for longer than <see cref="HttpStreamReader.IdleTimeout"/>. A
