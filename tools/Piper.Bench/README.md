@@ -11,6 +11,9 @@ dotnet tools/Piper.Bench/bin/Release/net10.0/piper-bench.dll --list
 dotnet tools/Piper.Bench/bin/Release/net10.0/piper-bench.dll --runs 15 --out main.jsonl
 ```
 
+A host `.dll` is run with the `dotnet.exe` that runs the driver, else the one in `DOTNET_HOST_PATH`, else the
+registered or default install, always by full path: a `dotnet.exe` in the current directory is never started.
+
 ## Scenarios
 
 | Name | Measures |

@@ -162,6 +162,10 @@ internal static class SystemInfo
         }
     }
 
+    /// <summary>The folder the machine-wide .NET install registered (<c>dotnet.exe</c> is in it), or null.</summary>
+    public static string? RegisteredDotnetFolder() => ReadMachineValue(
+        @"SOFTWARE\dotnet\Setup\InstalledVersions\" + RuntimeInformation.OSArchitecture.ToString().ToLowerInvariant(), "InstallLocation");
+
     public static string Describe()
     {
         var memory = GC.GetGCMemoryInfo().TotalAvailableMemoryBytes / (1024.0 * 1024 * 1024);

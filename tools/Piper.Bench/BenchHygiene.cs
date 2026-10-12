@@ -55,6 +55,21 @@ internal static partial class BenchHygiene
     [GeneratedRegex(@"^(?:CON|PRN|AUX|NUL|(?:COM|LPT)[1-9\u00B9\u00B2\u00B3]|CONIN\$|CONOUT\$)$", RegexOptions.IgnoreCase)]
     private static partial Regex DeviceName();
 
+    /// <summary>The first of <paramref name="candidates"/> that is a fully qualified path to <c>dotnet.exe</c>
+    /// (or <c>dotnet</c>) that exists, or null. Starting <c>dotnet</c> by name would let CreateProcess take a
+    /// <c>dotnet.exe</c> from the current directory first, so the driver only ever starts a path it chose.</summary>
+    public static string? ChooseDotnet(IEnumerable<string?> candidates, Func<string, bool> exists)
+    {
+        foreach (var candidate in candidates)
+        {
+            if (string.IsNullOrWhiteSpace(candidate) || !Path.IsPathFullyQualified(candidate)) continue;
+            var name = Path.GetFileName(candidate);
+            if (!name.Equals("dotnet.exe", StringComparison.OrdinalIgnoreCase) && !name.Equals("dotnet", StringComparison.OrdinalIgnoreCase)) continue;
+            if (exists(candidate)) return candidate;
+        }
+        return null;
+    }
+
     /// <summary>A build configuration a host reported, as it may be shown and recorded: 1 to 16 letters, digits,
     /// '.', '_' or '-', else <c>unknown</c>. The READY line comes from a file the user chose to run.</summary>
     public static string ConfigurationToken(string? reported) =>
