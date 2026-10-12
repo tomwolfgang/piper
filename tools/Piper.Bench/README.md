@@ -23,7 +23,7 @@ dotnet tools/Piper.Bench/bin/Release/net10.0/piper-bench.dll --runs 15 --out mai
 | `tunnel_ping`, `tunnel_down`, `tunnel_up` | CONNECT tunnel: setup plus a 1 KB round trip; 256 MB each way |
 | `sessions_100k` | 100,000 captured sessions: `session_bytes` per session, `heap_after_gc_mb`, `peak_ws_mb` |
 | `tls_handshake_30` | HTTPS to 30 new hosts: first request (CONNECT, both handshakes, a minted certificate) against a repeat on the same connection |
-| `h2_c100` | HTTP/2 through the proxy, one client connection, 100 parallel streams, 2,000 requests; a response that is not HTTP/2 counts as an error |
+| `h2_c100` | HTTP/2 through the proxy, one client connection, 100 parallel streams, 2,000 measured requests (or `--duration`, if that ends first; the ramp and the first stats round trip before the window do not count toward the 2,000, but are capped at 2,000 of their own, so `requests` is 2,000 unless some failed and the connections to the origin stay under 4,000); a response that is not HTTP/2 counts as an error |
 | `rtt50_h1`, `rtt50_h2` | up to 1 GB streamed from an origin 50 ms away (the proxy-to-origin leg goes through a delaying relay; `rtt_actual_ms` is the measured round trip), read for `max(--duration, 10 s)`; a response that ends early with fewer bytes is a failure, not a rate |
 
 Every scenario run starts a fresh host process and warms it up unmeasured. Tunnel payloads are 1 KB,
@@ -62,6 +62,14 @@ also counted the host's whole stats round trip at both edges against requests th
 machine this was measured on that moved `alloc_per_req_bytes` by about 0.5 to 0.7% (lower) for `get_c16`
 and `cpu_per_req_us` by less than its run-to-run noise. Re-record both builds before comparing these two
 metrics with a results file made before the change.
+
+A request is counted (in `requests`, `errors`, `timeouts`, the latencies and the `maxRequests` budget) by when
+it starts: the ones already in flight when the window opens belong to the ramp, and the ones that start inside
+it are counted even if they finish after it closes. For a time-limited scenario the difference from counting by
+completion is about `concurrency` requests out of thousands. `h2_c100` ends when its 2,000 requests are done and
+has no ramp, so its first 100 (cold) requests start before the window opens: their work now falls inside the
+window without being counted, and its `rps` reads up to 100/2,000 = 5% lower than in results recorded before this
+change. Re-record the baseline before comparing `h2_c100` `rps` across it.
 
 ## Results files
 
