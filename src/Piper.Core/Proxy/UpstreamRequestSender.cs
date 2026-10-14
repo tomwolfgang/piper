@@ -47,7 +47,7 @@ internal static class UpstreamRequestSender
 
         MakeValidHttp11(outbound);
 
-        await upstream.Stream.WriteAsync(outbound.ToOriginFormBytes(), ct).ConfigureAwait(false);
+        await outbound.WriteOriginFormAsync(upstream.Stream, ct).ConfigureAwait(false);
         await upstream.Stream.FlushAsync(ct).ConfigureAwait(false);
         onRequestSent();
 

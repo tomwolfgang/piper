@@ -14,12 +14,22 @@ internal sealed class Http2Stream(int id, HttpRequestData request) : IDisposable
 
     public int Id { get; } = id;
 
-    public MemoryStream Body { get; } = new();
+    /// <summary>The request body as its DATA frames arrive. Sized by the bytes received, with the declared
+    /// Content-Length only as a ceiling for growth, so a stream that announces a large body and sends
+    /// none costs a small buffer and a complete one is handed over without a copy.</summary>
+    public BodyBuffer Body { get; } = new(DeclaredLength(request));
+
+    private static int DeclaredLength(HttpRequestData request) =>
+        long.TryParse(request.Headers["Content-Length"], System.Globalization.NumberStyles.None,
+            System.Globalization.CultureInfo.InvariantCulture, out var length)
+        && length > 0 && length <= Array.MaxLength
+            ? (int)length
+            : 0;
 
     public HttpRequestData Request { get; } = request;
 
     /// <summary>The peer has ended its side (END_STREAM) and the request is with the handler, which
-    /// now owns the stream. Its body has been copied out and <see cref="Body"/> disposed. Anything
+    /// now owns the stream. Its body has been handed to the request and <see cref="Body"/> cleared. Anything
     /// more the peer sends on this stream, bar WINDOW_UPDATE, RST_STREAM and PRIORITY, resets the
     /// stream with STREAM_CLOSED (RFC 9113 §5.1, half-closed (remote)).</summary>
     public bool Dispatched { get; set; }
@@ -49,6 +59,6 @@ internal sealed class Http2Stream(int id, HttpRequestData request) : IDisposable
     public void Dispose()
     {
         _cancellation.Dispose();
-        Body.Dispose();
+        Body.Clear();
     }
 }

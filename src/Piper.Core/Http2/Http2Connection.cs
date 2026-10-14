@@ -741,7 +741,7 @@ public sealed class Http2Connection(Stream stream, Func<HttpRequestData, Cancell
         if (ResetIfDispatched(http2Stream)) return;
 
         var incoming = frame.DataPayload.Length;
-        var overStreamCap = http2Stream.Body.Length + incoming > MaxRequestBodyBytes;
+        var overStreamCap = (long)http2Stream.Body.Length + incoming > MaxRequestBodyBytes;
         if (overStreamCap || BufferedRequestBytes() + incoming > MaxBufferedRequestBytes)
         {
             // No handler owns the stream yet. Forgetting it is what makes its later DATA frames fall
@@ -771,7 +771,7 @@ public sealed class Http2Connection(Stream stream, Func<HttpRequestData, Cancell
             }
         }
 
-        http2Stream.Body.Write(frame.DataPayload.Span);
+        http2Stream.Body.Append(frame.DataPayload.Span);
 
         if (frame.HasFlag(Http2FrameFlags.EndStream))
             DispatchRequest(http2Stream);
@@ -903,15 +903,12 @@ public sealed class Http2Connection(Stream stream, Func<HttpRequestData, Cancell
         // Every caller resets a stream that is already dispatched instead of coming here, but a
         // second dispatch would hand the request to a second handler and read a disposed buffer.
         if (http2Stream.Dispatched) return;
-        http2Stream.Request.Body = http2Stream.Body.ToArray();
-        // The copy is all the handler reads, and the stream stays registered until the response is
-        // sent, so holding the buffer would keep the body in memory twice for that long. Disposing
-        // alone would not free it: a closed MemoryStream keeps its buffer. The flag goes first, so
-        // nothing that skips dispatched streams can read the buffer once it is disposed.
+        // The body array is handed over, not copied (a body that arrived in full is exactly its own
+        // array), and the buffer lets go of it: the stream stays registered until the response is
+        // sent, and holding the buffer would keep the body in memory twice for that long. The flag
+        // goes first, so nothing that skips dispatched streams reads the buffer once it is empty.
         http2Stream.Dispatched = true;
-        http2Stream.Body.SetLength(0);
-        http2Stream.Body.Capacity = 0;
-        http2Stream.Body.Dispose();
+        http2Stream.Request.Body = http2Stream.Body.ToArray();
 
         // Registered before the handler can possibly finish, and by a task of its own rather than the
         // handler's: the handler removes it when it stops, and could otherwise do that before it was
