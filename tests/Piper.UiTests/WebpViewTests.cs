@@ -74,7 +74,20 @@ internal static class WebpViewTests
         s.IsScriptEnabled = true;
         Probe("window.open('https://localhost:1/') === null", "a new window request is handled (window.open returns null)");
         Probe("(function(){var a=document.createElement('a');a.href=document.images[0].src;a.download='x.webp';document.body.appendChild(a);a.click();return true})()", "a download is cancelled");
-        Probe("(function(){navigator.mediaDevices.getUserMedia({audio:true}).catch(function(){});return true})()", "a permission request is denied");
+        // Which permission prompts the engine raises depends on the machine (a runner without audio hardware raises none for the microphone), so any one will do.
+        var permissionProbes = new[] { "Notification.requestPermission()", "navigator.mediaDevices.getUserMedia({audio:true}).catch(function(){})", "navigator.geolocation.getCurrentPosition(function(){},function(){})" };
+        var denied = false;
+        foreach (var request in permissionProbes.TakeWhile(_ => !denied))
+        {
+            var before = view.Blocked;
+            Await(core.ExecuteScriptAsync("(function(){" + request + ";return true})()"));
+            var waited = Environment.TickCount64 + 3000;
+            pumpUntil(() => view.Blocked > before || Environment.TickCount64 > waited);
+            denied = view.Blocked > before;
+        }
+
+        if (denied) check(true, "a permission request is denied (the engine raised it and the handler refused)");
+        else Console.WriteLine("   (this machine raised no permission prompt for any probe; the permission handler was not exercised)");
         s.IsScriptEnabled = false;
 
         void Probe(string script, string name)
