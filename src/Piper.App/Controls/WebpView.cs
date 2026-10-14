@@ -32,7 +32,7 @@ internal sealed class WebpView : Panel
     internal const string Host = "piper-webp.example";
     private static readonly string Root = Path.Combine(Path.GetTempPath(), "Piper", "image-inspector");
     private static readonly TimeSpan StaleAfter = TimeSpan.FromHours(1);
-    private static readonly TimeSpan LoadTimeout = TimeSpan.FromSeconds(15);
+    internal static TimeSpan LoadTimeout { get; set; } = TimeSpan.FromSeconds(15); // settable for tests
     private static int _swept;
 
     private readonly Func<WebView2, Task> _ensureCore;
@@ -102,8 +102,9 @@ internal sealed class WebpView : Panel
             var finished = await Task.WhenAny(loaded.Task, Task.Delay(LoadTimeout));
             if (generation != _generation || IsDisposed) return WebpShowResult.Superseded;
 
-            Visible = true;
-            return finished == loaded.Task && loaded.Task.Result ? WebpShowResult.Shown : WebpShowResult.Failed;
+            var ok = finished == loaded.Task && loaded.Task.Result;
+            Visible = ok;
+            return ok ? WebpShowResult.Shown : WebpShowResult.Failed;
         }
         catch (Exception ex) when (IsStartFailure(ex))
         {
