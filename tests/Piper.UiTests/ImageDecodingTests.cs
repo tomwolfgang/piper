@@ -7,8 +7,8 @@ using Piper.Core.Http;
 // these tests can notice a format GDI+ refuses or reads with the wrong channel order.
 internal static class ImageDecodingTests
 {
-    // A 1 x 1 lossless WebP with no profile. GDI+ cannot encode WebP, so the bytes are embedded.
-    private static readonly byte[] Webp = Convert.FromBase64String("UklGRhoAAABXRUJQVlA4TA0AAAAvAAAAEAcQERGIiP4HAA==");
+    // A 16 x 8 lossless WebP, solid red, no profile. GDI+ cannot encode WebP, so the bytes are embedded.
+    private static readonly byte[] Webp = Convert.FromBase64String("UklGRiAAAABXRUJQVlA4TBQAAAAvD8ABAAcQ/Y/+BwCC8D9uIaL/qQ==");
 
     public static void Run(Action<bool, string> check, Action<Func<bool>> pumpUntil)
     {
@@ -177,16 +177,12 @@ internal static class ImageDecodingTests
             check(HasImage(inspector), "setup: the BMP is on screen");
             typeof(MessageInspector).GetMethod("RenderImage", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!
                 .Invoke(inspector, [Response("image/webp", Webp), true]);
-            pumpUntil(() => TextOf(inspector).Contains("cannot preview WebP"));
-            check(TextOf(inspector).Contains("cannot preview WebP") && !HasImage(inspector), "a WebP dropped over a shown image replaces it with the message");
+            pumpUntil(() => TextOf(inspector).Contains("WebP"));
+            check(TextOf(inspector).Contains("WebP") && !HasImage(inspector), "a WebP dropped over a shown image replaces it");
 
             inspector.SetMessage(Response("image/bmp", hostile), "bmp");
             pumpUntil(() => TextOf(inspector).Contains("This image was not decoded."));
             check(TextOf(inspector).Contains("This image was not decoded."), "a BMP declaring a 1 GiB profile is refused with the fixed message");
-
-            inspector.SetMessage(Response("image/webp", Webp), "webp");
-            pumpUntil(() => TextOf(inspector).Contains("cannot preview WebP"));
-            check(TextOf(inspector).Contains("cannot preview WebP"), "a WebP response is not handed to GDI+ and says so");
         }
 
         Console.WriteLine("== the guard scan of a hostile 32 MiB JPEG does not block the UI thread");

@@ -54,6 +54,8 @@ public sealed class MessageInspector : UserControl
     private HttpMessage? _renderedHex;
     private HttpMessage? _renderedJson;
     private HttpRequestData? _renderedWebForms;
+    private readonly Func<WebView2, Task>? _startWebpView;
+    private WebpView? _webpView;
     private HttpMessage? _renderedImage;
     private HttpMessage? _renderedVideo;
     private HttpMessage? _droppedImage;
@@ -64,8 +66,10 @@ public sealed class MessageInspector : UserControl
     private int _jsonMatchIndex = -1;
     private int _webFormsTabIndex = -1;
 
-    public MessageInspector(string caption, bool showImageViewer = false, bool showWebForms = false)
+    /// <param name="startWebpView">Starts the WebP preview's WebView2; a test seam, null for the real one.</param>
+    public MessageInspector(string caption, bool showImageViewer = false, bool showWebForms = false, Func<WebView2, Task>? startWebpView = null)
     {
+        _startWebpView = startWebpView;
         _showImageViewer = showImageViewer;
         _showWebForms = showWebForms;
         _summary = new TextBox
@@ -517,9 +521,10 @@ public sealed class MessageInspector : UserControl
         menu.Items.Add(Strings.Inspector.ZoomOut, null, (_, _) => ChangeImageZoom(0.8f));
         menu.Items.Add(Strings.Inspector.ActualSize, null, (_, _) => ResetImageView());
         menu.Items.Add(new ToolStripSeparator());
-        menu.Items.Add(Strings.Inspector.SaveAsPng, null, (_, _) => SaveCurrentImage("png"));
-        menu.Items.Add(Strings.Inspector.SaveAsJpeg, null, (_, _) => SaveCurrentImage("jpg"));
-        menu.Items.Add(Strings.Inspector.SaveImageAs, null, (_, _) => SaveCurrentImage(null));
+        menu.Items.Add(Strings.Inspector.SaveAsPng, null, (_, _) => SaveCurrentImage("png")).Tag = ConvertTag;
+        menu.Items.Add(Strings.Inspector.SaveAsJpeg, null, (_, _) => SaveCurrentImage("jpg")).Tag = ConvertTag;
+        menu.Items.Add(Strings.Inspector.SaveImageAs, null, (_, _) => SaveCurrentImage(null)).Tag = ConvertTag;
+        menu.Opening += (_, _) => EnableConversions(menu.Items);
         return menu;
     }
 
@@ -607,9 +612,10 @@ public sealed class MessageInspector : UserControl
             DisplayStyle = ToolStripItemDisplayStyle.Text,
             ToolTipText = Strings.Inspector.SaveImageTooltip,
         };
-        save.DropDownItems.Add(Strings.Inspector.SaveAsPng, null, (_, _) => SaveCurrentImage("png"));
-        save.DropDownItems.Add(Strings.Inspector.SaveAsJpeg, null, (_, _) => SaveCurrentImage("jpg"));
-        save.DropDownItems.Add(Strings.Inspector.SaveImageAs, null, (_, _) => SaveCurrentImage(null));
+        save.DropDownItems.Add(Strings.Inspector.SaveAsPng, null, (_, _) => SaveCurrentImage("png")).Tag = ConvertTag;
+        save.DropDownItems.Add(Strings.Inspector.SaveAsJpeg, null, (_, _) => SaveCurrentImage("jpg")).Tag = ConvertTag;
+        save.DropDownItems.Add(Strings.Inspector.SaveImageAs, null, (_, _) => SaveCurrentImage(null)).Tag = ConvertTag;
+        save.DropDownOpening += (_, _) => EnableConversions(save.DropDownItems);
 
         var toolbar = new ToolStrip
         {
@@ -621,14 +627,27 @@ public sealed class MessageInspector : UserControl
         return toolbar;
     }
 
+    // The save items re-encode with GDI+, so they are off while a WebP (which has no bitmap) is shown.
+    private static readonly object ConvertTag = new();
+
+    private void EnableConversions(ToolStripItemCollection items)
+    {
+        foreach (ToolStripItem item in items)
+            if (ReferenceEquals(item.Tag, ConvertTag)) item.Enabled = _imageView?.Image is not null;
+    }
+
     private void ChangeImageZoom(float multiplier)
     {
+        if (_webpView is { Visible: true } webp) { webp.ChangeZoom(multiplier); return; }
+
         if (_imageView is null || _imageView.Image is null) return;
         _imageView.Zoom = Math.Clamp(_imageView.Zoom * multiplier, 0.05f, 32f);
     }
 
     private void ResetImageView()
     {
+        if (_webpView is { Visible: true } webp) { webp.ChangeZoom(0); return; }
+
         if (_imageView is null || _imageView.Image is null) return;
         _imageView.Zoom = 1;
         _imageView.PanX = 0;
@@ -663,7 +682,7 @@ public sealed class MessageInspector : UserControl
             var (encoded, verdict) = await ImageDecoding.RunUntilAbandonedAsync(() => GuardAndConvertImage(body, format, timeout.Token), timeout.Token);
             if (encoded is null)
             {
-                MessageBox.Show(this, RefusalText(verdict) ?? Strings.Inspector.ImageWebpNotPreviewed, Strings.App.Name, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                MessageBox.Show(this, RefusalText(verdict) ?? Strings.Inspector.ImageWebpNotConverted, Strings.App.Name, MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
 
@@ -910,6 +929,7 @@ public sealed class MessageInspector : UserControl
         CancelImageDecoding();
         if (_imageView?.Image is { } image) image.Dispose();
         if (_imageView is not null) _imageView.Image = null;
+        HideWebp();
         if (_imageStatus is not null) _imageStatus.Text = string.Empty;
         if (_imageForcePanel is not null) _imageForcePanel.Visible = false;
         ClearVideo();
@@ -1130,6 +1150,7 @@ public sealed class MessageInspector : UserControl
 
         if (_imageForcePanel is not null) _imageForcePanel.Visible = false;
         CancelImageDecoding();
+        HideWebp();
         var decoding = new CancellationTokenSource(ImageWorkTimeout);
         try
         {
@@ -1149,10 +1170,11 @@ public sealed class MessageInspector : UserControl
 
             if (bitmap is null)
             {
-                // Allowed but not decoded: a WebP, which GDI+ cannot read. Nothing of an earlier image stays.
+                // Nothing of an earlier image stays. Allowed but not decoded means a WebP, which GDI+ cannot read.
                 if (_imageView.Image is { } previous) previous.Dispose();
                 _imageView.Image = null;
-                _imageStatus.Text = RefusalText(verdict) ?? Strings.Inspector.ImageWebpNotPreviewed;
+                if (verdict != ImageGuardVerdict.Allowed) _imageStatus.Text = RefusalText(verdict);
+                else await ShowWebpAsync(body, message, decoding);
                 return;
             }
 
@@ -1181,6 +1203,36 @@ public sealed class MessageInspector : UserControl
             if (ReferenceEquals(_imageDecoding, decoding)) _imageDecoding = null;
             decoding.Dispose();
         }
+    }
+
+    // View-only: WebView2 shows a WebP that ImageGuard allowed; see WebpView for the lock-down.
+    private async Task ShowWebpAsync(byte[] body, HttpMessage message, CancellationTokenSource decoding)
+    {
+        if (_imageView?.Parent is not { } parent || _imageStatus is null) return;
+
+        if (_webpView is null)
+        {
+            _webpView = new WebpView(_startWebpView);
+            parent.Controls.Add(_webpView);
+            parent.Controls.SetChildIndex(_webpView, 0);
+        }
+
+        var result = await _webpView.ShowAsync(body);
+        if (!ReferenceEquals(_imageDecoding, decoding) || IsDisposed) return;
+
+        _imageView.Visible = result != WebpShowResult.Shown;
+        _imageStatus.Text = result switch
+        {
+            WebpShowResult.Shown => Strings.Inspector.ImageWebpShown(message.ContentType ?? Strings.Inspector.DetectedImage),
+            WebpShowResult.RuntimeUnavailable => Strings.Inspector.ImageWebpNeedsRuntime,
+            _ => Strings.Inspector.ImageDecodeFailed,
+        };
+    }
+
+    private void HideWebp()
+    {
+        _webpView?.Clear();
+        if (_imageView is not null) _imageView.Visible = true;
     }
 
     private async void RenderVideo(HttpMessage message, bool force = false)
