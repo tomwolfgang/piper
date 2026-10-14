@@ -1218,7 +1218,7 @@ public sealed class MessageInspector : UserControl
         }
 
         var result = await _webpView.ShowAsync(body);
-        if (!ReferenceEquals(_imageDecoding, decoding) || IsDisposed) return;
+        if (result == WebpShowResult.Superseded || !ReferenceEquals(_imageDecoding, decoding) || IsDisposed) return;
 
         _imageView.Visible = result != WebpShowResult.Shown;
         _imageStatus.Text = result switch
