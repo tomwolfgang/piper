@@ -70,6 +70,7 @@ internal sealed class WebpView : Panel
             throw new ArgumentException("Only a WebP that ImageGuard allowed may be shown.", nameof(webp));
 
         var generation = ++_generation;
+        var started = false;
         Release();
         try
         {
@@ -82,6 +83,8 @@ internal sealed class WebpView : Panel
                 Harden(core);
                 _hardened = true;
             }
+
+            started = true;
 
             SweepStaleFolders();
             var folder = Path.Combine(Root, Guid.NewGuid().ToString("N"));
@@ -108,8 +111,11 @@ internal sealed class WebpView : Panel
         }
         catch (Exception ex) when (IsStartFailure(ex))
         {
+            // A newer show owns the folder and the page now (it deleted ours, which is why a write failed).
+            if (generation != _generation || IsDisposed) return WebpShowResult.Superseded;
+
             Release();
-            return WebpShowResult.RuntimeUnavailable;
+            return started ? WebpShowResult.Failed : WebpShowResult.RuntimeUnavailable; // after start, it was the temp files or the page
         }
     }
 
