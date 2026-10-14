@@ -233,6 +233,14 @@ internal static class Program
         large.WordWrap = true;
         Check(SendMessage(large.Handle, EmGetWordBreakProc, 0, 0) == 0,
             "a wrapping box keeps the native word break, which its line layout also uses");
+        large.Select(largeWordStart + 2, 0);
+        large.ScrollToCaret();
+        var wrappedPoint = large.GetPositionFromCharIndex(largeWordStart + 2);
+        DoubleClickAndHold(large, new Point(wrappedPoint.X + 1, wrappedPoint.Y + 1));
+        MouseMove(large, new Point(wrappedPoint.X + 1, wrappedPoint.Y + 1), leftButton: true);
+        LeftButtonUp(large, new Point(wrappedPoint.X + 1, wrappedPoint.Y + 1));
+        Check(large.SelectionStart == largeWordStart && large.SelectedText == word,
+            "in a wrapping box a held double-click still selects only the URI component");
         large.WordWrap = false;
         Check(SendMessage(large.Handle, EmGetWordBreakProc, 0, 0) != 0, "turning wrapping off restores it");
 

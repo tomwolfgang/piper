@@ -43,6 +43,7 @@ internal static class TextBoxWordSelection
         private int _selectionLength;
         private bool _selectionIsOurs;
         private bool _settingSelection;
+        private bool _dragByWords;
 
         public SelectionState(TextBox textBox)
         {
@@ -65,7 +66,8 @@ internal static class TextBoxWordSelection
             // The native drag that follows a double-click extends by the control's own words. A
             // wrapping box would also lay out its lines with the proc, so it keeps the native words;
             // changing WordWrap recreates the handle, which comes back through here.
-            if (_textBox.Multiline && _textBox.WordWrap) return;
+            _dragByWords = !(_textBox.Multiline && _textBox.WordWrap);
+            if (!_dragByWords) return;
             SendMessage(_textBox.Handle, EmSetWordBreakProc, 0, Marshal.GetFunctionPointerForDelegate(WordBreak));
         }
 
@@ -97,8 +99,10 @@ internal static class TextBoxWordSelection
                 var position = m.LParam.ToInt64();
                 var location = new Point(unchecked((short)position), unchecked((short)(position >> 16)));
                 // The native handler starts the held drag, which extends by the word-break proc
-                // above; ours then selects the exact word as before.
-                base.WndProc(ref m);
+                // above; ours then selects the exact word as before. Without the proc the native
+                // drag would anchor on its own space-delimited word, so the message stays ours.
+                if (_dragByWords) base.WndProc(ref m);
+                else m.Result = 0;
                 SelectWordAt(location);
                 _lastMouseDownCaret = -1;
                 return;

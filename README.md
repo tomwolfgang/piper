@@ -166,7 +166,8 @@ is still reachable.
 In text boxes, URI and header punctuation is a word boundary: double-clicking a path component, or
 using `Ctrl+Shift+Left` / `Ctrl+Shift+Right`, selects that component rather than the whole path.
 `Ctrl+Left` / `Ctrl+Right` moves between those boundaries without selecting text. Holding the button after a
-double-click and dragging extends the selection by those components.
+double-click and dragging extends the selection by those components, except in text boxes that wrap
+long lines.
 Supplementary Unicode characters and combining marks stay together in the selected word.
 
 ## Testing
