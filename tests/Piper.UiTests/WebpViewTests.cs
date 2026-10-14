@@ -103,6 +103,11 @@ internal static class WebpViewTests
         var failed = Await(view.ShowAsync(Webp));
         WebpView.LoadTimeout = TimeSpan.FromSeconds(15);
         check(failed == WebpShowResult.Failed && !view.Visible, "a page that does not load in time is Failed and leaves the view hidden");
+        // Fast selection: the second show deletes the first one's folder while it is still being written.
+        var older = view.ShowAsync(Webp);
+        var newer = view.ShowAsync(Webp);
+        check(Await(older) == WebpShowResult.Superseded && Await(newer) == WebpShowResult.Shown && Directory.Exists(view.Folder!),
+            "overlapping shows: the older is Superseded, and the newer is Shown with its folder intact");
         view.Clear();
         check(!Directory.Exists(folder) && view.Folder is null && !view.Visible, "Clear deletes the folder and hides the view");
         check(Await(view.ShowAsync(Webp)) == WebpShowResult.Shown && view.Folder != folder && Directory.Exists(view.Folder!), "a later WebP uses a new folder");
