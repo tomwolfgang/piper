@@ -277,7 +277,7 @@ public static class HttpParser
     private static async Task<byte[]> ReadChunkedAsync(HttpStreamReader reader, long limit, CancellationToken ct)
     {
         // Each chunk is read straight into the one array being built, not into one of its own.
-        var body = new BodyBuffer();
+        var body = new BodyBuffer(ceiling: (int)limit);
         while (true)
         {
             var sizeLine = await reader.ReadLineAsync(ct).ConfigureAwait(false);

@@ -18,12 +18,18 @@ internal sealed class BodyBuffer
     internal const int InitialCapacity = 64 * 1024;
 
     private readonly int _expected; // 0 when the total is not known
+    private readonly int _ceiling;
     private byte[] _array;
 
-    public BodyBuffer(int expectedLength = 0)
+    /// <param name="expectedLength">The declared total, or 0 when it is not known.</param>
+    /// <param name="ceiling">The most the array may ever hold (the caller's size limit): no growth step
+    /// goes past it, so the memory committed never exceeds the limit even for a body of unknown length.</param>
+    public BodyBuffer(int expectedLength = 0, int ceiling = int.MaxValue)
     {
         ArgumentOutOfRangeException.ThrowIfNegative(expectedLength);
+        ArgumentOutOfRangeException.ThrowIfNegative(ceiling);
         _expected = expectedLength;
+        _ceiling = Math.Min(ceiling, Array.MaxLength);
         _array = expectedLength == 0 ? [] : Allocate(Math.Min(expectedLength, InitialCapacity));
     }
 
@@ -85,7 +91,7 @@ internal sealed class BodyBuffer
             // Unknown total, or more than was declared (a peer may send more than it said it would).
             next = Math.Max((long)InitialCapacity, (long)_array.Length * 4);
         }
-        next = Math.Min(next, Array.MaxLength);
+        next = Math.Min(next, _ceiling);
         if (next <= _array.Length) throw new HttpBodyTooLargeException("Body would not fit in one array.");
 
         var bigger = Allocate((int)next);
