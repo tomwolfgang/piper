@@ -13,6 +13,9 @@ internal static class TextBoxWordSelection
 {
     private static readonly ConditionalWeakTable<TextBox, SelectionState> States = [];
 
+    // Rooted for the process lifetime: the native control keeps calling it until its handle dies.
+    private static readonly EditWordBreakProc WordBreak = BreakWords;
+
     /// <summary>
     /// Enables the selection behavior once for a text box.
     /// </summary>
@@ -25,6 +28,7 @@ internal static class TextBoxWordSelection
     private sealed class SelectionState : NativeWindow
     {
         private const int EmSetSel = 0x00B1;
+        private const int EmSetWordBreakProc = 0x00D0;
         private const int WmLButtonDown = 0x0201;
         private const int WmLButtonDoubleClick = 0x0203;
         private const int WmKeyDown = 0x0100;
@@ -39,6 +43,7 @@ internal static class TextBoxWordSelection
         private int _selectionLength;
         private bool _selectionIsOurs;
         private bool _settingSelection;
+        private bool _dragByWords;
 
         public SelectionState(TextBox textBox)
         {
@@ -50,10 +55,21 @@ internal static class TextBoxWordSelection
                 _cachedText = null;
                 _selectionIsOurs = false;
             };
-            if (textBox.IsHandleCreated) AssignHandle(textBox.Handle);
+            if (textBox.IsHandleCreated) Attach();
         }
 
-        private void OnHandleCreated(object? sender, EventArgs e) => AssignHandle(_textBox.Handle);
+        private void OnHandleCreated(object? sender, EventArgs e) => Attach();
+
+        private void Attach()
+        {
+            AssignHandle(_textBox.Handle);
+            // The native drag that follows a double-click extends by the control's own words. A
+            // wrapping box would also lay out its lines with the proc, so it keeps the native words;
+            // changing WordWrap recreates the handle, which comes back through here.
+            _dragByWords = !(_textBox.Multiline && _textBox.WordWrap);
+            if (!_dragByWords) return;
+            SendMessage(_textBox.Handle, EmSetWordBreakProc, 0, Marshal.GetFunctionPointerForDelegate(WordBreak));
+        }
 
         private void OnHandleDestroyed(object? sender, EventArgs e)
         {
@@ -82,9 +98,13 @@ internal static class TextBoxWordSelection
             {
                 var position = m.LParam.ToInt64();
                 var location = new Point(unchecked((short)position), unchecked((short)(position >> 16)));
+                // The native handler starts the held drag, which extends by the word-break proc
+                // above; ours then selects the exact word as before. Without the proc the native
+                // drag would anchor on its own space-delimited word, so the message stays ours.
+                if (_dragByWords) base.WndProc(ref m);
+                else m.Result = 0;
                 SelectWordAt(location);
                 _lastMouseDownCaret = -1;
-                m.Result = 0;
                 return;
             }
 
@@ -208,6 +228,51 @@ internal static class TextBoxWordSelection
             _selectionStart = Math.Min(anchor, caret);
             _selectionLength = Math.Abs(caret - anchor);
             _selectionIsOurs = true;
+        }
+    }
+
+    private delegate int EditWordBreakProc(nint text, int index, int length, int code);
+
+    private const int WbLeft = 0, WbRight = 1, WbIsDelimiter = 2;
+
+    /// <summary>How far one word-break call looks either side of its index.</summary>
+    private const int MaxWordBreakScan = 4096;
+
+    private static int BreakWords(nint buffer, int index, int length, int code)
+    {
+        if (buffer == 0 || length <= 0) return 0;
+        index = Math.Clamp(index, 0, length);
+        // The buffer can be a whole response body on one line, and the text is attacker-controlled,
+        // so each call copies only a bounded window around the index. A word longer than the window
+        // ends at the window's edge.
+        var offset = Math.Max(0, index - MaxWordBreakScan);
+        length = Math.Min(length, index + MaxWordBreakScan) - offset;
+        var text = Marshal.PtrToStringUni(buffer + offset * sizeof(char), length);
+        var result = BreakWords(text, index - offset, length, code);
+        return code is WbLeft or WbRight ? offset + result : result;
+    }
+
+    private static int BreakWords(string text, int index, int length, int code)
+    {
+        switch (code)
+        {
+            case WbLeft:
+                return FindPreviousWordBoundary(text, index);
+            case WbRight:
+                index = index < length ? ScalarStart(text, index) : index;
+                if (index < length && IsWordScalar(text, index))
+                {
+                    while (index < length && IsWordScalar(text, index)) index = NextScalarEnd(text, index);
+                }
+                else
+                {
+                    while (index < length && !IsWordScalar(text, index)) index = NextScalarEnd(text, index);
+                }
+                return index;
+            case WbIsDelimiter:
+                return index < length && !IsWordScalar(text, ScalarStart(text, index)) ? 1 : 0;
+            default:
+                return 0;
         }
     }
 
