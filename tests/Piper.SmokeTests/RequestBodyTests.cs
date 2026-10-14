@@ -157,7 +157,31 @@ internal static class RequestBodyTests
                 runner.IsTrue(buffer.ToArray().AsSpan().SequenceEqual(source), $"declared {declared}: every byte comes out as it went in");
             }
             runner.AreEqual(0, new BodyBuffer().ToArray().Length, "an empty body is an empty array");
+
+            // A body of unknown length never commits more than its limit, which is not a 64 KiB * 4^k.
+            var capped = new BodyBuffer(ceiling: 70_000);
+            for (var received = 0; received < 70_000;)
+            {
+                var room = capped.Reserve(70_000 - received);
+                runner.IsTrue(received + room.Length <= 70_000, $"at {received} bytes the buffer holds no more than the 70,000 limit");
+                capped.Advance(room.Length);
+                received += room.Length;
+            }
             return Task.CompletedTask;
+        });
+
+        await runner.RunAsync("a chunked body under a non-default limit never allocates past that limit", async () =>
+        {
+            // 4 MiB + 1 under a 5 MiB limit: unbounded 4x growth would step from 4 MiB to 16 MiB. The read
+            // completes synchronously, so the allocations are all on this thread and can be counted exactly.
+            const int limit = 5 * 1024 * 1024, size = 4 * 1024 * 1024 + 1;
+            var wire = Encoding.Latin1.GetBytes($"{size:X}\r\n").Concat(Pattern(size)).Concat("\r\n0\r\n\r\n"u8.ToArray()).ToArray();
+            using var reader = new HttpStreamReader(new MemoryStream(wire));
+            var before = GC.GetAllocatedBytesForCurrentThread();
+            var body = await HttpParser.ReadBodyAsync(reader, HttpBodyDescriptor.Chunked, CancellationToken.None, limit);
+            var allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+            runner.IsTrue(body.AsSpan().SequenceEqual(wire.AsSpan(size.ToString("X").Length + 2, size)), "the body is intact");
+            runner.IsTrue(allocated < 18L * 1024 * 1024, $"reading it allocated {allocated:N0} bytes (bound {18L * 1024 * 1024:N0}; 16 MiB steps would exceed it)");
         });
     }
 
