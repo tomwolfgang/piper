@@ -24,6 +24,7 @@ internal static class Http2ClientHardeningTests
         await RunHeaderBlockTestsAsync(runner);
         await RunFrameSequenceTestsAsync(runner);
         await RunFlowControlTestsAsync(runner);
+        await RunReceiveWindowTestsAsync(runner);
         await RunGoAwayTestsAsync(runner);
         await RunIdleTimeoutTestsAsync(runner);
         await RunProxyTimeoutTestAsync(runner);
@@ -370,6 +371,115 @@ internal static class Http2ClientHardeningTests
             runner.AreEqual(65_535L + 500, whileWaiting, "the client sent exactly the 500 bytes of credit it was given");
             runner.AreEqual((long)bodySize, afterCredit, "and the rest once more credit came");
         });
+    }
+
+    // ------------------------------------------------------------------ receive windows
+
+    private const long ConnectionWindow = 16 * 1024 * 1024;
+    private const int MaxFrame = 16_384;
+
+    private static async Task RunReceiveWindowTestsAsync(TestRunner runner)
+    {
+        await runner.RunAsync("h2 client: SETTINGS is followed at once by a WINDOW_UPDATE that opens the connection window to 16 MiB", async () =>
+        {
+            await using var peer = new Peer(async p =>
+            {
+                await p.WaitForRequestHeadAsync();
+                await p.SendHeaderBlockAsync(HpackEncoder.Encode([(":status", "204")]), Http2FrameFlags.EndStream);
+            });
+
+            var connection = new Http2ClientConnection(await peer.ConnectAsync());
+            await connection.SendRequestHeadAsync(Get(), peer.Ct).WaitAsync(HangLimit);
+
+            var sent = peer.Received().Where(f => f.Type is Http2FrameType.Settings or Http2FrameType.WindowUpdate or Http2FrameType.Headers).ToList();
+            runner.AreEqual(3, sent.Count, "SETTINGS, one WINDOW_UPDATE and HEADERS were sent");
+            runner.IsTrue(sent[0].Type == Http2FrameType.Settings && sent[1].Type == Http2FrameType.WindowUpdate && sent[2].Type == Http2FrameType.Headers,
+                "in that order: the window is open before the request is");
+            runner.AreEqual(0, sent[1].StreamId, "the WINDOW_UPDATE is for the connection");
+            var span = sent[1].Payload.Span;
+            runner.AreEqual(ConnectionWindow - 65_535, (long)(((span[0] & 0x7f) << 24) | (span[1] << 16) | (span[2] << 8) | span[3]),
+                "and brings the 65,535 default up to exactly 16 MiB");
+        });
+
+        await runner.RunAsync("h2 client: a 24 MiB response through the windows arrives intact and the origin's window stays within 16 MiB", async () =>
+        {
+            const long total = 24L * 1024 * 1024;
+            await using var peer = new Peer(async p =>
+            {
+                await p.WaitForRequestHeadAsync();
+                await p.SendHeaderBlockAsync(HpackEncoder.Encode([(":status", "200")]), Http2FrameFlags.None);
+                await p.SendDataWithinWindowsAsync(total);
+            });
+
+            var connection = new Http2ClientConnection(await peer.ConnectAsync());
+            await connection.SendRequestHeadAsync(Get(), peer.Ct).WaitAsync(HangLimit);
+            var (read, firstBad) = await ReadPatternAsync(connection.ResponseBody, long.MaxValue).WaitAsync(TimeSpan.FromSeconds(20));
+
+            runner.AreEqual(total, read, "every byte arrived");
+            runner.AreEqual(-1L, firstBad, "and in order, unchanged");
+            runner.IsTrue(peer.PeakConnectionWindow <= ConnectionWindow, $"the origin never held more than 16 MiB of connection credit (peak {peer.PeakConnectionWindow})");
+            runner.IsTrue(peer.PeakConnectionWindow > 1_048_576, "and held more than the 1 MiB one stream can use, which is what lifts the 64 KiB limit");
+        });
+
+        await runner.RunAsync("h2 client: credit goes back only for what the reader consumed, so a stalled reader stalls the origin", async () =>
+        {
+            const int consumed = 300_000;
+            await using var peer = new Peer(async p =>
+            {
+                await p.WaitForRequestHeadAsync();
+                await p.SendHeaderBlockAsync(HpackEncoder.Encode([(":status", "200")]), Http2FrameFlags.None);
+                await p.SendDataWithinWindowsAsync(64L * 1024 * 1024);
+            });
+
+            var connection = new Http2ClientConnection(await peer.ConnectAsync());
+            await connection.SendRequestHeadAsync(Get(), peer.Ct).WaitAsync(HangLimit);
+            var body = connection.ResponseBody;
+
+            // The reader takes 300,000 bytes and then reads no more. The origin sends until its windows
+            // run out, which has to happen well short of the 64 MiB it has.
+            await ReadPatternAsync(body, consumed).WaitAsync(HangLimit);
+            var settled = -1L;
+            await Poll.UntilAsync(() =>
+            {
+                var now = peer.SentBytes;
+                var done = now == settled;
+                settled = now;
+                return done;
+            }, 5_000);
+            await Task.Delay(100);
+
+            var streamCredit = peer.CreditFor(1);
+            var connectionCredit = peer.CreditFor(0) - (ConnectionWindow - 65_535);
+            runner.IsTrue(streamCredit <= consumed + MaxFrame, $"stream credit ({streamCredit}) is no more than the bytes read plus the frame read ahead");
+            runner.IsTrue(streamCredit >= consumed - 1_048_576 / 2, $"and is not held back beyond half the window (credit {streamCredit} for {consumed} read)");
+            runner.AreEqual(0L, connectionCredit, "no connection credit has been returned: less than half of its window has been read");
+            runner.IsTrue(peer.SentBytes <= 1_048_576 + streamCredit, $"the origin stopped at its stream window plus that credit (sent {peer.SentBytes})");
+            runner.IsTrue(peer.SentBytes < 8L * 1024 * 1024, "so the proxy is not asked to take the rest of the response while the reader is stalled");
+
+            // The reader comes back and takes the rest: the origin carries on and the body is whole.
+            var (read, firstBad) = await ReadPatternAsync(body, long.MaxValue, consumed).WaitAsync(TimeSpan.FromSeconds(30));
+            runner.AreEqual(64L * 1024 * 1024 - consumed, read, "the rest arrives once it is read");
+            runner.AreEqual(-1L, firstBad, "unchanged");
+        });
+    }
+
+    /// <summary>Reads up to <paramref name="limit"/> bytes (or to the end) and checks them against the
+    /// pattern the scripted origin sends, starting at <paramref name="start"/>. Returns the count read
+    /// and the offset of the first wrong byte, or -1.</summary>
+    private static async Task<(long Read, long FirstBad)> ReadPatternAsync(Stream body, long limit, long start = 0)
+    {
+        var buffer = new byte[64 * 1024];
+        long read = 0, firstBad = -1;
+        while (read < limit)
+        {
+            var n = await body.ReadAsync(buffer.AsMemory(0, (int)Math.Min(buffer.Length, limit - read)));
+            if (n == 0) break;
+            if (firstBad < 0)
+                for (var i = 0; i < n; i++)
+                    if (buffer[i] != Peer.PatternByte(start + read + i)) { firstBad = start + read + i; break; }
+            read += n;
+        }
+        return (read, firstBad);
     }
 
     // ------------------------------------------------------------------ GOAWAY
@@ -842,6 +952,9 @@ internal static class Http2ClientHardeningTests
         private readonly Task _run;
         private TcpClient? _accepted;
         private TcpClient? _connected;
+        private TaskCompletionSource _arrived = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private long _sentBytes;
+        private long _peakConnectionWindow;
 
         /// <param name="script">What the origin does once the client has connected.</param>
         /// <param name="readFrames">False for an origin that never reads its socket, so the client's
@@ -887,6 +1000,7 @@ internal static class Http2ClientHardeningTests
                 while (await Http2FrameReader.ReadAsync(wire, 1 << 24, Ct).ConfigureAwait(false) is { } frame)
                 {
                     lock (_gate) _received.Add(frame);
+                    Interlocked.Exchange(ref _arrived, new(TaskCreationOptions.RunContinuationsAsynchronously)).TrySetResult();
                 }
             }
             catch (Exception ex) when (ex is IOException or OperationCanceledException or ObjectDisposedException or Http2ProtocolException)
@@ -953,6 +1067,83 @@ internal static class Http2ClientHardeningTests
         }
 
         public Task WaitForDataAsync(long bytes) => Poll.UntilAsync(() => DataBytes(1) >= bytes);
+
+        public List<Http2Frame> Received()
+        {
+            lock (_gate) return [.. _received];
+        }
+
+        /// <summary>The body bytes <see cref="SendDataWithinWindowsAsync"/> has put on the wire.</summary>
+        public long SentBytes => Interlocked.Read(ref _sentBytes);
+
+        /// <summary>The most connection-level credit the origin held at once (what the client had granted
+        /// less what it had sent), as <see cref="SendDataWithinWindowsAsync"/> accounts for it.</summary>
+        public long PeakConnectionWindow => Interlocked.Read(ref _peakConnectionWindow);
+
+        /// <summary>The WINDOW_UPDATE credit the client has sent for a stream, in bytes.</summary>
+        public long CreditFor(int streamId)
+        {
+            lock (_gate)
+                return _received.Where(f => f.Type == Http2FrameType.WindowUpdate && f.StreamId == streamId).Sum(Increment);
+        }
+
+        private static long Increment(Http2Frame f)
+        {
+            var s = f.Payload.Span;
+            return ((s[0] & 0x7f) << 24) | (s[1] << 16) | (s[2] << 8) | s[3];
+        }
+
+        /// <summary>A deterministic byte for each offset of the response body.</summary>
+        public static byte PatternByte(long offset) => (byte)(offset % 251);
+
+        /// <summary>Sends <paramref name="total"/> body bytes on stream 1 as a well-behaved origin does: in
+        /// frames of at most 16 KiB, never past the connection or stream window the client has granted
+        /// (the 65,535 default and the client's SETTINGS_INITIAL_WINDOW_SIZE, plus each WINDOW_UPDATE
+        /// it sends), waiting for more credit when they run out. Ends the stream with the last frame.</summary>
+        public async Task SendDataWithinWindowsAsync(long total)
+        {
+            var cursor = 0;
+            long connection = 65_535, stream = 65_535;
+            long sent = 0;
+            var frame = new byte[MaxFrame];
+            while (sent < total)
+            {
+                var arrived = _arrived.Task;
+                List<Http2Frame> fresh;
+                lock (_gate)
+                {
+                    fresh = _received.Skip(cursor).ToList();
+                    cursor = _received.Count;
+                }
+                foreach (var f in fresh)
+                {
+                    if (f.Type == Http2FrameType.Settings && !f.HasFlag(Http2FrameFlags.Ack))
+                    {
+                        // Stream windows follow SETTINGS_INITIAL_WINDOW_SIZE (id 4) from the first SETTINGS on.
+                        var s = f.Payload.Span;
+                        for (var i = 0; i + 6 <= s.Length; i += 6)
+                            if (((s[i] << 8) | s[i + 1]) == 4)
+                                stream += (long)(((uint)s[i + 2] << 24) | ((uint)s[i + 3] << 16) | ((uint)s[i + 4] << 8) | s[i + 5]) - 65_535;
+                    }
+                    else if (f.Type == Http2FrameType.WindowUpdate && f.StreamId == 0) connection += Increment(f);
+                    else if (f.Type == Http2FrameType.WindowUpdate && f.StreamId == 1) stream += Increment(f);
+                }
+                Interlocked.Exchange(ref _peakConnectionWindow, Math.Max(PeakConnectionWindow, connection));
+
+                var n = (int)Math.Min(Math.Min(connection, stream), Math.Min(MaxFrame, total - sent));
+                if (n <= 0)
+                {
+                    await arrived.WaitAsync(Ct).ConfigureAwait(false);
+                    continue;
+                }
+                for (var i = 0; i < n; i++) frame[i] = PatternByte(sent + i);
+                connection -= n;
+                stream -= n;
+                sent += n;
+                await SendAsync(Http2FrameType.Data, sent == total ? Http2FrameFlags.EndStream : Http2FrameFlags.None, 1, frame.AsMemory(0, n)).ConfigureAwait(false);
+                Interlocked.Exchange(ref _sentBytes, sent);
+            }
+        }
 
         public int WindowUpdatesFor(int streamId) =>
             Count(f => f.Type == Http2FrameType.WindowUpdate && f.StreamId == streamId);

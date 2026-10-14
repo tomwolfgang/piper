@@ -76,9 +76,27 @@ public sealed class Http2ClientConnection(Stream stream, TimeSpan? idleTimeout =
     private long _connectionBytesToAck;
     private long _streamBytesToAck;
 
-    /// <summary>Acknowledge once roughly half the initial 65,535-byte connection window is
-    /// consumed, so credit is replenished well before the sender runs out.</summary>
-    private const int WindowUpdateThreshold = 32 * 1024;
+    /// <summary>What every connection's receive window starts at until a WINDOW_UPDATE raises it.</summary>
+    private const int DefaultWindow = 65_535;
+
+    /// <summary>
+    /// The connection-level receive window this side opens right after its SETTINGS, so the origin
+    /// is never held to 65,535 bytes per round trip. It is a ceiling on what the origin may have in
+    /// flight, not a buffer: frames are read only when the body's reader asks for more, so what this
+    /// process holds is the one frame read ahead (at most <see cref="Http2Settings.MaxFrameSize"/>,
+    /// 16 KiB), and credit goes back only for frames read, never ahead of the reader. A reader that
+    /// stalls therefore stalls the origin, which stops at what its windows allow (the 1 MiB stream
+    /// window, for the one stream this role opens) and leaves the rest in TCP.
+    /// </summary>
+    private const int ConnectionWindow = 16 * 1024 * 1024;
+
+    /// <summary>Credit for the connection goes back once half its window has been read, so the origin
+    /// always holds at least half of it: 8 MiB, far more than the one stream's 1 MiB can use.</summary>
+    private const int ConnectionCreditStep = ConnectionWindow / 2;
+
+    /// <summary>Credit for the stream goes back once half the window this side advertised for it has
+    /// been read.</summary>
+    private int StreamCreditStep => _localSettings.InitialWindowSize / 2;
 
     // The header block being assembled, from a HEADERS frame to the CONTINUATION that ends it.
     private readonly ArrayBufferWriter<byte> _headerBlockFragment = new();
@@ -103,6 +121,9 @@ public sealed class Http2ClientConnection(Stream stream, TimeSpan? idleTimeout =
         MarkProgress();
         await BoundedWriteAsync(t => stream.WriteAsync(PrefaceBytes, t).AsTask(), ct).ConfigureAwait(false);
         await WriteFrameAsync(Http2FrameType.Settings, Http2FrameFlags.None, 0, _localSettings.ToPayload(), ct).ConfigureAwait(false);
+        // SETTINGS_INITIAL_WINDOW_SIZE does not touch the connection window (RFC 9113 §6.9.2): only
+        // this raises it above 65,535, however large the stream window advertised is.
+        await WriteWindowUpdateAsync(0, ConnectionWindow - DefaultWindow, ct).ConfigureAwait(false);
 
         var fields = Http2MessageAdapter.ToHeaderFields(request);
         var block = HpackEncoder.Encode(fields);
@@ -460,7 +481,7 @@ public sealed class Http2ClientConnection(Stream stream, TimeSpan? idleTimeout =
         if (length == 0) return;
 
         _connectionBytesToAck += length;
-        if (_connectionBytesToAck >= WindowUpdateThreshold)
+        if (_connectionBytesToAck >= ConnectionCreditStep)
         {
             await WriteWindowUpdateAsync(0, _connectionBytesToAck, ct).ConfigureAwait(false);
             _connectionBytesToAck = 0;
@@ -469,7 +490,7 @@ public sealed class Http2ClientConnection(Stream stream, TimeSpan? idleTimeout =
         if (frame.StreamId != StreamId) return;
 
         _streamBytesToAck += length;
-        if (_streamBytesToAck >= WindowUpdateThreshold)
+        if (_streamBytesToAck >= StreamCreditStep)
         {
             await WriteWindowUpdateAsync(StreamId, _streamBytesToAck, ct).ConfigureAwait(false);
             _streamBytesToAck = 0;
