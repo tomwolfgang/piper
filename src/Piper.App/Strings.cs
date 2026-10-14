@@ -675,7 +675,6 @@ internal static class Strings
         public static string SaveImageTooltip => I18n.T("inspector.saveImageTooltip");
         public static string SaveAsPng => I18n.T("inspector.saveAsPng");
         public static string SaveAsJpeg => I18n.T("inspector.saveAsJpeg");
-        public static string SaveAsWebp => I18n.T("inspector.saveAsWebp");
         public static string SaveImageAs => I18n.T("inspector.saveImageAs");
 
         public static string SaveImageCaption => I18n.T("inspector.saveImageCaption");
@@ -704,6 +703,7 @@ internal static class Strings
             I18n.T("inspector.imageDimensions", ("width", width), ("height", height), ("label", label));
         public static string ImageDecodeFailed => I18n.T("inspector.imageDecodeFailed");
         public static string ImageBlocked => I18n.T("inspector.imageBlocked");
+        public static string ImageWebpNotPreviewed => I18n.T("inspector.imageWebpNotPreviewed");
         public static string ImageRefused(long megapixels, long megabytes) =>
             I18n.T("inspector.imageRefused", ("megapixels", megapixels), ("megabytes", megabytes));
         public static string ImageDecoding => I18n.T("inspector.imageDecoding");

@@ -494,12 +494,11 @@
     "saveImageTooltip": "Save or convert this image",
     "saveAsPng": "Save as PNG...",
     "saveAsJpeg": "Save as JPEG...",
-    "saveAsWebp": "Save as WebP...",
     "saveImageAs": "Save image as...",
 
     "saveImageCaption": "Save image",
     "saveImageFileName": "response.{{extension}}",
-    "saveImageFilter": "PNG image (*.png)|*.png|JPEG image (*.jpg)|*.jpg|WebP image (*.webp)|*.webp",
+    "saveImageFilter": "PNG image (*.png)|*.png|JPEG image (*.jpg)|*.jpg",
     "saveImageFailed": "Could not save the image: {{message}}",
 
     "saveFormFieldCaption": "Save form field contents",
@@ -518,7 +517,8 @@
     "detectedImage": "Detected image (no Content-Type)",
     "imageDimensions": "{{width, N0}} x {{height, N0}} px\n{{label}}",
     "imageDecodeFailed": "Could not display this response as an image: unsupported or invalid image data.",
-    "imageBlocked": "This image was not decoded. Piper does not decode TIFF images or images with an embedded colour profile, because its image library has known security advisories that they can trigger.",
+    "imageBlocked": "This image was not decoded. Piper does not decode TIFF images or images with an embedded colour profile, because malformed TIFF files and colour profiles are a common way to attack image decoders.",
+    "imageWebpNotPreviewed": "Piper cannot preview WebP images yet. Use Save > Response body only to keep the original file.",
     "imageRefused": "This image was not decoded: it is corrupt, or larger than {{megapixels, N0}} megapixels or {{megabytes, N0}} MB.",
     "imageDecoding": "Decoding image...",
     "imageTimedOut": "Decoding this image took too long and was stopped.",
