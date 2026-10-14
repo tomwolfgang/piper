@@ -36,13 +36,32 @@ internal static class ImageDecoding
         byte[] body, CancellationToken cancellationToken, Func<byte[], CancellationToken, Bitmap>? decode = null) =>
         RunUntilAbandonedAsync(() => GuardAndDecode(body, cancellationToken, decode), cancellationToken, result => result.Bitmap?.Dispose());
 
+    /// <summary>The most GDI+ decodes or conversions in flight at once, abandoned ones included.</summary>
+    internal const int MaxConcurrentNativeWork = 2;
+
+    private static readonly SemaphoreSlim NativeSlots = new(MaxConcurrentNativeWork);
+
     /// <summary>
     /// Runs <paramref name="work"/> on the thread pool, or throws as soon as the token fires. GDI+ cannot be
     /// cancelled, so the work finishes on its own and a late result goes to <paramref name="discardLate"/>.
+    /// A slot is held until the native call returns, not until the caller gives up, so abandoned decodes
+    /// cannot pile up; a caller that gave up while waiting for a slot never starts.
     /// </summary>
     public static async Task<T> RunUntilAbandonedAsync<T>(Func<T> work, CancellationToken cancellationToken, Action<T>? discardLate = null)
     {
-        var running = Task.Run(work);
+        var running = Task.Run(async () =>
+        {
+            await NativeSlots.WaitAsync(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                return work();
+            }
+            finally
+            {
+                NativeSlots.Release();
+            }
+        });
         var abandoned = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         using (cancellationToken.Register(static state => ((TaskCompletionSource)state!).TrySetResult(), abandoned))
         {

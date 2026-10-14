@@ -130,6 +130,34 @@ internal static class ImageDecodingTests
             check(late is not null && IsDisposed(late), "the bitmap that arrives after the caller gave up is disposed");
         }
 
+        Console.WriteLine("== abandoned decodes cannot pile up");
+        using (var release = new ManualResetEventSlim())
+        {
+            int running = 0, peak = 0, started = 0;
+            Bitmap Blocked(byte[] bytes, CancellationToken token)
+            {
+                Interlocked.Increment(ref started);
+                var now = Interlocked.Increment(ref running);
+                lock (release) peak = Math.Max(peak, now);
+                release.Wait();
+                Interlocked.Decrement(ref running);
+                return new Bitmap(1, 1);
+            }
+
+            var callers = Enumerable.Range(0, 8).Select(_ =>
+            {
+                var timeout = new CancellationTokenSource(150);
+                return ImageDecoding.GuardAndDecodeAsync(png, timeout.Token, Blocked);
+            }).ToArray();
+            pumpUntil(() => callers.All(c => c.IsCompleted));
+            check(callers.All(c => c.IsCanceled) && started == ImageDecoding.MaxConcurrentNativeWork && peak == started,
+                $"8 callers gave up, and only {ImageDecoding.MaxConcurrentNativeWork} native decodes started (started {started}, peak {peak})");
+            release.Set();
+            var settle = 0;
+            pumpUntil(() => running == 0 && ++settle > 30);
+            check(started == ImageDecoding.MaxConcurrentNativeWork, $"abandoned waiters never start once a slot frees (started {started})");
+        }
+
         Console.WriteLine("== the inspector shows a decoded image, refuses a hostile one and survives closing mid-decode");
         using (var form = new Form { Width = 700, Height = 500 })
         {
