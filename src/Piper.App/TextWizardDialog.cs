@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Json;
 using System.Windows.Forms;
+using Piper.App.Controls;
 using Piper.App.Theme;
 using Piper.Core.Sessions;
 using Piper.Core.Telemetry;
@@ -138,6 +139,17 @@ public sealed class TextWizardDialog : Form
             AccessibleName = Strings.TextWizard.JwtOutputAccessibleName,
             Visible = false,
         };
+        _jwtOutput.NodeMouseClick += (_, e) =>
+        {
+            if (e.Button == MouseButtons.Right) _jwtOutput.SelectedNode = e.Node;
+        };
+        _jwtOutput.KeyDown += (_, e) =>
+        {
+            if (e.KeyData != (Keys.Control | Keys.C)) return;
+            CopySelectedJwtValue(valueOnly: false);
+            e.SuppressKeyPress = true;
+        };
+        _jwtOutput.ContextMenuStrip = BuildJwtMenu();
 
         _transform = new ComboBox
         {
@@ -451,9 +463,44 @@ public sealed class TextWizardDialog : Form
             ? Strings.TextWizard.JwtHeaderInvalid(reason)
             : Strings.TextWizard.JwtPayloadInvalid(reason);
 
+    private ContextMenuStrip BuildJwtMenu()
+    {
+        var menu = new ContextMenuStrip { Font = Palette.UiFont };
+        var copyPair = Menus.Item(Strings.Inspector.CopyKeyValue, Strings.Shortcuts.CtrlC,
+            (_, _) => CopySelectedJwtValue(valueOnly: false));
+        var copyValue = new ToolStripMenuItem(Strings.Inspector.CopyValueOnly, null,
+            (_, _) => CopySelectedJwtValue(valueOnly: true));
+        var toInput = new ToolStripMenuItem(Strings.TextWizard.SendValueToInput, null,
+            (_, _) => { if (SelectedJwtValue is { } value) SetInput(ValueText(value)); });
+        menu.Items.AddRange([copyPair, copyValue, new ToolStripSeparator(), toInput]);
+        menu.Opening += (_, _) =>
+        {
+            var enabled = SelectedJwtValue is not null;
+            copyPair.Enabled = enabled;
+            copyValue.Enabled = enabled;
+            toInput.Enabled = enabled;
+        };
+        return menu;
+    }
+
+    private JsonNodeValue? SelectedJwtValue => _jwtOutput.SelectedNode?.Tag as JsonNodeValue;
+
+    private void CopySelectedJwtValue(bool valueOnly)
+    {
+        if (SelectedJwtValue is not { } value) return;
+        ClipboardText.TrySet(valueOnly ? ValueText(value) : _jwtOutput.SelectedNode?.Text);
+    }
+
+    /// <summary>A claim as someone would paste it: a string without its JSON quotes, anything else as JSON.</summary>
+    private static string ValueText(JsonNodeValue value) => value.StringValue ?? value.RawValue;
+
     private static TreeNode CreateJsonNode(string name, JsonElement value, ref int renderedNodes, ref bool treeTruncated)
     {
-        var node = new TreeNode(FormatJsonValue(name, value));
+        var node = new TreeNode(FormatJsonValue(name, value))
+        {
+            Tag = new JsonNodeValue(name, value.GetRawText(),
+                value.ValueKind == JsonValueKind.String ? value.GetString() : null),
+        };
         renderedNodes++;
         switch (value.ValueKind)
         {

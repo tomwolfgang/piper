@@ -1555,8 +1555,6 @@ public sealed class MessageInspector : UserControl
         _jsonMatchCount.Text = Strings.Inspector.MatchPosition(_jsonMatchIndex + 1, _jsonMatches.Count);
     }
 
-    private sealed record JsonNodeValue(string Key, string RawValue, string? StringValue);
-
     /// <summary>Routes the standard Find shortcut to the search field for the active inspector tab.</summary>
     protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
     {

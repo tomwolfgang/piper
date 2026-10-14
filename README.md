@@ -353,7 +353,8 @@ on the session grid. The window is shared and stays open beside the grid.
 **Inspect JWT** reads compact `header.payload.signature` tokens directly or embedded in a longer value, such as
 `Bearer header.payload.signature anything header.payload.signature`. It shows each header and payload in an
 expanded JSON tree, and labels an invalid part without hiding a valid companion part. **To Input** and **Save**
-use the same decoded header/payload data as JSON. It deliberately does not claim that a signature,
+use the same decoded header/payload data as JSON. Right-click a claim to **Copy key-value** (`Ctrl+C`),
+**Copy value only** (a string without its quotes) or **Send value to input**. It deliberately does not claim that a signature,
 issuer, audience or lifetime is valid: checking those requires the issuer's key and the application's validation
 policy.
 

@@ -46,6 +46,7 @@ internal static class Program
         Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
 
         RunTextBoxWordSelectionTest();
+        RunTextWizardJwtMenuTest();
         ImageDecodingTests.Run(Check, PumpUntil);
 
         Run("clearing a scrolled grid shows the next rows from the top", (store, grid, list) =>
@@ -380,6 +381,71 @@ internal static class Program
         finally
         {
             SetKeyboardState(original);
+        }
+    }
+
+    private static void RunTextWizardJwtMenuTest()
+    {
+        Console.WriteLine("== the TextWizard JWT tree copies claims from its context menu");
+        // Opening and closing the wizard saves its window size and transform; keep the developer's file.
+        var settingsPath = TextWizardSettingsStore.DefaultPath;
+        var savedSettings = File.Exists(settingsPath) ? File.ReadAllBytes(settingsPath) : null;
+        try
+        {
+            static string Part(string json) => Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(json))
+                .TrimEnd('=').Replace('+', '-').Replace('/', '_');
+            const string subject = "fe4aecaf-9172-4b20-874c-1daf6c227f7e";
+            var token = Part("{\"alg\":\"HS256\",\"typ\":\"JWT\"}") + "."
+                + Part("{\"id\":\"tomwolfgang\",\"scope\":[\"logged_in\",\"dev\"],\"sub\":\"" + subject + "\",\"exp\":1792060137}")
+                + ".c2ln";
+
+            TextWizardDialog.Open(null, "Bearer " + token);
+            var wizard = Application.OpenForms.OfType<TextWizardDialog>().Single();
+            var transform = Descendants(wizard).OfType<ComboBox>().Single();
+            transform.SelectedIndex = transform.Items.Cast<string>().ToList().FindIndex(item => item.Contains("JWT", StringComparison.Ordinal));
+            var tree = Descendants(wizard).OfType<TreeView>().Single();
+            var input = Descendants(wizard).OfType<TextBox>().First(box => !box.ReadOnly);
+            var menu = tree.ContextMenuStrip;
+            Check(menu is not null, "the JWT tree has a context menu");
+            if (menu is null) return;
+
+            static IEnumerable<TreeNode> All(TreeNodeCollection nodes) =>
+                nodes.Cast<TreeNode>().SelectMany(node => All(node.Nodes).Prepend(node));
+            // The copy commands share their value with Send value to input; the system clipboard is
+            // not reliably available to a test process, so the value is checked through the input.
+            var sub = All(tree.Nodes).Single(node => node.Text.StartsWith("sub: ", StringComparison.Ordinal));
+            Check(sub.Text == "sub: \"" + subject + "\"", "the claim line, which Copy key-value copies, is shown as JSON");
+            var scope = All(tree.Nodes).Single(node => node.Text.StartsWith("scope: ", StringComparison.Ordinal));
+            tree.SelectedNode = scope;
+            menu.Items[3].PerformClick();
+            Check(input.Text == "[\"logged_in\",\"dev\"]", "an array claim's value is its JSON");
+            // Sending a value to the input re-detects the transform, so choose Inspect JWT again.
+            transform.SelectedIndex = transform.Items.Cast<string>().ToList().FindIndex(item => item.Contains("JWT", StringComparison.Ordinal));
+            input.Text = "Bearer " + token;
+            sub = All(tree.Nodes).Single(node => node.Text.StartsWith("sub: ", StringComparison.Ordinal));
+            tree.SelectedNode = sub;
+            menu.Items[3].PerformClick();
+            Check(input.Text == subject, "a string claim's value has no JSON quotes");
+
+            input.Text = "Bearer " + token;
+            sub = All(tree.Nodes).Single(node => node.Text.StartsWith("sub: ", StringComparison.Ordinal));
+            tree.SelectedNode = sub;
+            menu.Show(tree, Point.Empty);
+            Check(menu.Items[0].Enabled && menu.Items[1].Enabled && menu.Items[3].Enabled, "items are enabled on a claim");
+            menu.Close();
+            menu.Items[3].PerformClick(); // the input is now a bare UUID, so the tree shows only a status line
+            Check(tree.Nodes.Count == 1 && tree.Nodes[0].Tag is null, "setup: the claim that is not a JWT shows one status line");
+            tree.SelectedNode = tree.Nodes[0];
+            menu.Show(tree, Point.Empty);
+            Check(!menu.Items[0].Enabled && !menu.Items[1].Enabled && !menu.Items[3].Enabled,
+                "items are disabled on a status line");
+            menu.Close();
+        }
+        finally
+        {
+            Application.OpenForms.OfType<TextWizardDialog>().SingleOrDefault()?.Close();
+            if (savedSettings is null) File.Delete(settingsPath);
+            else File.WriteAllBytes(settingsPath, savedSettings);
         }
     }
 
