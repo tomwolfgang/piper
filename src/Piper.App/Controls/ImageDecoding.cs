@@ -1,89 +1,95 @@
 using System.Drawing.Imaging;
 using System.Runtime.InteropServices;
-using SixLabors.ImageSharp.Formats;
-using SixLabors.ImageSharp.Memory;
-using SixLabors.ImageSharp.PixelFormats;
-using ImageSharp = SixLabors.ImageSharp;
 
 namespace Piper.App.Controls;
 
 /// <summary>
-/// How the inspector decodes a body that <see cref="ImageGuard"/> has allowed. One frame is all the
-/// viewer shows. SkipMetadata stops the JPEG and WebP decoders from keeping an ICC profile, EXIF or
-/// XMP, but the PNG and BMP decoders in 3.1.12 keep a profile regardless (checked against the
-/// library), which is why the guard refuses profiles itself. The allocator limit bounds what the guard
-/// cannot see (a GIF frame descriptor, say) but not a BMP profile, which the library reads into a
-/// plain array; the guard refuses those.
+/// Decodes a body that <see cref="ImageGuard"/> allowed. PNG, JPEG, GIF (first frame) and BMP use the GDI+
+/// decoders that ship with Windows. GDI+ cannot read WebP, so a WebP never reaches it. The guard always
+/// runs first: GDI+ is native code, and the guard's refusals and 16 MP / 32 MiB caps bound what it sees.
 /// </summary>
 internal static class ImageDecoding
 {
-    public static DecoderOptions Options { get; } = new()
-    {
-        SkipMetadata = true,
-        MaxFrames = 1,
-        Configuration = CreateConfiguration(),
-    };
-
-    // A clone of the default keeps the format decoders registered (a bare new Configuration() has
-    // none) and, unlike changing the default, leaves the process-wide allocator alone.
-    private static ImageSharp.Configuration CreateConfiguration()
-    {
-        var configuration = ImageSharp.Configuration.Default.Clone();
-        configuration.MemoryAllocator = MemoryAllocator.Create(new MemoryAllocatorOptions { AllocationLimitMegabytes = 512 });
-        return configuration;
-    }
+    /// <summary>True for a RIFF/WEBP container; only meaningful once the guard allowed the body.</summary>
+    public static bool IsWebp(ReadOnlySpan<byte> body) =>
+        body.Length >= 12 && body.StartsWith("RIFF"u8) && body.Slice(8, 4).SequenceEqual("WEBP"u8);
 
     /// <summary>
-    /// Runs <see cref="ImageGuard"/> and, only when it allows the body, decodes it. Both steps belong
-    /// off the UI thread: on a hostile 32 MiB JPEG the guard's scan alone costs about 100 ms. The
-    /// bitmap is null exactly when the verdict is not <see cref="ImageGuardVerdict.Allowed"/>.
+    /// Runs the guard and, for an allowed GDI+ format, decodes; both belong off the UI thread. The bitmap
+    /// is null for a refused body and for an allowed WebP. <paramref name="decode"/> is a test seam.
     /// </summary>
-    public static (Bitmap? Bitmap, ImageGuardVerdict Verdict) GuardAndDecode(byte[] body, CancellationToken cancellationToken)
+    public static (Bitmap? Bitmap, ImageGuardVerdict Verdict) GuardAndDecode(
+        byte[] body, CancellationToken cancellationToken, Func<byte[], CancellationToken, Bitmap>? decode = null)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         var verdict = ImageGuard.Check(body);
-        return verdict == ImageGuardVerdict.Allowed
-            ? (DecodeToBitmap(body, cancellationToken), verdict)
-            : (null, verdict);
+        if (verdict != ImageGuardVerdict.Allowed || IsWebp(body)) return (null, verdict);
+
+        var bitmap = (decode ?? DecodeToBitmap)(body, cancellationToken);
+        if (!cancellationToken.IsCancellationRequested) return (bitmap, verdict);
+
+        bitmap.Dispose();
+        throw new OperationCanceledException(cancellationToken);
     }
 
-    /// <summary>
-    /// Decodes straight into a GDI+ bitmap, row by row. Safe to call off the UI thread, and the
-    /// decoder observes <paramref name="cancellationToken"/>. Going through a PNG encode and decode
-    /// first (the earlier approach) cost up to 28 s of a 37 s total for a noisy 8192 x 8192 JPEG.
-    /// </summary>
-    public static Bitmap DecodeToBitmap(byte[] body, CancellationToken cancellationToken)
-    {
-        using var stream = new MemoryStream(body, writable: false);
-        using var image = ImageSharp.Image.LoadAsync<Bgra32>(Options, stream, cancellationToken).GetAwaiter().GetResult();
+    public static Task<(Bitmap? Bitmap, ImageGuardVerdict Verdict)> GuardAndDecodeAsync(
+        byte[] body, CancellationToken cancellationToken, Func<byte[], CancellationToken, Bitmap>? decode = null) =>
+        RunUntilAbandonedAsync(() => GuardAndDecode(body, cancellationToken, decode), cancellationToken, result => result.Bitmap?.Dispose());
 
-        var bitmap = new Bitmap(image.Width, image.Height, PixelFormat.Format32bppArgb);
-        try
+    /// <summary>The most GDI+ decodes or conversions in flight at once, abandoned ones included.</summary>
+    internal const int MaxConcurrentNativeWork = 2;
+
+    private static readonly SemaphoreSlim NativeSlots = new(MaxConcurrentNativeWork);
+
+    /// <summary>
+    /// Runs <paramref name="work"/> on the thread pool, or throws as soon as the token fires. GDI+ cannot be
+    /// cancelled, so the work finishes on its own and a late result goes to <paramref name="discardLate"/>.
+    /// A slot is held until the native call returns, not until the caller gives up, so abandoned decodes
+    /// cannot pile up; a caller that gave up while waiting for a slot never starts.
+    /// </summary>
+    public static async Task<T> RunUntilAbandonedAsync<T>(Func<T> work, CancellationToken cancellationToken, Action<T>? discardLate = null)
+    {
+        var running = Task.Run(async () =>
         {
-            var bits = bitmap.LockBits(new Rectangle(0, 0, image.Width, image.Height), ImageLockMode.WriteOnly, PixelFormat.Format32bppArgb);
+            await NativeSlots.WaitAsync(cancellationToken).ConfigureAwait(false);
             try
             {
-                var row = new byte[image.Width * 4];
-                image.ProcessPixelRows(accessor =>
-                {
-                    for (var y = 0; y < accessor.Height; y++)
-                    {
-                        cancellationToken.ThrowIfCancellationRequested();
-                        MemoryMarshal.AsBytes(accessor.GetRowSpan(y)).CopyTo(row);
-                        Marshal.Copy(row, 0, bits.Scan0 + y * bits.Stride, row.Length);
-                    }
-                });
+                cancellationToken.ThrowIfCancellationRequested();
+                return work();
             }
             finally
             {
-                bitmap.UnlockBits(bits);
+                NativeSlots.Release();
             }
-
-            return bitmap;
-        }
-        catch
+        });
+        var abandoned = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using (cancellationToken.Register(static state => ((TaskCompletionSource)state!).TrySetResult(), abandoned))
         {
-            bitmap.Dispose();
-            throw;
+            if (await Task.WhenAny(running, abandoned.Task) == running) return await running;
         }
+
+        _ = running.ContinueWith(task =>
+        {
+            if (task.IsCompletedSuccessfully) discardLate?.Invoke(task.Result);
+            else _ = task.Exception; // observed, so a late failure is not an unobserved task exception
+        }, TaskScheduler.Default);
+        throw new OperationCanceledException(cancellationToken);
     }
+
+    /// <summary>
+    /// Decodes into a bitmap that owns its pixels (GDI+ reads lazily from its stream, so the frame is cloned
+    /// and the source and stream disposed). Clone, unlike drawing it, keeps translucent pixels exact.
+    /// </summary>
+    public static Bitmap DecodeToBitmap(byte[] body, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        using var stream = new MemoryStream(body, writable: false);
+        using var image = Image.FromStream(stream, useEmbeddedColorManagement: false, validateImageData: true);
+        cancellationToken.ThrowIfCancellationRequested();
+        var frame = image as Bitmap ?? throw new ArgumentException("Not a raster image.");
+        return frame.Clone(new Rectangle(0, 0, frame.Width, frame.Height), PixelFormat.Format32bppArgb);
+    }
+
+    /// <summary>What GDI+ throws for bytes it cannot decode.</summary>
+    public static bool IsInvalidImage(Exception exception) => exception is ArgumentException or OutOfMemoryException or ExternalException;
 }

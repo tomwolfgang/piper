@@ -1,3 +1,4 @@
+using System.Drawing.Imaging;
 using System.Text;
 using System.Text.Json;
 using System.Windows.Forms;
@@ -7,8 +8,6 @@ using Piper.App.Theme;
 using Piper.Core.Http;
 using Piper.Core.Sessions;
 using ShimmyMySherbet.WinForms.ZoomableImgBox;
-using SixLabors.ImageSharp;
-using ImageSharpImage = SixLabors.ImageSharp.Image;
 
 namespace Piper.App.Controls;
 
@@ -520,7 +519,6 @@ public sealed class MessageInspector : UserControl
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(Strings.Inspector.SaveAsPng, null, (_, _) => SaveCurrentImage("png"));
         menu.Items.Add(Strings.Inspector.SaveAsJpeg, null, (_, _) => SaveCurrentImage("jpg"));
-        menu.Items.Add(Strings.Inspector.SaveAsWebp, null, (_, _) => SaveCurrentImage("webp"));
         menu.Items.Add(Strings.Inspector.SaveImageAs, null, (_, _) => SaveCurrentImage(null));
         return menu;
     }
@@ -611,7 +609,6 @@ public sealed class MessageInspector : UserControl
         };
         save.DropDownItems.Add(Strings.Inspector.SaveAsPng, null, (_, _) => SaveCurrentImage("png"));
         save.DropDownItems.Add(Strings.Inspector.SaveAsJpeg, null, (_, _) => SaveCurrentImage("jpg"));
-        save.DropDownItems.Add(Strings.Inspector.SaveAsWebp, null, (_, _) => SaveCurrentImage("webp"));
         save.DropDownItems.Add(Strings.Inspector.SaveImageAs, null, (_, _) => SaveCurrentImage(null));
 
         var toolbar = new ToolStrip
@@ -646,18 +643,13 @@ public sealed class MessageInspector : UserControl
         {
             Title = Strings.Inspector.SaveImageCaption,
             Filter = Strings.Inspector.SaveImageFilter,
-            FilterIndex = requestedFormat switch
-            {
-                "jpg" => 2,
-                "webp" => 3,
-                _ => 1,
-            },
+            FilterIndex = requestedFormat == "jpg" ? 2 : 1,
             FileName = Strings.Inspector.SaveImageFileName(requestedFormat ?? "png"),
         };
         if (dialog.ShowDialog(this) != DialogResult.OK) return;
 
         var format = Path.GetExtension(dialog.FileName).TrimStart('.').ToLowerInvariant();
-        if (format is not ("png" or "jpg" or "jpeg" or "webp")) format = requestedFormat ?? "png";
+        if (format is not ("png" or "jpg" or "jpeg")) format = requestedFormat ?? "png";
 
         var path = dialog.FileName;
         try
@@ -666,11 +658,12 @@ public sealed class MessageInspector : UserControl
 
             // The guard, decoding and re-encoding take up to seconds for a large image, so they run off
             // the UI thread and into a buffer: a timeout or failure never leaves a half-written file behind.
+            // GDI+ cannot be cancelled, so a timeout stops the wait and the worker's late result is dropped.
             using var timeout = new CancellationTokenSource(ImageWorkTimeout);
-            var (encoded, verdict) = await Task.Run(() => GuardAndConvertImage(body, format, timeout.Token), timeout.Token);
+            var (encoded, verdict) = await ImageDecoding.RunUntilAbandonedAsync(() => GuardAndConvertImage(body, format, timeout.Token), timeout.Token);
             if (encoded is null)
             {
-                MessageBox.Show(this, RefusalText(verdict)!, Strings.App.Name, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                MessageBox.Show(this, RefusalText(verdict) ?? Strings.Inspector.ImageWebpNotPreviewed, Strings.App.Name, MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
 
@@ -689,27 +682,23 @@ public sealed class MessageInspector : UserControl
         }
     }
 
-    // The encoded bytes are null exactly when the guard refused the body.
-    private static async Task<(byte[]? Encoded, ImageGuardVerdict Verdict)> GuardAndConvertImage(
+    // The encoded bytes are null when the guard refused the body, and for a WebP, which GDI+ cannot encode.
+    private static (byte[]? Encoded, ImageGuardVerdict Verdict) GuardAndConvertImage(
         byte[] body, string format, CancellationToken cancellationToken)
     {
         var verdict = ImageGuard.Check(body);
-        return verdict == ImageGuardVerdict.Allowed ? (await ConvertImage(body, format, cancellationToken), verdict) : (null, verdict);
+        return verdict == ImageGuardVerdict.Allowed && !ImageDecoding.IsWebp(body)
+            ? (ConvertImage(body, format, cancellationToken), verdict)
+            : (null, verdict);
     }
 
-    // The token reaches both the decoder and the encoder, so the timeout stops the work, not just the wait.
-    private static async Task<byte[]> ConvertImage(byte[] body, string format, CancellationToken cancellationToken)
+    // GDI+ saves PNG and JPEG. The token is checked between the decode and the encode, not inside either.
+    private static byte[] ConvertImage(byte[] body, string format, CancellationToken cancellationToken)
     {
-        using var stream = new MemoryStream(body, writable: false);
-        using var image = await ImageSharpImage.LoadAsync(ImageDecoding.Options, stream, cancellationToken);
+        using var bitmap = ImageDecoding.DecodeToBitmap(body, cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
         using var output = new MemoryStream();
-        switch (format)
-        {
-            case "jpg" or "jpeg": await image.SaveAsJpegAsync(output, cancellationToken); break;
-            case "webp": await image.SaveAsWebpAsync(output, cancellationToken); break;
-            default: await image.SaveAsPngAsync(output, cancellationToken); break;
-        }
-
+        bitmap.Save(output, format is "jpg" or "jpeg" ? ImageFormat.Jpeg : ImageFormat.Png);
         return output.ToArray();
     }
 
@@ -1149,8 +1138,9 @@ public sealed class MessageInspector : UserControl
             _imageStatus.Text = Strings.Inspector.ImageDecoding;
 
             // The guard scans the whole body (about 100 ms for a hostile 32 MiB JPEG), so it shares the
-            // decoder's thread, timeout and cancellation rather than running here.
-            var (bitmap, verdict) = await Task.Run(() => ImageDecoding.GuardAndDecode(body, decoding.Token), decoding.Token);
+            // decoder's thread, timeout and cancellation rather than running here. GDI+ cannot be
+            // cancelled: a timeout or a new selection stops the wait, and a late bitmap is disposed.
+            var (bitmap, verdict) = await ImageDecoding.GuardAndDecodeAsync(body, decoding.Token);
             if (!ReferenceEquals(_imageDecoding, decoding) || IsDisposed)
             {
                 bitmap?.Dispose();
@@ -1159,7 +1149,10 @@ public sealed class MessageInspector : UserControl
 
             if (bitmap is null)
             {
-                _imageStatus.Text = RefusalText(verdict);
+                // Allowed but not decoded: a WebP, which GDI+ cannot read. Nothing of an earlier image stays.
+                if (_imageView.Image is { } previous) previous.Dispose();
+                _imageView.Image = null;
+                _imageStatus.Text = RefusalText(verdict) ?? Strings.Inspector.ImageWebpNotPreviewed;
                 return;
             }
 
@@ -1173,7 +1166,7 @@ public sealed class MessageInspector : UserControl
             // Another message was selected (nothing to say), or the decode ran out of time.
             if (ReferenceEquals(_imageDecoding, decoding) && !IsDisposed) _imageStatus.Text = Strings.Inspector.ImageTimedOut;
         }
-        catch (UnknownImageFormatException)
+        catch (Exception ex) when (ImageDecoding.IsInvalidImage(ex))
         {
             // Servers sometimes label a response as image/* while returning an error page or
             // other non-image bytes. This is an inspection failure, not an application error.
