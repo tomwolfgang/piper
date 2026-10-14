@@ -145,6 +145,13 @@ internal static class ImageDecodingTests
                 check(Shown(),$"a {name} response is decoded and shown as '5 x 3 px | {mime}'");
             }
 
+            // A response dragged onto the Image tab renders without SetMessage clearing the view first.
+            check(HasImage(inspector), "setup: the BMP is on screen");
+            typeof(MessageInspector).GetMethod("RenderImage", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!
+                .Invoke(inspector, [Response("image/webp", Webp), true]);
+            pumpUntil(() => TextOf(inspector).Contains("cannot preview WebP"));
+            check(TextOf(inspector).Contains("cannot preview WebP") && !HasImage(inspector), "a WebP dropped over a shown image replaces it with the message");
+
             inspector.SetMessage(Response("image/bmp", hostile), "bmp");
             pumpUntil(() => TextOf(inspector).Contains("This image was not decoded."));
             check(TextOf(inspector).Contains("This image was not decoded."), "a BMP declaring a 1 GiB profile is refused with the fixed message");
@@ -255,6 +262,9 @@ internal static class ImageDecodingTests
         response.Headers.Add("Content-Type", contentType);
         return response;
     }
+
+    private static bool HasImage(Control control) =>
+        control is ShimmyMySherbet.WinForms.ZoomableImgBox.ZoomableImageBox { Image: not null } || control.Controls.Cast<Control>().Any(HasImage);
 
     private static string TextOf(Control control) =>
         control.Text + "\n" + string.Join("\n", control.Controls.Cast<Control>().Select(TextOf));

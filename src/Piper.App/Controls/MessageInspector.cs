@@ -663,7 +663,7 @@ public sealed class MessageInspector : UserControl
             var (encoded, verdict) = await ImageDecoding.RunUntilAbandonedAsync(() => GuardAndConvertImage(body, format, timeout.Token), timeout.Token);
             if (encoded is null)
             {
-                MessageBox.Show(this, RefusalText(verdict) ?? Strings.Inspector.ImageDecodeFailed, Strings.App.Name, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                MessageBox.Show(this, RefusalText(verdict) ?? Strings.Inspector.ImageWebpNotPreviewed, Strings.App.Name, MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
 
@@ -682,7 +682,7 @@ public sealed class MessageInspector : UserControl
         }
     }
 
-    // The encoded bytes are null exactly when the guard refused the body.
+    // The encoded bytes are null when the guard refused the body, and for a WebP, which GDI+ cannot encode.
     private static (byte[]? Encoded, ImageGuardVerdict Verdict) GuardAndConvertImage(
         byte[] body, string format, CancellationToken cancellationToken)
     {
@@ -1149,7 +1149,9 @@ public sealed class MessageInspector : UserControl
 
             if (bitmap is null)
             {
-                // Allowed but not decoded: a WebP, which GDI+ cannot read.
+                // Allowed but not decoded: a WebP, which GDI+ cannot read. Nothing of an earlier image stays.
+                if (_imageView.Image is { } previous) previous.Dispose();
+                _imageView.Image = null;
                 _imageStatus.Text = RefusalText(verdict) ?? Strings.Inspector.ImageWebpNotPreviewed;
                 return;
             }
