@@ -258,9 +258,11 @@ Close other programs first, use `--wait-quiet 10`, and report the median and ran
   A client cut off in the middle of a head or body gets a `408` (best effort, especially over
   TLS), and a stalled body also leaves a failed session. A client that stops reading a response is
   cut after `IdleTimeout` per write. The timeouts are clamped to 1 ms..1 day. What is **not**
-  bounded: a request body is read into memory up to its declared length (at most 256 MB) as soon
-  as the headers arrive, whether or not the bytes follow, so the worst case is the connection
-  limit times that (this is not fixed here); an established blind `CONNECT` tunnel or WebSocket
+  bounded: a request body is buffered whole, up to `MaxBodyBytes` (256 MiB; an HTTP/1.1 request past
+  it gets a `413` and a failed session, an HTTP/2 stream past its own 256 MiB cap is reset). The
+  buffer grows as bytes arrive, so a client that announces a body and sends none costs a small
+  buffer, and one that has sent N bytes holds at most about 4N; the worst case is still the
+  connection limit times the cap; an established blind `CONNECT` tunnel or WebSocket
   relay has no idle limit (only the write deadline above), nor has a browser-facing HTTP/2
   connection beyond its own five-minute one; and the TLS handshake of a decrypted tunnel is held
   to `TlsHandshakeTimeout`, not to the head timeout, and is not evictable while it runs

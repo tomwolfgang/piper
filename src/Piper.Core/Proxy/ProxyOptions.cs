@@ -18,8 +18,12 @@ public sealed class ProxyOptions
     /// <summary>Validate upstream server certificates. Turning this off makes MITM'd traffic insecure.</summary>
     public bool ValidateUpstreamCertificates { get; set; } = true;
 
-    /// <summary>Reject a request body larger than this instead of buffering it.</summary>
-    public long MaxBodyBytes { get; set; } = 128L * 1024 * 1024;
+    /// <summary>
+    /// The largest HTTP/1.1 request body (declared, or de-chunked) accepted; a larger one is answered 413
+    /// and recorded as a failed session. Also the largest file an AutoResponder rule will serve. 256 MiB
+    /// is the cap request bodies had before this option applied to them, so no upload stops working.
+    /// </summary>
+    public long MaxBodyBytes { get; set; } = 256L * 1024 * 1024;
 
     /// <summary>
     /// How long to wait for the TCP connection to an origin before giving up. Name resolution and

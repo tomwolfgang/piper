@@ -5,7 +5,9 @@ namespace Piper.Core.Http;
 /// <summary>Reads HTTP/1.x messages off a <see cref="HttpStreamReader"/>.</summary>
 public static class HttpParser
 {
-    private const long MaxBodyBytes = 256L * 1024 * 1024;
+    /// <summary>The body cap a caller gets when it names none: what every buffered message has always
+    /// been held to. The proxy passes <c>ProxyOptions.MaxBodyBytes</c> for the requests it reads.</summary>
+    internal const long DefaultMaxBodyBytes = 256L * 1024 * 1024;
 
     /// <summary>The most a request line and its headers may add up to. Each line and the header
     /// count were already capped, which on their own allowed hundreds of megabytes of headers.</summary>
@@ -28,12 +30,14 @@ public static class HttpParser
     /// Reads a request head and body. Returns null when the connection closed cleanly
     /// before a new request started (the normal end of a keep-alive session).
     /// </summary>
-    public static async Task<HttpRequestData?> ReadRequestAsync(HttpStreamReader reader, CancellationToken ct)
+    /// <exception cref="HttpBodyTooLargeException">The body is larger than <paramref name="maxBodyBytes"/>.</exception>
+    public static async Task<HttpRequestData?> ReadRequestAsync(
+        HttpStreamReader reader, CancellationToken ct, long maxBodyBytes = DefaultMaxBodyBytes)
     {
         var request = await ReadRequestHeadAsync(reader, ct).ConfigureAwait(false);
         if (request is null) return null;
 
-        request.Body = await ReadBodyAsync(reader, DescribeRequestBody(request.Headers), ct).ConfigureAwait(false);
+        request.Body = await ReadBodyAsync(reader, DescribeRequestBody(request.Headers), ct, maxBodyBytes).ConfigureAwait(false);
         return request;
     }
 
@@ -238,31 +242,42 @@ public static class HttpParser
     /// <remarks>
     /// The counterpart to <see cref="ReadResponseHeadAsync"/> for a caller that wants the message
     /// in hand rather than relayed onward -- the Composer, and the legs that cannot stream yet.
+    /// A body over <paramref name="maxBodyBytes"/> is refused with <see cref="HttpBodyTooLargeException"/>: at
+    /// once for a declared length, when the running total would cross it for a chunked one. The array
+    /// grows with the bytes received (see <see cref="BodyBuffer"/>), not with the length declared.
     /// </remarks>
     public static async Task<byte[]> ReadBodyAsync(
-        HttpStreamReader reader, HttpBodyDescriptor body, CancellationToken ct)
+        HttpStreamReader reader, HttpBodyDescriptor body, CancellationToken ct, long maxBodyBytes = DefaultMaxBodyBytes)
     {
+        // Never above what one array holds, so a limit raised past that cannot reach a cast below.
+        var limit = Math.Clamp(maxBodyBytes, 0, Array.MaxLength);
+
         switch (body.Framing)
         {
             case HttpBodyFraming.None:
                 return [];
 
             case HttpBodyFraming.Chunked:
-                return await ReadChunkedAsync(reader, ct).ConfigureAwait(false);
+                return await ReadChunkedAsync(reader, limit, ct).ConfigureAwait(false);
 
             case HttpBodyFraming.Length:
-                if (body.Length > MaxBodyBytes)
-                    throw new HttpParseException($"Body of {body.Length} bytes exceeds the {MaxBodyBytes} byte cap.");
+                // A length no array can hold stays the parse error it has always been (400); one an array
+                // could hold but the limit does not allow is a 413.
+                if (body.Length > Array.MaxLength)
+                    throw new HttpParseException($"Body of {body.Length} bytes is more than can be held.");
+                if (body.Length > limit)
+                    throw new HttpBodyTooLargeException($"Body of {body.Length} bytes exceeds the {limit} byte cap.");
                 return await reader.ReadExactlyAsync((int)body.Length, ct).ConfigureAwait(false);
 
             default:
-                return await reader.ReadToEndAsync(MaxBodyBytes, ct).ConfigureAwait(false);
+                return await reader.ReadToEndAsync(limit, ct).ConfigureAwait(false);
         }
     }
 
-    private static async Task<byte[]> ReadChunkedAsync(HttpStreamReader reader, CancellationToken ct)
+    private static async Task<byte[]> ReadChunkedAsync(HttpStreamReader reader, long limit, CancellationToken ct)
     {
-        using var body = new MemoryStream();
+        // Each chunk is read straight into the one array being built, not into one of its own.
+        var body = new BodyBuffer(ceiling: (int)limit);
         while (true)
         {
             var sizeLine = await reader.ReadLineAsync(ct).ConfigureAwait(false);
@@ -278,12 +293,19 @@ public static class HttpParser
                 return body.ToArray();
             }
 
-            if (body.Length + chunkSize > MaxBodyBytes)
-                throw new HttpParseException("Chunked body exceeded the size cap.");
+            if (chunkSize > Array.MaxLength)
+                throw new HttpParseException($"Chunk of {chunkSize} bytes is more than can be held.");
+            if (body.Length + chunkSize > limit)
+                throw new HttpBodyTooLargeException($"Chunked body exceeded the {limit} byte cap.");
 
-            // chunkSize is within MaxBodyBytes here (checked above), so it fits an int.
-            var chunk = await reader.ReadExactlyAsync((int)chunkSize, ct).ConfigureAwait(false);
-            body.Write(chunk, 0, chunk.Length);
+            // chunkSize is within the limit here (checked above), so it fits an int.
+            for (var remaining = (int)chunkSize; remaining > 0;)
+            {
+                var n = await reader.ReadAsync(body.Reserve(remaining), ct).ConfigureAwait(false);
+                if (n == 0) throw new HttpPeerClosedException("Connection closed inside a chunked body.");
+                body.Advance(n);
+                remaining -= n;
+            }
 
             // Each chunk is followed by its own CRLF, and by nothing else: a chunk that runs on
             // past its declared size means the two ends disagree about where it stops.

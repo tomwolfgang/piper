@@ -715,7 +715,7 @@ public sealed class ProxyServer : IAsyncDisposable
         clientStream.ArmProgressFloor(_options.IdleTimeout, _options.MinRequestBodyBytesPerWindow, bodyLength, alreadyBuffered);
         try
         {
-            request.Body = await HttpParser.ReadBodyAsync(reader, body, ct).ConfigureAwait(false);
+            request.Body = await HttpParser.ReadBodyAsync(reader, body, ct, _options.MaxBodyBytes).ConfigureAwait(false);
             clientStream.DisarmProgressFloor();
         }
         catch (HttpStalledException ex)
@@ -724,6 +724,17 @@ public sealed class ProxyServer : IAsyncDisposable
             await FailRequestAsync(
                 request, RequestTimeout("The request body stopped arriving."),
                 $"The client stopped sending the request body: {ex.Message}").ConfigureAwait(false);
+            return null;
+        }
+        catch (HttpBodyTooLargeException ex)
+        {
+            // Past MaxBodyBytes: refused as soon as the length is known or the running total crosses it,
+            // without reading the rest. Nothing is forwarded, the connection closes (the unread
+            // remainder cannot be told from the next request) and the session records the refusal.
+            clientStream.DisarmProgressFloor();
+            await FailRequestAsync(
+                request, HttpResponseData.Simple(413, "Content Too Large", $"Piper closed this connection: {ex.Message}"),
+                $"The request body is larger than the {_options.MaxBodyBytes:N0} byte limit: {ex.Message}").ConfigureAwait(false);
             return null;
         }
         catch (HttpParseException ex) when (ex is not HttpPeerClosedException)
