@@ -62,7 +62,10 @@ internal static class TextBoxWordSelection
         private void Attach()
         {
             AssignHandle(_textBox.Handle);
-            // The native drag that follows a double-click extends by the control's own words.
+            // The native drag that follows a double-click extends by the control's own words. A
+            // wrapping box would also lay out its lines with the proc, so it keeps the native words;
+            // changing WordWrap recreates the handle, which comes back through here.
+            if (_textBox.Multiline && _textBox.WordWrap) return;
             SendMessage(_textBox.Handle, EmSetWordBreakProc, 0, Marshal.GetFunctionPointerForDelegate(WordBreak));
         }
 
@@ -226,14 +229,28 @@ internal static class TextBoxWordSelection
 
     private delegate int EditWordBreakProc(nint text, int index, int length, int code);
 
+    private const int WbLeft = 0, WbRight = 1, WbIsDelimiter = 2;
+
+    /// <summary>How far one word-break call looks either side of its index.</summary>
+    private const int MaxWordBreakScan = 4096;
+
     private static int BreakWords(nint buffer, int index, int length, int code)
     {
         const int WbLeft = 0, WbRight = 1, WbIsDelimiter = 2;
         if (buffer == 0 || length <= 0) return 0;
-        // ponytail: copies the line per call; fine for drag-rate calls, use a span over the
-        // pointer if huge single-line bodies make dragging stutter.
-        var text = Marshal.PtrToStringUni(buffer, length);
         index = Math.Clamp(index, 0, length);
+        // The buffer can be a whole response body on one line, and the text is attacker-controlled,
+        // so each call copies only a bounded window around the index. A word longer than the window
+        // ends at the window's edge.
+        var offset = Math.Max(0, index - MaxWordBreakScan);
+        length = Math.Min(length, index + MaxWordBreakScan) - offset;
+        var text = Marshal.PtrToStringUni(buffer + offset * sizeof(char), length);
+        var result = BreakWords(text, index - offset, length, code);
+        return code is WbLeft or WbRight ? offset + result : result;
+    }
+
+    private static int BreakWords(string text, int index, int length, int code)
+    {
         switch (code)
         {
             case WbLeft:

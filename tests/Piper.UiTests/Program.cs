@@ -13,6 +13,7 @@ internal static class Program
 {
     private const int LvmGetTopIndex = 0x1000 + 39;
     private const int WmMouseMove = 0x0200;
+    private const int EmGetWordBreakProc = 0x00D1;
     private const int WmLButtonDown = 0x0201;
     private const int WmLButtonUp = 0x0202;
     private const int WmLButtonDoubleClick = 0x0203;
@@ -227,6 +228,27 @@ internal static class Program
         PressWordKey(large, Keys.Right, shift: true);
         Check(large.SelectionStart == largeWordStart && large.SelectedText == word,
             "Ctrl+Shift+Right selects the same component past offset 65,536");
+        Console.WriteLine("== the drag word-break proc is bounded and leaves wrapping alone");
+        Check(SendMessage(large.Handle, EmGetWordBreakProc, 0, 0) != 0, "a non-wrapping box drags by URI component");
+        large.WordWrap = true;
+        Check(SendMessage(large.Handle, EmGetWordBreakProc, 0, 0) == 0,
+            "a wrapping box keeps the native word break, which its line layout also uses");
+        large.WordWrap = false;
+        Check(SendMessage(large.Handle, EmGetWordBreakProc, 0, 0) != 0, "turning wrapping off restores it");
+
+        // One megabyte without a boundary: each callback must look at a bounded window, not the line.
+        large.Text = new string('a', 1024 * 1024);
+        large.Select(0, 0);
+        large.ScrollToCaret();
+        var longPoint = large.GetPositionFromCharIndex(10);
+        var longDragPoint = large.GetPositionFromCharIndex(40);
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        DoubleClickAndHold(large, new Point(longPoint.X + 1, longPoint.Y + 1));
+        for (var move = 0; move < 50; move++)
+            MouseMove(large, new Point(longDragPoint.X + 1 + move % 2, longDragPoint.Y + 1), leftButton: true);
+        LeftButtonUp(large, new Point(longDragPoint.X + 1, longDragPoint.Y + 1));
+        Check(watch.Elapsed < TimeSpan.FromSeconds(2), $"dragging in a 1 MiB word stays responsive ({watch.ElapsedMilliseconds} ms)");
+        Check(large.SelectionStart == 0 && large.SelectionLength > 0, "the selection still starts at the word");
         largeForm.Close();
 
         const string astralLetter = "\U00010437";
