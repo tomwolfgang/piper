@@ -13,6 +13,9 @@ internal static class TextBoxWordSelection
 {
     private static readonly ConditionalWeakTable<TextBox, SelectionState> States = [];
 
+    // Rooted for the process lifetime: the native control keeps calling it until its handle dies.
+    private static readonly EditWordBreakProc WordBreak = BreakWords;
+
     /// <summary>
     /// Enables the selection behavior once for a text box.
     /// </summary>
@@ -25,6 +28,7 @@ internal static class TextBoxWordSelection
     private sealed class SelectionState : NativeWindow
     {
         private const int EmSetSel = 0x00B1;
+        private const int EmSetWordBreakProc = 0x00D0;
         private const int WmLButtonDown = 0x0201;
         private const int WmLButtonDoubleClick = 0x0203;
         private const int WmKeyDown = 0x0100;
@@ -50,10 +54,17 @@ internal static class TextBoxWordSelection
                 _cachedText = null;
                 _selectionIsOurs = false;
             };
-            if (textBox.IsHandleCreated) AssignHandle(textBox.Handle);
+            if (textBox.IsHandleCreated) Attach();
         }
 
-        private void OnHandleCreated(object? sender, EventArgs e) => AssignHandle(_textBox.Handle);
+        private void OnHandleCreated(object? sender, EventArgs e) => Attach();
+
+        private void Attach()
+        {
+            AssignHandle(_textBox.Handle);
+            // The native drag that follows a double-click extends by the control's own words.
+            SendMessage(_textBox.Handle, EmSetWordBreakProc, 0, Marshal.GetFunctionPointerForDelegate(WordBreak));
+        }
 
         private void OnHandleDestroyed(object? sender, EventArgs e)
         {
@@ -82,9 +93,11 @@ internal static class TextBoxWordSelection
             {
                 var position = m.LParam.ToInt64();
                 var location = new Point(unchecked((short)position), unchecked((short)(position >> 16)));
+                // The native handler starts the held drag, which extends by the word-break proc
+                // above; ours then selects the exact word as before.
+                base.WndProc(ref m);
                 SelectWordAt(location);
                 _lastMouseDownCaret = -1;
-                m.Result = 0;
                 return;
             }
 
@@ -208,6 +221,38 @@ internal static class TextBoxWordSelection
             _selectionStart = Math.Min(anchor, caret);
             _selectionLength = Math.Abs(caret - anchor);
             _selectionIsOurs = true;
+        }
+    }
+
+    private delegate int EditWordBreakProc(nint text, int index, int length, int code);
+
+    private static int BreakWords(nint buffer, int index, int length, int code)
+    {
+        const int WbLeft = 0, WbRight = 1, WbIsDelimiter = 2;
+        if (buffer == 0 || length <= 0) return 0;
+        // ponytail: copies the line per call; fine for drag-rate calls, use a span over the
+        // pointer if huge single-line bodies make dragging stutter.
+        var text = Marshal.PtrToStringUni(buffer, length);
+        index = Math.Clamp(index, 0, length);
+        switch (code)
+        {
+            case WbLeft:
+                return FindPreviousWordBoundary(text, index);
+            case WbRight:
+                index = index < length ? ScalarStart(text, index) : index;
+                if (index < length && IsWordScalar(text, index))
+                {
+                    while (index < length && IsWordScalar(text, index)) index = NextScalarEnd(text, index);
+                }
+                else
+                {
+                    while (index < length && !IsWordScalar(text, index)) index = NextScalarEnd(text, index);
+                }
+                return index;
+            case WbIsDelimiter:
+                return index < length && !IsWordScalar(text, ScalarStart(text, index)) ? 1 : 0;
+            default:
+                return 0;
         }
     }
 

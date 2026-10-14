@@ -12,6 +12,7 @@ using Piper.Core.Sessions;
 internal static class Program
 {
     private const int LvmGetTopIndex = 0x1000 + 39;
+    private const int WmMouseMove = 0x0200;
     private const int WmLButtonDown = 0x0201;
     private const int WmLButtonUp = 0x0202;
     private const int WmLButtonDoubleClick = 0x0203;
@@ -125,6 +126,28 @@ internal static class Program
         DoubleClick(textBox, new Point(point.X + 1, point.Y + 1));
         Check(textBox.SelectedText == word, "double-click selects only the URI component");
 
+        // Regression: the double-click was swallowed, so the native control never entered drag mode.
+        var dragTarget = text.IndexOf("HTTP", StringComparison.Ordinal) + 2;
+        var dragPoint = textBox.GetPositionFromCharIndex(dragTarget);
+        DoubleClickAndHold(textBox, new Point(point.X + 1, point.Y + 1));
+        Check(textBox.SelectedText == word, "double-click and hold selects only the URI component");
+        MouseMove(textBox, new Point(dragPoint.X + 1, dragPoint.Y + 1), leftButton: true);
+        Check(textBox.SelectedText == "passwordless/init HTTP",
+            "dragging right after a double-click extends by URI component from the word");
+        var dragged = (textBox.SelectionStart, textBox.SelectionLength);
+        LeftButtonUp(textBox, new Point(dragPoint.X + 1, dragPoint.Y + 1));
+        MouseMove(textBox, new Point(point.X + 1, point.Y + 1), leftButton: false);
+        Check((textBox.SelectionStart, textBox.SelectionLength) == dragged,
+            "moving after the button is released leaves the selection alone");
+
+        var initPoint = textBox.GetPositionFromCharIndex(text.IndexOf("init", StringComparison.Ordinal) + 1);
+        var authPoint = textBox.GetPositionFromCharIndex(text.IndexOf("auth", StringComparison.Ordinal) + 1);
+        DoubleClickAndHold(textBox, new Point(initPoint.X + 1, initPoint.Y + 1));
+        MouseMove(textBox, new Point(authPoint.X + 1, authPoint.Y + 1), leftButton: true);
+        LeftButtonUp(textBox, new Point(authPoint.X + 1, authPoint.Y + 1));
+        Check(textBox.SelectedText == "auth/passwordless/init",
+            "dragging left after a double-click keeps the word and extends by URI component");
+
         textBox.Select(wordStart, 0);
         PressWordKey(textBox, Keys.Right, shift: true);
         Check(textBox.SelectedText == word, "Ctrl+Shift+Right selects only the URI component");
@@ -194,6 +217,12 @@ internal static class Program
         DoubleClick(large, new Point(largePoint.X + 1, largePoint.Y + 1));
         Check(large.SelectionStart == largeWordStart && large.SelectedText == word,
             "double-click selects the correct URI component past offset 65,536");
+        var largeDragPoint = large.GetPositionFromCharIndex(largeWordStart + word.Length + 2);
+        DoubleClickAndHold(large, new Point(largePoint.X + 1, largePoint.Y + 1));
+        MouseMove(large, new Point(largeDragPoint.X + 1, largeDragPoint.Y + 1), leftButton: true);
+        LeftButtonUp(large, new Point(largeDragPoint.X + 1, largeDragPoint.Y + 1));
+        Check(large.SelectionStart == largeWordStart && large.SelectedText == word + "/init",
+            "dragging after a double-click past offset 65,536 extends by URI component");
         large.Select(largeWordStart, 0);
         PressWordKey(large, Keys.Right, shift: true);
         Check(large.SelectionStart == largeWordStart && large.SelectedText == word,
@@ -332,6 +361,20 @@ internal static class Program
         SendMessage(control.Handle, WmLButtonDoubleClick, 1, position);
         SendMessage(control.Handle, WmLButtonUp, 0, position);
     }
+
+    private static void DoubleClickAndHold(Control control, Point location)
+    {
+        var position = (nint)(location.X | location.Y << 16);
+        SendMessage(control.Handle, WmLButtonDown, 1, position);
+        SendMessage(control.Handle, WmLButtonUp, 0, position);
+        SendMessage(control.Handle, WmLButtonDoubleClick, 1, position);
+    }
+
+    private static void MouseMove(Control control, Point location, bool leftButton) =>
+        SendMessage(control.Handle, WmMouseMove, leftButton ? 1 : 0, (nint)(location.X | location.Y << 16));
+
+    private static void LeftButtonUp(Control control, Point location) =>
+        SendMessage(control.Handle, WmLButtonUp, 0, (nint)(location.X | location.Y << 16));
 
     private static void RunWindowActivation(string name)
     {
