@@ -48,7 +48,7 @@ internal static class WebpViewTests
         var s = core.Settings;
         check(!s.IsScriptEnabled && !s.IsWebMessageEnabled && !s.AreDevToolsEnabled && !s.IsStatusBarEnabled && !s.AreDefaultScriptDialogsEnabled
             && !s.AreDefaultContextMenusEnabled && !s.IsPasswordAutosaveEnabled && !s.IsGeneralAutofillEnabled && !s.AreHostObjectsAllowed
-            && !s.AreBrowserAcceleratorKeysEnabled && !s.IsSwipeNavigationEnabled,
+            && !s.AreBrowserAcceleratorKeysEnabled && !s.IsSwipeNavigationEnabled && !s.IsBuiltInErrorPageEnabled,
             "scripts, web messages, dev tools, status bar, dialogs, menus, autofill, host objects and accelerator keys are off");
 
         // CapturePreview needs no script: a red pixel proves the WebP was decoded and drawn.
@@ -86,6 +86,10 @@ internal static class WebpViewTests
         }
 
         Console.WriteLine("== the temp folder goes on clear and dispose, and a second WebP replaces the first");
+        WebpView.LoadTimeout = TimeSpan.FromMilliseconds(1);
+        var failed = Await(view.ShowAsync(Webp));
+        WebpView.LoadTimeout = TimeSpan.FromSeconds(15);
+        check(failed == WebpShowResult.Failed && !view.Visible, "a page that does not load in time is Failed and leaves the view hidden");
         view.Clear();
         check(!Directory.Exists(folder) && view.Folder is null && !view.Visible, "Clear deletes the folder and hides the view");
         check(Await(view.ShowAsync(Webp)) == WebpShowResult.Shown && view.Folder != folder && Directory.Exists(view.Folder!), "a later WebP uses a new folder");
