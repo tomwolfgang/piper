@@ -3,9 +3,9 @@ using System.Diagnostics;
 using System.Text;
 using Piper.App.Controls;
 
-// The inspector hands captured bodies to SixLabors.ImageSharp 3.1.12, which has unfixed advisories
-// (S11). ImageGuard decides from the bytes alone, so these tests build container headers by hand and
-// need no image library.
+// The inspector hands captured bodies to GDI+ (and WebP to the WebView2 engine). ImageGuard decides
+// from the bytes alone, so these tests build container headers by hand and need no image library.
+// Several cases are the reproducers for the SixLabors.ImageSharp 3.1.12 advisories that motivated it.
 internal static class ImageGuardTests
 {
     private static readonly TimeSpan Patience = TimeSpan.FromSeconds(8);
@@ -265,7 +265,7 @@ internal static class ImageGuardTests
         return Concat("BM"u8.ToArray(), offset, [0, 0, 0, 0], offset, dib);
     }
 
-    // The 32-byte file that hangs ImageSharp 3.1.12's TIFF decoder when the entry count is huge.
+    // The 32-byte file that hung ImageSharp 3.1.12's TIFF decoder when the entry count is huge.
     private static byte[] BigTiff(ulong entryCount, bool littleEndian)
     {
         var count = BitConverter.GetBytes(entryCount);

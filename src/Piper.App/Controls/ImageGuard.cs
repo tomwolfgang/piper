@@ -27,16 +27,14 @@ internal enum ImageGuardVerdict
 }
 
 /// <summary>
-/// Decides from the raw bytes alone, without calling the image library, whether a captured HTTP body
-/// may be decoded. The body is hostile, and the pinned SixLabors.ImageSharp 3.1.12 has advisories a
-/// crafted file reaches (a BigTIFF IFD count that keeps the decoder spinning, an ICC profile whose
-/// CLUT allocates from unvalidated dimensions). 4.x fixes them but needs a licence key at build time,
-/// so until that is decided this refuses what reaches them: TIFF and anything outside the allow-list
-/// (PNG, JPEG, GIF, BMP, WebP), every way those containers declare an ICC profile (PNG iCCP, JPEG APP2,
-/// WebP ICCP or the VP8X flag, a BMP V5 profile offset or size, or a BMP profile colour space), and
-/// out-of-bounds sizes and scan counts. The profile refusal is conservative for the CLUT advisory
-/// (3.1.12 parses a profile's tags only if a caller reads <c>IccProfile.Entries</c>, which Piper does
-/// not), but a BMP profile is also read into an unbounded array, so it must be refused.
+/// Decides from the raw bytes alone, without calling an image decoder, whether a captured HTTP body
+/// may be decoded. The body is hostile and the decoder is native code (GDI+ for PNG, JPEG, GIF and
+/// BMP), so this refuses what is most often used to attack decoders: TIFF and anything outside the
+/// allow-list (PNG, JPEG, GIF, BMP, WebP), every way those containers declare an ICC profile (PNG
+/// iCCP, JPEG APP2, WebP ICCP or the VP8X flag, a BMP V5 profile offset or size, or a BMP profile
+/// colour space), and out-of-bounds sizes and scan counts. It was written for SixLabors.ImageSharp
+/// 3.1.12, whose advisories a crafted TIFF or profile reached; that library is gone, but the refusals
+/// stay, and the profile refusal is kept on purpose (relaxing it is a separate decision).
 /// </summary>
 /// <remarks>
 /// Only container headers are read, never pixel data, and every walk is bounded by
