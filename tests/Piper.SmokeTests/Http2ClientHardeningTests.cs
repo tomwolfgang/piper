@@ -418,12 +418,12 @@ internal static class Http2ClientHardeningTests
             runner.AreEqual(total, read, "every byte arrived");
             runner.AreEqual(-1L, firstBad, "and in order, unchanged");
             runner.IsTrue(peer.PeakConnectionWindow <= ConnectionWindow, $"the origin never held more than 16 MiB of connection credit (peak {peer.PeakConnectionWindow})");
-            runner.IsTrue(peer.PeakConnectionWindow > 1_048_576, "and held more than the 1 MiB one stream can use, which is what lifts the 64 KiB limit");
+            runner.IsTrue(peer.PeakConnectionWindow > AdvertisedStreamWindow(peer), "and held more than the one stream window it can use, which is what lifts the 64 KiB limit");
         });
 
         await runner.RunAsync("h2 client: credit goes back only for what the reader consumed, so a stalled reader stalls the origin", async () =>
         {
-            const int consumed = 300_000;
+            const int consumed = 600_000;
             await using var peer = new Peer(async p =>
             {
                 await p.WaitForRequestHeadAsync();
@@ -448,12 +448,13 @@ internal static class Http2ClientHardeningTests
             }, 5_000);
             await Task.Delay(100);
 
+            var streamWindow = AdvertisedStreamWindow(peer);
             var streamCredit = peer.CreditFor(1);
             var connectionCredit = peer.CreditFor(0) - (ConnectionWindow - 65_535);
             runner.IsTrue(streamCredit <= consumed + MaxFrame, $"stream credit ({streamCredit}) is no more than the bytes read plus the frame read ahead");
-            runner.IsTrue(streamCredit >= consumed - 1_048_576 / 2, $"and is not held back beyond half the window (credit {streamCredit} for {consumed} read)");
+            runner.IsTrue(streamCredit >= streamWindow / 2, $"and is returned once half the window has been read, not held back (credit {streamCredit} for {consumed} read)");
             runner.AreEqual(0L, connectionCredit, "no connection credit has been returned: less than half of its window has been read");
-            runner.IsTrue(peer.SentBytes <= 1_048_576 + streamCredit, $"the origin stopped at its stream window plus that credit (sent {peer.SentBytes})");
+            runner.IsTrue(peer.SentBytes <= streamWindow + streamCredit, $"the origin stopped at its stream window plus that credit (sent {peer.SentBytes})");
             runner.IsTrue(peer.SentBytes < 8L * 1024 * 1024, "so the proxy is not asked to take the rest of the response while the reader is stalled");
 
             // The reader comes back and takes the rest: the origin carries on and the body is whole.
@@ -461,6 +462,16 @@ internal static class Http2ClientHardeningTests
             runner.AreEqual(64L * 1024 * 1024 - consumed, read, "the rest arrives once it is read");
             runner.AreEqual(-1L, firstBad, "unchanged");
         });
+    }
+
+    /// <summary>The SETTINGS_INITIAL_WINDOW_SIZE the client advertised to the scripted origin.</summary>
+    private static long AdvertisedStreamWindow(Peer peer)
+    {
+        var settings = peer.Received().First(f => f.Type == Http2FrameType.Settings && !f.HasFlag(Http2FrameFlags.Ack)).Payload.Span;
+        for (var i = 0; i + 6 <= settings.Length; i += 6)
+            if (((settings[i] << 8) | settings[i + 1]) == 4)
+                return ((uint)settings[i + 2] << 24) | ((uint)settings[i + 3] << 16) | ((uint)settings[i + 4] << 8) | settings[i + 5];
+        return 65_535;
     }
 
     /// <summary>Reads up to <paramref name="limit"/> bytes (or to the end) and checks them against the
