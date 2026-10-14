@@ -44,10 +44,12 @@ internal static class Program
     private static int Main()
     {
         Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
+        InstallWinFormsContext();
 
         RunTextBoxWordSelectionTest();
         RunTextWizardJwtMenuTest();
         ImageDecodingTests.Run(Check, PumpUntil);
+        WebpViewTests.Run(Check, PumpUntil);
 
         Run("clearing a scrolled grid shows the next rows from the top", (store, grid, list) =>
         {
@@ -652,6 +654,11 @@ internal static class Program
         }
     }
 
+    // Application.Run keeps the WinForms synchronization context installed; DoEvents swaps in a plain one
+    // (posting to the thread pool), so awaits in the code under test would resume off the UI thread.
+    private static void InstallWinFormsContext() =>
+        SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext());
+
     /// <summary>
     /// Runs the message loop until the grid's 150 ms refresh timer has rebuilt it to the expected
     /// state, or 10 seconds pass, so a slow machine cannot fail a check that was merely early.
@@ -665,6 +672,7 @@ internal static class Program
             Thread.Sleep(10);
         }
         Application.DoEvents();
+        InstallWinFormsContext();
     }
 
     /// <summary>Runs the message loop for a fixed time, for asserting that something does not happen.</summary>
@@ -676,6 +684,7 @@ internal static class Program
             Application.DoEvents();
             Thread.Sleep(10);
         }
+        InstallWinFormsContext();
     }
 
     private static ListView FindListView(Control root) =>
