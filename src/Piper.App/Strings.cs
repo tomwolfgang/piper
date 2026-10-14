@@ -703,7 +703,9 @@ internal static class Strings
             I18n.T("inspector.imageDimensions", ("width", width), ("height", height), ("label", label));
         public static string ImageDecodeFailed => I18n.T("inspector.imageDecodeFailed");
         public static string ImageBlocked => I18n.T("inspector.imageBlocked");
-        public static string ImageWebpNotPreviewed => I18n.T("inspector.imageWebpNotPreviewed");
+        public static string ImageWebpShown(string label) => I18n.T("inspector.imageWebpShown", ("label", label));
+        public static string ImageWebpNeedsRuntime => I18n.T("inspector.imageWebpNeedsRuntime");
+        public static string ImageWebpNotConverted => I18n.T("inspector.imageWebpNotConverted");
         public static string ImageRefused(long megapixels, long megabytes) =>
             I18n.T("inspector.imageRefused", ("megapixels", megapixels), ("megabytes", megabytes));
         public static string ImageDecoding => I18n.T("inspector.imageDecoding");
