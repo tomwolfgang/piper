@@ -12,7 +12,8 @@ internal static class WebpViewTests
     {
         T Await<T>(Task<T> task)
         {
-            pumpUntil(() => task.IsCompleted);
+            // The first WebView2 start in a process can take well over the pump's 10 s on a cold CI runner.
+            for (var attempt = 0; attempt < 6 && !task.IsCompleted; attempt++) pumpUntil(() => task.IsCompleted);
             return task.IsCompleted ? task.GetAwaiter().GetResult() : throw new TimeoutException("the WebView2 call did not finish");
         }
 
