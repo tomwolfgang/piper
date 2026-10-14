@@ -1102,6 +1102,7 @@ internal static class Strings
         public static string SaveButton => I18n.T("textWizard.saveButton");
         public static string SaveTooltip => I18n.T("textWizard.saveTooltip");
         public static string ToInputButton => I18n.T("textWizard.toInputButton");
+        public static string SendValueToInput => I18n.T("textWizard.sendValueToInput");
         public static string ToInputTooltip => I18n.T("textWizard.toInputTooltip");
         public static string CloseButton => I18n.T("textWizard.closeButton");
         public static string CloseTooltip => I18n.T("textWizard.closeTooltip");

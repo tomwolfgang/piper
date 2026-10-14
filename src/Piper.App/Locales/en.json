@@ -826,6 +826,7 @@
     "saveButton": "Save",
     "saveTooltip": "Save the output to a file",
     "toInputButton": "To Input",
+    "sendValueToInput": "Send value to input",
     "toInputTooltip": "Send output to input",
     "closeButton": "Close",
     "closeTooltip": "Close the TextWizard",
