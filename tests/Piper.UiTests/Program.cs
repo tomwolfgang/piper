@@ -381,10 +381,10 @@ internal static class Program
             Check(!menu.Items[0].Enabled && !menu.Items[1].Enabled && !menu.Items[3].Enabled,
                 "items are disabled on a status line");
             menu.Close();
-            wizard.Close();
         }
         finally
         {
+            Application.OpenForms.OfType<TextWizardDialog>().SingleOrDefault()?.Close();
             if (savedSettings is null) File.Delete(settingsPath);
             else File.WriteAllBytes(settingsPath, savedSettings);
         }
