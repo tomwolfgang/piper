@@ -177,7 +177,8 @@ internal static class ImageDecodingTests
             check(HasImage(inspector), "setup: the BMP is on screen");
             typeof(MessageInspector).GetMethod("RenderImage", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!
                 .Invoke(inspector, [Response("image/webp", Webp), true]);
-            pumpUntil(() => TextOf(inspector).Contains("WebP"));
+            for (var attempt = 0; attempt < 6 && !TextOf(inspector).Contains("WebP"); attempt++) // a cold WebView2 start can be slow
+                pumpUntil(() => TextOf(inspector).Contains("WebP"));
             check(TextOf(inspector).Contains("WebP") && !HasImage(inspector), "a WebP dropped over a shown image replaces it");
 
             inspector.SetMessage(Response("image/bmp", hostile), "bmp");
