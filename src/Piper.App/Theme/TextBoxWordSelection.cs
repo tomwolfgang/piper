@@ -236,7 +236,6 @@ internal static class TextBoxWordSelection
 
     private static int BreakWords(nint buffer, int index, int length, int code)
     {
-        const int WbLeft = 0, WbRight = 1, WbIsDelimiter = 2;
         if (buffer == 0 || length <= 0) return 0;
         index = Math.Clamp(index, 0, length);
         // The buffer can be a whole response body on one line, and the text is attacker-controlled,
