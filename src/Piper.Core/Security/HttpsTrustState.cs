@@ -78,35 +78,47 @@ public static class TrustPolicy
 /// Remembers the answer to "is the Piper root trusted?" so the status bar can ask every second without
 /// reading the Windows certificate store every second. The answer is re-read when <see cref="Invalidate"/>
 /// is called (after the user trusts or removes the root) and otherwise when it is older than the
-/// lifetime, which also notices a root trusted or removed outside Piper. Use from one thread.
+/// lifetime, which also notices a root trusted or removed outside Piper. Safe to call from any thread.
 /// </summary>
 public sealed class TrustStateCache(Func<bool> query, TimeSpan lifetime, TimeProvider? clock = null)
 {
     private readonly Func<bool> _query = query ?? throw new ArgumentNullException(nameof(query));
     private readonly TimeProvider _clock = clock ?? TimeProvider.System;
+    private readonly object _gate = new();
     private bool _valid;
     private bool _value;
     private long _readAt;
 
     /// <summary>How many times the underlying check has run.</summary>
-    public int QueryCount { get; private set; }
+    public int QueryCount
+    {
+        get { lock (_gate) return _queryCount; }
+    }
+
+    private int _queryCount;
 
     public bool IsTrusted
     {
         get
         {
-            if (!_valid || _clock.GetElapsedTime(_readAt) >= lifetime)
+            lock (_gate)
             {
-                _value = _query();
-                _readAt = _clock.GetTimestamp();
-                _valid = true;
-                QueryCount++;
-            }
+                if (!_valid || _clock.GetElapsedTime(_readAt) >= lifetime)
+                {
+                    _value = _query();
+                    _readAt = _clock.GetTimestamp();
+                    _valid = true;
+                    _queryCount++;
+                }
 
-            return _value;
+                return _value;
+            }
         }
     }
 
     /// <summary>Forces the next read to ask the store again.</summary>
-    public void Invalidate() => _valid = false;
+    public void Invalidate()
+    {
+        lock (_gate) _valid = false;
+    }
 }
