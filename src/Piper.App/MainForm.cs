@@ -417,14 +417,14 @@ public sealed partial class MainForm : Form, IMessageFilter
 
         AskAnalyticsConsentIfNeeded();
 
-        if (!EnsureTrustedRootForStartup())
+        if (!EnsureTrustedRootForStartup(out var startCapture))
         {
             UpdateCaptureStatus();
             QueueStartupUpdateCheck();
             return;
         }
 
-        if (_captureEnabledOnStartup)
+        if (startCapture)
         {
             StartCapture();
         }
@@ -488,8 +488,9 @@ public sealed partial class MainForm : Form, IMessageFilter
     /// still starts (HTTPS is then simply not decrypted); this returns false only when Piper is
     /// restarting after the user installed the root.
     /// </summary>
-    private bool EnsureTrustedRootForStartup()
+    private bool EnsureTrustedRootForStartup(out bool startCapture)
     {
+        startCapture = _captureEnabledOnStartup;
         if (_trust.IsTrusted)
         {
             // Without this a returning user's run looks, in the funnel, like one that skipped the
@@ -508,6 +509,7 @@ public sealed partial class MainForm : Form, IMessageFilter
                 AppendLog(Strings.Log.ShowingTrustPrompt);
                 return ShowTrustPrompt();
             });
+        startCapture = decision.StartCapture;
 
         if (!decision.Prompted)
         {
@@ -523,8 +525,9 @@ public sealed partial class MainForm : Form, IMessageFilter
 
         if (!decision.InstallRequested)
         {
-            Analytics.Track(AnalyticsEvents.CertTrusted,
-                (AnalyticsProperties.Source, "startup"), (AnalyticsProperties.Result, "declined"));
+            // "suppressed" is Don't ask again, so permanent silencing can be told from putting it off.
+            Analytics.Track(AnalyticsEvents.CertTrusted, (AnalyticsProperties.Source, "startup"),
+                (AnalyticsProperties.Result, decision.SuppressFuturePrompts ? "suppressed" : "declined"));
             AppendLog(Strings.Log.StartupDecryptionOff);
             return true;
         }
@@ -2085,7 +2088,7 @@ public sealed partial class MainForm : Form, IMessageFilter
 
     private void UpdateStatus()
     {
-        var https = ApplyTrustState();
+        var https = ApplyTrustState(refreshInBackground: true);
         _statusLabel.Text = _proxy.IsRunning
             ? Strings.StatusBar.Listening(_proxy.Endpoint, https)
             : Strings.StatusBar.NotCapturingStatus;
