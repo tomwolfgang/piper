@@ -26,6 +26,14 @@ internal static class TrustCaptureTests
             "decryption is reported on only when decrypting");
         runner.IsTrue(Strings.StatusBar.Listening("127.0.0.1:8888", HttpsState.Off).Contains("decryption off", StringComparison.Ordinal),
             "a switched-off option is reported as off");
+
+        var labels = new[] { HttpsState.Decrypting, HttpsState.NotTrusted, HttpsState.Off }
+            .Select(state => Strings.StatusBar.HttpsLabel(state)).ToList();
+        runner.AreEqual(3, labels.Distinct().Count(), "the three HTTPS states read differently in the status bar");
+        runner.IsTrue(labels[1].Contains("Not decrypted", StringComparison.Ordinal),
+            "the untrusted state says HTTPS is not decrypted");
+        runner.IsTrue(!labels[1].Contains("Decrypting", StringComparison.Ordinal) && !labels[2].Contains("Decrypting", StringComparison.Ordinal),
+            "only the decrypting state ever says Decrypting");
         return Task.CompletedTask;
     });
 

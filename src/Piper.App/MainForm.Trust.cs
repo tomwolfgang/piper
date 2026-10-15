@@ -1,13 +1,15 @@
 using System.Windows.Forms;
+using Piper.App.Controls;
+using Piper.App.Theme;
 using Piper.Core.Security;
 
 namespace Piper.App;
 
 /// <summary>
-/// What Piper does about the trust of its root: the cached trust read, applying it to the proxy,
-/// and the startup prompt. Installing or removing the root is still done only by
-/// <c>TrustRootCertificate</c> and <c>UntrustRootCertificate</c>; nothing here calls the trust
-/// store's write methods.
+/// The HTTPS trust indicator: what the status bar and the warning bar say, and the startup prompt.
+/// Installing or removing the root is still done only by <c>TrustRootCertificate</c> and
+/// <c>UntrustRootCertificate</c>, each behind a confirmation; nothing here calls the trust store's
+/// write methods.
 /// </summary>
 public sealed partial class MainForm
 {
@@ -18,8 +20,29 @@ public sealed partial class MainForm
     private static readonly TimeSpan TrustCheckLifetime = TimeSpan.FromSeconds(30);
 
     private readonly TrustStateCache _trust;
+    private ToolStripStatusLabel _httpsStatusLabel = null!;
+    private TrustBar _trustBar = null!;
     private HttpsState _httpsState;
     private bool? _lastTrusted;
+
+    /// <summary>Adds the HTTPS state to the status bar and builds the warning bar shown while it is untrusted.</summary>
+    private TrustBar BuildTrustUi(StatusStrip statusBar)
+    {
+        _httpsStatusLabel = new ToolStripStatusLabel
+        {
+            BorderSides = ToolStripStatusLabelBorderSides.Left,
+        };
+        _httpsStatusLabel.Click += (_, _) =>
+        {
+            if (_httpsState == HttpsState.NotTrusted) TrustRootCertificate();
+            else ShowConfigurations();
+        };
+
+        // After the capture state and process scope: the controls that describe what is captured.
+        statusBar.Items.Insert(2, _httpsStatusLabel);
+        _trustBar = new TrustBar(TrustRootCertificate);
+        return _trustBar;
+    }
 
     /// <summary>
     /// Re-reads trust now. Call after the user trusts or removes the root, and before capture starts.
@@ -31,9 +54,9 @@ public sealed partial class MainForm
     }
 
     /// <summary>
-    /// Brings the proxy in line with the (cached) trust state and returns it: HTTPS is decrypted only
-    /// while the option is on and the root is trusted; otherwise it is tunnelled unread rather than
-    /// failing every client's handshake.
+    /// Brings the proxy and the indicator in line with the (cached) trust state and returns it:
+    /// HTTPS is decrypted only while the option is on and the root is trusted; otherwise it is
+    /// tunnelled unread rather than failing every client's handshake.
     /// </summary>
     private HttpsState ApplyTrustState()
     {
@@ -45,6 +68,16 @@ public sealed partial class MainForm
         _lastTrusted = trusted;
 
         _httpsState = TrustPolicy.StateOf(_options.DecryptHttps, trusted);
+        _httpsStatusLabel.Text = Strings.StatusBar.HttpsLabel(_httpsState);
+        _httpsStatusLabel.ToolTipText = Strings.StatusBar.HttpsTooltip(_httpsState);
+        _httpsStatusLabel.ForeColor = _httpsState switch
+        {
+            HttpsState.Decrypting => Palette.StatusOk,
+            HttpsState.NotTrusted => Palette.StatusClientError,
+            _ => Palette.TextDim,
+        };
+        _trustBar.Visible = _httpsState == HttpsState.NotTrusted;
+        _trustBar.ApplyColours();
         return _httpsState;
     }
 

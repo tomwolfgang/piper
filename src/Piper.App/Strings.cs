@@ -200,6 +200,23 @@ internal static class Strings
                     _ => I18n.T("statusBar.httpsOff"),
                 }));
 
+        public static string HttpsLabel(HttpsState https) => https switch
+        {
+            HttpsState.Decrypting => I18n.T("statusBar.httpsDecrypting"),
+            HttpsState.NotTrusted => I18n.T("statusBar.httpsNotDecrypted"),
+            _ => I18n.T("statusBar.httpsDecryptionOff"),
+        };
+
+        public static string HttpsTooltip(HttpsState https) => https switch
+        {
+            HttpsState.Decrypting => I18n.T("statusBar.httpsDecryptingTooltip"),
+            HttpsState.NotTrusted => I18n.T("statusBar.httpsNotDecryptedTooltip"),
+            _ => I18n.T("statusBar.httpsDecryptionOffTooltip"),
+        };
+
+        public static string TrustBarMessage => I18n.T("statusBar.trustBarMessage");
+        public static string TrustBarButton => I18n.T("statusBar.trustBarButton");
+
         public static string Sessions(int total) => I18n.T("statusBar.sessions", ("count", total));
 
         public static string Sessions(int selected, int total) =>
