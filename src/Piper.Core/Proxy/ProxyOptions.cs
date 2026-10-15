@@ -12,6 +12,24 @@ public sealed class ProxyOptions
     /// <summary>Terminate TLS so HTTPS bodies can be inspected. Requires the root CA to be trusted.</summary>
     public bool DecryptHttps { get; set; } = true;
 
+    /// <summary>
+    /// Runtime only, never saved: set while Piper's root is not trusted, so HTTPS is tunnelled unread
+    /// instead of failing every client's handshake. <see cref="DecryptHttps"/> keeps the user's choice.
+    /// </summary>
+    public bool DecryptionSuspended
+    {
+        get => _decryptionSuspended;
+        set => _decryptionSuspended = value;
+    }
+
+    private volatile bool _decryptionSuspended;
+
+    /// <summary>
+    /// Offer to trust Piper's root at startup while it is untrusted. Saved with the other
+    /// configuration; the user turns it back on under Configurations after choosing Don't ask again.
+    /// </summary>
+    public bool AskToTrustCertificate { get; set; } = true;
+
     /// <summary>Hosts excluded from decryption; matched as suffixes. Useful for pinned endpoints.</summary>
     public List<string> DecryptionExclusions { get; } = ["update.microsoft.com", "windowsupdate.com"];
 
@@ -313,7 +331,7 @@ public sealed class ProxyOptions
 
     public bool ShouldDecrypt(string host)
     {
-        if (!DecryptHttps) return false;
+        if (!DecryptHttps || DecryptionSuspended) return false;
         foreach (var exclusion in DecryptionExclusions)
         {
             if (string.IsNullOrWhiteSpace(exclusion)) continue;

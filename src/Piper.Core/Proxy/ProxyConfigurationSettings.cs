@@ -6,6 +6,7 @@ namespace Piper.Core.Proxy;
 public sealed class ProxyConfigurationSettings
 {
     public bool DecryptHttps { get; set; } = true;
+    public bool AskToTrustCertificate { get; set; } = true;
     public bool EnableHttp2Downstream { get; set; } = true;
     public bool EnableHttp2Upstream { get; set; } = true;
     public bool EnableHttp3Upstream { get; set; }
@@ -16,6 +17,7 @@ public sealed class ProxyConfigurationSettings
     public static ProxyConfigurationSettings From(ProxyOptions options) => new()
     {
         DecryptHttps = options.DecryptHttps,
+        AskToTrustCertificate = options.AskToTrustCertificate,
         EnableHttp2Downstream = options.EnableHttp2Downstream,
         EnableHttp2Upstream = options.EnableHttp2Upstream,
         EnableHttp3Upstream = options.EnableHttp3Upstream,
@@ -28,6 +30,7 @@ public sealed class ProxyConfigurationSettings
     {
         ArgumentNullException.ThrowIfNull(options);
         options.DecryptHttps = DecryptHttps;
+        options.AskToTrustCertificate = AskToTrustCertificate;
         options.EnableHttp2Downstream = EnableHttp2Downstream;
         options.EnableHttp2Upstream = EnableHttp2Upstream;
         options.EnableHttp3Upstream = EnableHttp3Upstream;
