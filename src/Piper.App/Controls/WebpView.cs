@@ -154,6 +154,7 @@ internal sealed class WebpView : Panel
     private void Release()
     {
         _pageUri = _imageUri = null;
+        _navigationId = 0; // a late completion of the previous page must not finish the next show
         _webp = null;
         _loaded?.TrySetResult(false);
         foreach (var stream in _streams) stream.Dispose();
