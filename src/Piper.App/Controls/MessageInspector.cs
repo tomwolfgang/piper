@@ -470,7 +470,8 @@ public sealed class MessageInspector : UserControl
         var openInBrowser = new ToolStripMenuItem(Strings.Inspector.OpenWithDefaultBrowser, null,
             (_, _) => OpenInDefaultBrowser(SelectedJsonValue?.StringValue));
         var textWizard = new ToolStripMenuItem(Strings.Inspector.SendValueToTextWizard, null,
-            (_, _) => SendToTextWizard(SelectedJsonValue is { } selected ? selected.StringValue ?? selected.RawValue : null));        menu.Items.AddRange([copyPair, copyValue, new ToolStripSeparator(), openInBrowser, textWizard]);
+            (_, _) => SendToTextWizard(SelectedJsonValue is { } selected ? selected.StringValue ?? selected.RawValue : null));
+        menu.Items.AddRange([copyPair, copyValue, new ToolStripSeparator(), openInBrowser, textWizard]);
         menu.Opening += (_, _) =>
         {
             var value = SelectedJsonValue;
