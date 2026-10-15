@@ -51,6 +51,7 @@ internal static class Program
         ImageDecodingTests.Run(Check, PumpUntil);
         WebpViewTests.Run(Check, PumpUntil);
         WebpInspectorTests.Run(Check, PumpUntil);
+        JsonInspectorTests.Run(Check, PumpUntil);
 
         Run("clearing a scrolled grid shows the next rows from the top", (store, grid, list) =>
         {
