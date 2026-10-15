@@ -273,8 +273,9 @@ Close other programs first, use `--wait-quiet 10`, and report the median and ran
 - Image tab: PNG, JPEG, GIF (first frame) and BMP are decoded by Windows' GDI+; TIFF and images with an
   embedded colour profile are refused, and bodies over 16 megapixels or 32 MB are not decoded. A WebP is
   shown view-only in the Microsoft Edge WebView2 Runtime (scripts, downloads and navigation locked off); to
-  display it Piper writes the body to a random-named file in `%TEMP%\Piper\image-inspector`, deleted when
-  you select another message or close the inspector (a crash can leave it for up to an hour). Without the
+  display it Piper holds the body only in memory and serves it to that locked-down view from a private
+  per-selection address, so Piper never writes it to disk and drops it when you select another message or
+  close the inspector (the runtime keeps its own profile folder, but not a copy of the image). Without the
   runtime the tab says so. WebP cannot be converted: keep the original with Save > Response body only
 - Composer with search, raw-request editing, repeat-N, and verbatim header sending
 - Composer history grouped into collapsible hosts, repeat sends folded into one counted row, and
