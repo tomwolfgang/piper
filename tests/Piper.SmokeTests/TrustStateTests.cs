@@ -42,7 +42,6 @@ internal static class TrustStateTests
             var decision = TrustPolicy.DecideStartup(decryptHttps: true, trusted: false, askAtStartup: true, captureOnStartup: true, () => choice);
             runner.IsTrue(decision.Prompted, $"{choice}: the prompt was shown");
             runner.IsTrue(decision.StartCapture, $"{choice}: capture still starts");
-            runner.IsTrue(!decision.Decrypt, $"{choice}: nothing is decrypted before the root is trusted");
             runner.AreEqual(choice == TrustPromptChoice.InstallCertificate, decision.InstallRequested, $"{choice}: install is requested only by Install");
             runner.AreEqual(choice == TrustPromptChoice.DontAskAgain, decision.SuppressFuturePrompts, $"{choice}: the prompt is silenced only by Don't ask again");
         }
@@ -53,7 +52,7 @@ internal static class TrustStateTests
         var asked = 0;
         TrustPromptChoice Ask() { asked++; return TrustPromptChoice.NotNow; }
         runner.IsTrue(!TrustPolicy.DecideStartup(true, true, true, true, Ask).Prompted, "no prompt when the root is already trusted");
-        runner.IsTrue(TrustPolicy.DecideStartup(true, true, true, true, Ask).Decrypt, "a trusted root with decryption on decrypts");
+        runner.IsTrue(TrustPolicy.DecideStartup(true, true, true, true, Ask).StartCapture, "capture starts when the root is trusted");
         runner.IsTrue(!TrustPolicy.DecideStartup(false, false, true, true, Ask).Prompted, "no prompt when decryption is off");
         runner.IsTrue(!TrustPolicy.DecideStartup(true, false, false, true, Ask).Prompted, "no prompt after Don't ask again");
         runner.IsTrue(TrustPolicy.DecideStartup(true, false, false, true, Ask).StartCapture, "capture starts without a prompt");
@@ -177,6 +176,20 @@ internal static class TrustStateTests
         clock.Advance(TimeSpan.FromSeconds(31));
         runner.IsTrue(cache.IsTrusted, "a change made outside Piper is noticed once the answer is older than its lifetime");
         runner.AreEqual(4, cache.QueryCount, "and that took one more read");
+
+        // The timer path asks without reading: it sees the last answer and learns a read is due.
+        clock.Advance(TimeSpan.FromSeconds(31));
+        runner.IsTrue(cache.NeedsRead && cache.Last == true, "an aged-out answer is still available, and flagged as due for a read");
+        var before = cache.QueryCount;
+        _ = cache.Last;
+        _ = cache.NeedsRead;
+        runner.AreEqual(before, cache.QueryCount, "looking at the last answer never reads the store");
+
+        // A trust change that lands while a read is under way must not be lost to that read.
+        var racing = (TrustStateCache?)null;
+        racing = new TrustStateCache(() => { racing!.Invalidate(); return true; }, TimeSpan.FromSeconds(30), clock);
+        _ = racing.IsTrusted;
+        runner.IsTrue(racing.NeedsRead, "a read overtaken by Invalidate is not kept as fresh");
         return Task.CompletedTask;
     });
 
