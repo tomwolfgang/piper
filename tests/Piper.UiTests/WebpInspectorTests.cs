@@ -4,7 +4,7 @@ using Piper.App.Controls;
 using Piper.Core.Http;
 
 // How the inspector uses WebpView: only a WebP goes through it, a missing runtime shows the fixed message,
-// and the temp folder and the save items follow the selection. Needs the WebView2 Runtime, except the first.
+// and the in-memory body and the save items follow the selection. Needs the WebView2 Runtime, except the first.
 internal static class WebpInspectorTests
 {
     // A 16 x 8 lossless WebP, solid red, no profile.
@@ -39,23 +39,22 @@ internal static class WebpInspectorTests
         pumpUntil(() => TextOf(inspector).Contains("WebP image (view only)"));
         check(TextOf(inspector).Contains("WebP image (view only)") && TextOf(inspector).Contains("image/webp"), "a WebP response is shown view-only with its MIME");
         var shown = Find(inspector, "WebpView");
-        var shownFolder = FolderOf(shown);
-        check(shown is { Visible: true } && shownFolder is not null && Directory.Exists(shownFolder), "the WebP view is visible with its temp folder");
+        check(shown is { Visible: true } && HoldsBody(shown), "the WebP view is visible and holds the body in memory");
         check(SaveItemsEnabled(inspector) == false, "Save as PNG/JPEG and Save image as are disabled for a WebP");
 
         using var png = new MemoryStream();
         using (var pixels = new Bitmap(5, 3)) pixels.Save(png, System.Drawing.Imaging.ImageFormat.Png);
         inspector.SetMessage(Message(png.ToArray(), "image/png"), "png");
         pumpUntil(() => TextOf(inspector).Contains("5 x 3 px"));
-        check(TextOf(inspector).Contains("5 x 3 px") && !Find(inspector, "WebpView")!.Visible && !Directory.Exists(shownFolder!), "selecting a PNG hides the WebP view and removes its temp folder");
+        check(TextOf(inspector).Contains("5 x 3 px") && !Find(inspector, "WebpView")!.Visible && !HoldsBody(shown), "selecting a PNG hides the WebP view and drops the body");
         check(SaveItemsEnabled(inspector) == true, "the save items are enabled again for a PNG");
 
         inspector.SetMessage(Message(), "webp");
         pumpUntil(() => Find(inspector, "WebpView") is { Visible: true });
-        var disposedFolder = FolderOf(Find(inspector, "WebpView"));
+        var last = Find(inspector, "WebpView");
         form.Controls.Remove(inspector);
         inspector.Dispose();
-        check(disposedFolder is not null && !Directory.Exists(disposedFolder), "disposing the inspector removes the WebP temp folder");
+        check(!HoldsBody(last), "disposing the inspector drops the WebP body");
     }
 
     private static HttpResponseData Message(byte[]? body = null, string contentType = "image/webp")
@@ -65,8 +64,8 @@ internal static class WebpInspectorTests
         return response;
     }
 
-    private static string? FolderOf(Control? webpView) =>
-        webpView?.GetType().GetProperty("Folder", BindingFlags.NonPublic | BindingFlags.Instance)?.GetValue(webpView) as string;
+    private static bool HoldsBody(Control? webpView) =>
+        webpView?.GetType().GetProperty("HoldsBody", BindingFlags.NonPublic | BindingFlags.Instance)?.GetValue(webpView) is true;
 
     private static Control? Find(Control control, string typeName) =>
         control.GetType().Name == typeName ? control : control.Controls.Cast<Control>().Select(child => Find(child, typeName)).FirstOrDefault(found => found is not null);
