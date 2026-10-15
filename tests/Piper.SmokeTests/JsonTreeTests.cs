@@ -70,6 +70,13 @@ internal static class JsonTreeTests
             runner.AreEqual(10, made, "the nodes made stop at the node cap");
             runner.AreEqual(6, omitted, "and what could not be made is reported as not shown");
             source.Retire();
+
+            var parallel = JsonTreeSource.Parse(Repeated(Repeated("1", 100), 50), new JsonTreeLimits { MaxChildren = 100, MaxNodes = 1_000 });
+            var rows = parallel.Children(parallel.Root()!.Value)!.Children;
+            var shown = 0;
+            Parallel.ForEach(rows, row => Interlocked.Add(ref shown, parallel.Children(row.Value)!.Children.Count));
+            runner.AreEqual(1_000 - 1 - 50, shown, "expansions on several threads together still stop at the node cap");
+            parallel.Retire();
             return Task.CompletedTask;
         });
 
@@ -111,6 +118,12 @@ internal static class JsonTreeTests
 
             runner.AreEqual(invalid.Length, refused, "each is refused with a JsonException, including 10,000 levels and an unterminated 4 MB number");
             JsonTreeSource.Parse(new string('[', 64) + new string(']', 64)).Retire();
+
+            var tooLong = false;
+            try { JsonTreeSource.Parse("[1,1,1]", new JsonTreeLimits { MaxChars = 6 }); }
+            catch (JsonException) { tooLong = true; }
+            JsonTreeSource.Parse("[1,1,1]", new JsonTreeLimits { MaxChars = 7 }).Retire();
+            runner.IsTrue(tooLong, "text over the character limit is refused before it is parsed, and text at the limit is not");
 
             var lone = JsonTreeSource.Parse("""{"s":"\ud800","t":"ok"}""");
             var level = lone.Children(lone.Root()!.Value)!;

@@ -11,8 +11,11 @@ internal sealed record JsonTreeLimits
 {
     public static JsonTreeLimits Default { get; } = new();
 
-    /// <summary>Decoded bytes parsed. A token costs 12 bytes of parser metadata, so 8 MiB of "1," is about 50 MB.</summary>
-    public int MaxBytes { get; init; } = 8 * 1024 * 1024;
+    /// <summary>
+    /// Characters parsed. A token costs 12 bytes of parser metadata, so 8 Mi characters of "1," is about 50 MB.
+    /// A body never has fewer bytes than characters, so a caller can refuse by byte count before decoding to text.
+    /// </summary>
+    public int MaxChars { get; init; } = 8 * 1024 * 1024;
 
     /// <summary>Nesting parsed, and so the depth of any walk. A deeper document is refused as invalid.</summary>
     public int MaxDepth { get; init; } = 64;
@@ -60,17 +63,18 @@ internal sealed class JsonTreeSource
 
     public JsonTreeLimits Limits { get; }
 
-    /// <summary>Parses the text. Throws <see cref="JsonException"/> for invalid JSON, including nesting beyond the limit.</summary>
+    /// <summary>Parses the text. Throws <see cref="JsonException"/> for invalid JSON, including text or nesting beyond the limits.</summary>
     public static JsonTreeSource Parse(string text, JsonTreeLimits? limits = null)
     {
         limits ??= JsonTreeLimits.Default;
+        if (text.Length > limits.MaxChars) throw new JsonException($"The text is longer than {limits.MaxChars} characters.");
         return new JsonTreeSource(JsonDocument.Parse(text, new JsonDocumentOptions { MaxDepth = limits.MaxDepth }), limits);
     }
 
     /// <summary>The top node, or null once retired.</summary>
     public JsonTreeChild? Root() => Read(() =>
     {
-        Interlocked.Increment(ref _shown);
+        lock (_gate) _shown++;
         return Describe("root", _document.RootElement);
     });
 
@@ -78,11 +82,16 @@ internal sealed class JsonTreeSource
     public JsonTreeLevel? Children(JsonElement parent) => Read(() =>
     {
         var total = ChildCount(parent);
-        var room = Math.Max(0, Limits.MaxNodes - Volatile.Read(ref _shown));
-        var children = new List<JsonTreeChild>(Math.Min(total, Math.Min(Limits.MaxChildren, room)));
-        foreach (var (name, value) in Enumerate(parent, Math.Min(Limits.MaxChildren, room)))
+        int take;
+        lock (_gate) // reserved up front, so concurrent expansions cannot overrun the node cap together
+        {
+            take = Math.Min(total, Math.Min(Limits.MaxChildren, Math.Max(0, Limits.MaxNodes - _shown)));
+            _shown += take;
+        }
+
+        var children = new List<JsonTreeChild>(take);
+        foreach (var (name, value) in Enumerate(parent, take))
             children.Add(Describe(name, value));
-        Interlocked.Add(ref _shown, children.Count);
         return new JsonTreeLevel(children, total - children.Count);
     });
 
