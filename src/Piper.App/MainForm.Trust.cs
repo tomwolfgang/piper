@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using System.Windows.Forms;
 using Piper.App.Controls;
 using Piper.App.Theme;
@@ -54,13 +55,25 @@ public sealed partial class MainForm
     }
 
     /// <summary>
-    /// Brings the proxy and the indicator in line with the (cached) trust state and returns it:
-    /// HTTPS is decrypted only while the option is on and the root is trusted; otherwise it is
-    /// tunnelled unread rather than failing every client's handshake.
+    /// Brings the proxy and the indicator in line with the (cached) trust state and returns it: HTTPS
+    /// is decrypted only while the option is on and the root is trusted; otherwise it is tunnelled
+    /// unread rather than failing every client's handshake. The status timer passes
+    /// <paramref name="refreshInBackground"/> so an aged-out answer is re-read on a worker thread and
+    /// the UI thread never waits on the certificate store (antivirus or policy hooks can make it slow).
     /// </summary>
-    private HttpsState ApplyTrustState()
+    private HttpsState ApplyTrustState(bool refreshInBackground = false)
     {
-        var trusted = _trust.IsTrusted;
+        bool trusted;
+        if (refreshInBackground && _trust.NeedsRead && _trust.Last is { } known)
+        {
+            QueueTrustRead();
+            trusted = known;
+        }
+        else
+        {
+            trusted = _trust.IsTrusted;
+        }
+
         _options.DecryptionSuspended = !trusted;
 
         if (_lastTrusted is { } before && before != trusted)
@@ -79,6 +92,41 @@ public sealed partial class MainForm
         _trustBar.Visible = _httpsState == HttpsState.NotTrusted;
         _trustBar.ApplyColours();
         return _httpsState;
+    }
+
+    private bool _trustReadQueued;
+
+    /// <summary>Re-reads trust off the UI thread, then applies the fresh answer back on it.</summary>
+    private void QueueTrustRead()
+    {
+        if (_trustReadQueued) return;
+        _trustReadQueued = true;
+
+        _ = Task.Run(() =>
+        {
+            try
+            {
+                _ = _trust.IsTrusted;
+            }
+            catch (Exception ex) when (ex is CryptographicException or IOException or UnauthorizedAccessException)
+            {
+                // Keep showing the last answer; the next tick asks again.
+            }
+        }).ContinueWith(_ =>
+        {
+            try
+            {
+                BeginInvoke(() =>
+                {
+                    _trustReadQueued = false;
+                    ApplyTrustState();
+                });
+            }
+            catch (Exception ex) when (ex is InvalidOperationException or ObjectDisposedException)
+            {
+                // The window is closing; nothing is left to update.
+            }
+        }, TaskScheduler.Default);
     }
 
     /// <summary>
