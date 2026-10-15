@@ -80,7 +80,10 @@ certificate**. Read the dialog before accepting: the private key sits unencrypte
 `%LOCALAPPDATA%\Piper\Certificates`, so anything able to read it can impersonate any
 TLS site to your Windows account. **Tools > Remove trusted root certificate** reverses it.
 
-Nothing installs the root implicitly - it is only ever a deliberate menu action.
+Nothing installs the root implicitly - it is only ever a deliberate click. While the root is not
+trusted Piper still captures plain HTTP and passes HTTPS through unread. At startup an untrusted
+root brings up a prompt with **Install certificate**, **Not now** and **Don't ask again**. HTTPS is
+decrypted only while **Decrypt HTTPS traffic** is on and the root is trusted.
 
 Piper validates each origin server's certificate by default, the same as a browser would. If you
 need to reach a known origin whose certificate doesn't validate (self-signed, expired, or a
