@@ -2082,7 +2082,7 @@ public sealed class MainForm : Form, IMessageFilter
         // count is checked too, so the scan runs only when a session has arrived since the last one,
         // rather than on every status update during the window before real traffic appears.
         if (total > _lastScannedSessionCount && !_reportedFirstSession && Analytics.IsEnabled
-            && _store.Snapshot().Any(session => !session.IsUpdateCheck))
+            && _store.Snapshot().Any(session => session.ProvesCapture))
         {
             // Completes the activation funnel: installed, trusted, capturing, and now actually
             // seeing traffic. Reported once per run, and only ever as the fact that it happened.
