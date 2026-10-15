@@ -55,6 +55,7 @@ public sealed class MessageInspector : UserControl
     private HttpMessage? _renderedJson;
     private HttpRequestData? _renderedWebForms;
     private readonly Func<WebView2, Task>? _startWebpView;
+    private readonly Func<string?, string?>? _chooseImageSavePath;
     private WebpView? _webpView;
     private HttpMessage? _renderedImage;
     private HttpMessage? _renderedVideo;
@@ -67,9 +68,12 @@ public sealed class MessageInspector : UserControl
     private int _webFormsTabIndex = -1;
 
     /// <param name="startWebpView">Starts the WebP preview's WebView2; a test seam, null for the real one.</param>
-    public MessageInspector(string caption, bool showImageViewer = false, bool showWebForms = false, Func<WebView2, Task>? startWebpView = null)
+    /// <param name="chooseImageSavePath">Replaces the Save image dialog: gets the requested format (null for any) and returns the file to write, or null to cancel. A test seam, null for the real dialog.</param>
+    public MessageInspector(string caption, bool showImageViewer = false, bool showWebForms = false, Func<WebView2, Task>? startWebpView = null,
+        Func<string?, string?>? chooseImageSavePath = null)
     {
         _startWebpView = startWebpView;
+        _chooseImageSavePath = chooseImageSavePath;
         _showImageViewer = showImageViewer;
         _showWebForms = showWebForms;
         _summary = new TextBox
@@ -658,22 +662,19 @@ public sealed class MessageInspector : UserControl
     {
         if (_message is null || _imageView?.Image is null) return;
 
-        using var dialog = new SaveFileDialog
-        {
-            Title = Strings.Inspector.SaveImageCaption,
-            Filter = Strings.Inspector.SaveImageFilter,
-            FilterIndex = requestedFormat == "jpg" ? 2 : 1,
-            FileName = Strings.Inspector.SaveImageFileName(requestedFormat ?? "png"),
-        };
-        if (dialog.ShowDialog(this) != DialogResult.OK) return;
+        // The image on screen is the dropped response when one was dropped on the tab, not the selected
+        // session's. It is taken now: the dialog is modal, but selecting another session while it is open
+        // must not change what the user asked to save.
+        var source = _droppedImage ?? _message;
+        var path = ChooseImageSavePath(requestedFormat);
+        if (path is null) return;
 
-        var format = Path.GetExtension(dialog.FileName).TrimStart('.').ToLowerInvariant();
+        var format = Path.GetExtension(path).TrimStart('.').ToLowerInvariant();
         if (format is not ("png" or "jpg" or "jpeg")) format = requestedFormat ?? "png";
 
-        var path = dialog.FileName;
         try
         {
-            var body = _message.DecodedBody;
+            var body = source.DecodedBody;
 
             // The guard, decoding and re-encoding take up to seconds for a large image, so they run off
             // the UI thread and into a buffer: a timeout or failure never leaves a half-written file behind.
@@ -699,6 +700,20 @@ public sealed class MessageInspector : UserControl
                 MessageBox.Show(this, Strings.Inspector.SaveImageFailed(ex.Message),
                     Strings.App.Name, MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
+    }
+
+    private string? ChooseImageSavePath(string? requestedFormat)
+    {
+        if (_chooseImageSavePath is { } choose) return choose(requestedFormat);
+
+        using var dialog = new SaveFileDialog
+        {
+            Title = Strings.Inspector.SaveImageCaption,
+            Filter = Strings.Inspector.SaveImageFilter,
+            FilterIndex = requestedFormat == "jpg" ? 2 : 1,
+            FileName = Strings.Inspector.SaveImageFileName(requestedFormat ?? "png"),
+        };
+        return dialog.ShowDialog(this) == DialogResult.OK ? dialog.FileName : null;
     }
 
     // The encoded bytes are null when the guard refused the body, and for a WebP, which GDI+ cannot encode.
