@@ -23,7 +23,8 @@ internal static class StatusImagesTests
 
         using var other = new Bitmap(16, 16);
         using var untouched = new ToolStripStatusLabel { Image = other };
-        StatusImages.Retarget(untouched, (new Bitmap(4, 4), newOn));
+        using var unrelated = new Bitmap(4, 4);
+        StatusImages.Retarget(untouched, (unrelated, newOn));
         check(ReferenceEquals(untouched.Image, other), "a label showing some other image is left alone");
 
         using var empty = new ToolStripStatusLabel();
