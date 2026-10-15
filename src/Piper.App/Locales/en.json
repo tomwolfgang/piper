@@ -183,6 +183,9 @@
     "trustCaption": "Trust the Piper root certificate",
     "trustBody": "Add the Piper root certificate to your user's Trusted Root store?\n\nThis is required to inspect HTTPS traffic, and it is a real security tradeoff: anything holding the matching private key - which is stored unencrypted in your user profile - can impersonate any HTTPS site to this Windows account.\n\nOnly do this on a machine you control, and use Tools > Configurations > HTTPS > Remove trusted root when you are finished.\n\nPrivate key location:\n{{privateKeyPath}}\n\nThumbprint:\n{{thumbprint}}",
 
+    "removeCaption": "Remove the Piper root certificate",
+    "removeBody": "Remove Piper's root certificate from this Windows user's Trusted Root store?\n\nPiper stops decrypting HTTPS right away and passes it through unread until you trust the certificate again.",
+
     "removed_one": "Removed {{count}} Piper root certificate.",
     "removed_other": "Removed {{count}} Piper root certificates.",
 
@@ -784,6 +787,8 @@
 
     "decryptHttps": "Decrypt HTTPS traffic",
     "decryptHttpsNote": "Requires the Piper root certificate to be trusted.",
+    "askToTrust": "Ask to trust the Piper certificate when Piper starts",
+    "askToTrustNote": "Applies while the certificate is not trusted. Don't ask again in that prompt turns this off; the status bar still shows that HTTPS is not decrypted.",
     "http2Downstream": "Negotiate HTTP/2 with browsers",
     "http2DownstreamNote": "Applies to new decrypted browser connections.",
     "http2Upstream": "Negotiate HTTP/2 with origin servers",
@@ -798,6 +803,9 @@
     "removeTrustedRoot": "Remove trusted root",
     "exportRoot": "Export root certificate...",
     "openCertificateFolder": "Open certificate folder",
+    "certificateTrusted": "Status: Trusted. Piper decrypts HTTPS while Decrypt HTTPS traffic is on.",
+    "certificateNotTrusted": "Status: Not trusted. HTTPS passes through unread.",
+    "certificateActionsNote": "Trust, Remove and Export take effect immediately. Cancel does not undo them.",
 
     "analyticsEnabled": "Send anonymous feedback",
     "analyticsEnabledNote": "Sends which features you use, the type of any error, and the app version, tied only to a random ID stored on this machine, over HTTPS to analyticsnew.overwolf.com. Sending is a web request, so it reveals your IP address and when you used Piper; the collector stores that address with the country and region it maps to. Never sends captured traffic, URLs, hostnames, headers, bodies, cookies, certificates, or your settings. Turning this off also deletes the identifiers it reports with and discards anything not yet sent.",

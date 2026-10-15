@@ -292,6 +292,9 @@ internal static class Strings
         public static string TrustBody(string privateKeyPath, string? thumbprint) =>
             I18n.T("certificates.trustBody", ("privateKeyPath", privateKeyPath), ("thumbprint", thumbprint));
 
+        public static string RemoveCaption => I18n.T("certificates.removeCaption");
+        public static string RemoveBody => I18n.T("certificates.removeBody");
+
         public static string Removed(int count) => I18n.T("certificates.removed", ("count", count));
 
         public static string ExportCaption => I18n.T("certificates.exportCaption");
@@ -1092,6 +1095,8 @@ internal static class Strings
 
         public static string DecryptHttps => I18n.T("configurations.decryptHttps");
         public static string DecryptHttpsNote => I18n.T("configurations.decryptHttpsNote");
+        public static string AskToTrust => I18n.T("configurations.askToTrust");
+        public static string AskToTrustNote => I18n.T("configurations.askToTrustNote");
         public static string Http2Downstream => I18n.T("configurations.http2Downstream");
         public static string Http2DownstreamNote => I18n.T("configurations.http2DownstreamNote");
         public static string Http2Upstream => I18n.T("configurations.http2Upstream");
@@ -1106,6 +1111,9 @@ internal static class Strings
         public static string RemoveTrustedRoot => I18n.T("configurations.removeTrustedRoot");
         public static string ExportRoot => I18n.T("configurations.exportRoot");
         public static string OpenCertificateFolder => I18n.T("configurations.openCertificateFolder");
+        public static string CertificateTrusted => I18n.T("configurations.certificateTrusted");
+        public static string CertificateNotTrusted => I18n.T("configurations.certificateNotTrusted");
+        public static string CertificateActionsNote => I18n.T("configurations.certificateActionsNote");
     }
 
     public static class Hosts

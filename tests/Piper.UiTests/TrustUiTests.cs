@@ -1,8 +1,11 @@
 using Piper.App;
 using Piper.App.Controls;
 using Piper.App.Theme;
+using Piper.Core.Proxy;
 
-// The warning bar shown while HTTPS is switched on but not decrypted: real WinForms, no certificate store.
+// The trust controls that are real WinForms: the warning bar and the Configurations certificate area.
+// The dialog is built with stand-ins for the certificate actions, so nothing here reaches the user's
+// certificate store or settings.
 internal static class TrustUiTests
 {
     public static void Run(Action<bool, string> check)
@@ -26,6 +29,41 @@ internal static class TrustUiTests
             bar.ApplyColours();
             check(bar.BackColor == Palette.SurfaceWarning, "its warning colour is put back after a theme walk");
         }
+
+        Console.WriteLine("== Configurations shows the live certificate state and what its buttons do");
+        var trusted = false;
+        var removeCalls = 0;
+        var options = new ProxyOptions();
+        using var dialog = new ConfigurationsDialog(options, true, "AllProcesses", true, false,
+            () => trusted = true, () => { trusted = false; removeCalls++; }, () => { }, () => { }, () => { },
+            () => trusted);
+        dialog.SelectHttpsTab();
+        dialog.Show(); // a button on a tab that is not showing cannot be clicked
+        var status = All(dialog).OfType<Label>().Single(label => label.Text.StartsWith("Status:", StringComparison.Ordinal));
+        check(status.Text.StartsWith("Status: Not trusted", StringComparison.Ordinal), "an untrusted root reads Not trusted");
+
+        Button Named(string text) => All(dialog).OfType<Button>().Single(button => button.Text == text);
+        Named("Trust root certificate...").PerformClick();
+        check(status.Text.StartsWith("Status: Trusted", StringComparison.Ordinal), "the line reads Trusted right after Trust");
+        Named("Remove trusted root").PerformClick();
+        check(status.Text.StartsWith("Status: Not trusted", StringComparison.Ordinal) && removeCalls == 1, "and Not trusted again right after Remove");
+        check(All(dialog).OfType<Label>().Any(label => label.Text.Contains("Cancel does not undo", StringComparison.Ordinal)),
+            "the dialog says Cancel does not undo Trust, Remove or Export");
+
+        Console.WriteLine("== the startup prompt switch is reversible from Configurations");
+        var askBox = All(dialog).OfType<CheckBox>().Single(box => box.Text.StartsWith("Ask to trust", StringComparison.Ordinal));
+        check(askBox.Checked, "the switch shows the prompt is on");
+        askBox.Checked = false;
+        dialog.ApplyTo(options);
+        check(!options.AskToTrustCertificate, "turning it off is applied to the options");
+        askBox.Checked = true;
+        dialog.ApplyTo(options);
+        check(options.AskToTrustCertificate, "turning it back on is applied too");
+
+        using var silenced = new ConfigurationsDialog(new ProxyOptions { AskToTrustCertificate = false }, true, "AllProcesses", true, false,
+            () => { }, () => { }, () => { }, () => { }, () => { }, () => false);
+        check(!All(silenced).OfType<CheckBox>().Single(box => box.Text.StartsWith("Ask to trust", StringComparison.Ordinal)).Checked,
+            "after Don't ask again the dialog shows the switch off, ready to be turned back on");
     }
 
     private static IEnumerable<Control> All(Control root)

@@ -905,12 +905,13 @@ public sealed partial class MainForm : Form, IMessageFilter
         SetGlobalUserAgent(string.IsNullOrWhiteSpace(value.Text) ? null : value.Text.Trim(), Strings.UserAgents.CustomName);
     }
 
-    private void ShowConfigurations()
+    private void ShowConfigurations(bool httpsTab = false)
     {
         using var dialog = new ConfigurationsDialog(_options, _captureEnabledOnStartup, _captureScope.ToString(),
             FontScale.WheelEnabled, Analytics.IsEnabled,
             TrustRootCertificate, UntrustRootCertificate, ExportRootCertificate, OpenCertificateFolder,
-            OpenAnalyticsFolder);
+            OpenAnalyticsFolder, () => _trust.IsTrusted);
+        if (httpsTab) dialog.SelectHttpsTab();
         if (dialog.ShowDialog(this) != DialogResult.OK) return;
 
         dialog.ApplyTo(_options);
@@ -1668,6 +1669,10 @@ public sealed partial class MainForm : Form, IMessageFilter
 
     private void UntrustRootCertificate()
     {
+        var confirm = MessageBox.Show(this, Strings.Certificates.RemoveBody, Strings.Certificates.RemoveCaption,
+            MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2);
+        if (confirm != DialogResult.Yes) return;
+
         try
         {
             var removed = TrustStore.Uninstall();
