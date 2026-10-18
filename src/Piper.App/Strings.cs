@@ -1123,6 +1123,7 @@ internal static class Strings
         public static string OpenCertificateFolder => I18n.T("configurations.openCertificateFolder");
         public static string CertificateTrusted => I18n.T("configurations.certificateTrusted");
         public static string CertificateNotTrusted => I18n.T("configurations.certificateNotTrusted");
+        public static string CertificateNotTrustedDecrypting => I18n.T("configurations.certificateNotTrustedDecrypting");
         public static string CertificateActionsNote => I18n.T("configurations.certificateActionsNote");
     }
 

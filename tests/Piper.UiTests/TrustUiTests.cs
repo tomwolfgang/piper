@@ -73,6 +73,18 @@ internal static class TrustUiTests
             () => { }, () => { }, () => { }, () => { }, () => { }, () => false);
         check(!All(silenced).OfType<CheckBox>().Single(box => box.Text.StartsWith("Ask to trust", StringComparison.Ordinal)).Checked,
             "after Don't ask again the dialog shows the switch off, ready to be turned back on");
+
+        Console.WriteLine("== the status line does not claim HTTPS passes through when the saved opt-in decrypts it");
+        using var decrypting = new ConfigurationsDialog(new ProxyOptions { DecryptHttps = true, DecryptWhenUntrusted = true }, true, "AllProcesses", true, false,
+            () => { }, () => { }, () => { }, () => { }, () => { }, () => false);
+        var decryptingStatus = All(decrypting).OfType<Label>().Single(label => label.Text.StartsWith("Status:", StringComparison.Ordinal));
+        check(decryptingStatus.Text.Contains("decrypts HTTPS anyway", StringComparison.Ordinal)
+            && !decryptingStatus.Text.Contains("passes through", StringComparison.Ordinal),
+            "an untrusted root with the saved opt-in on says Piper decrypts and clients must trust it themselves");
+        using var decryptOff = new ConfigurationsDialog(new ProxyOptions { DecryptHttps = false, DecryptWhenUntrusted = true }, true, "AllProcesses", true, false,
+            () => { }, () => { }, () => { }, () => { }, () => { }, () => false);
+        check(All(decryptOff).OfType<Label>().Single(label => label.Text.StartsWith("Status:", StringComparison.Ordinal)).Text.Contains("passes through unread", StringComparison.Ordinal),
+            "with Decrypt HTTPS off the opt-in changes nothing, so the line still says it passes through");
     }
 
     private static IEnumerable<Control> All(Control root)
