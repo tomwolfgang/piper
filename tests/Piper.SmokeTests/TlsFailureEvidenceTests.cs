@@ -85,6 +85,8 @@ internal static class TlsFailureEvidenceTests
 
         using var ca = CertificateAuthority.LoadOrCreate(Path.Combine(Path.GetTempPath(), "Piper-SmokeTest-TlsFailure-Certs"));
         var hello = await RecordClientHelloAsync();
+        var hostile = (byte[])hello.Clone();
+        hostile[hello.AsSpan().IndexOf("capture.test"u8) + "capture".Length] = 0x01; // a control character where the dot was
         runner.IsTrue(hello.Length > 100, $"a ClientHello was recorded ({hello.Length} bytes)");
 
         async Task Fails(string name, Func<TcpClient, Task> act, TlsFailureKind kind, TlsFailurePhase phase, string? sni, TimeSpan? budget = null) =>
@@ -108,13 +110,52 @@ internal static class TlsFailureEvidenceTests
         const TlsFailurePhase Before = TlsFailurePhase.BeforeHello;
         await Fails("zero bytes then FIN is closed early", c => { c.Client.Shutdown(SocketShutdown.Send); return Task.CompletedTask; }, Early, Before, null);
         await Fails("zero bytes then RST is closed early", c => { Reset(c); return Task.CompletedTask; }, Early, Before, null);
+        await Fails("10 bytes of a ClientHello then FIN is closed early, with no SNI",
+            async c => { await c.GetStream().WriteAsync(hello.AsMemory(0, 10)); c.Client.Shutdown(SocketShutdown.Send); }, Early, Before, null);
+        await Fails("100 bytes of a ClientHello then RST is closed early, with no SNI",
+            async c => { await c.GetStream().WriteAsync(hello.AsMemory(0, 100)); Reset(c); }, Early, Before, null);
         await Fails("a full ClientHello then FIN is closed in handshake, with the SNI",
             async c => { await c.GetStream().WriteAsync(hello); c.Client.Shutdown(SocketShutdown.Send); },
             TlsFailureKind.ClosedInHandshake, TlsFailurePhase.InHandshake, "capture.test");
+        await Fails("a full ClientHello, the server's flight, then RST is closed in handshake",
+            async c =>
+            {
+                await c.GetStream().WriteAsync(hello);
+                // Reading the answer proves the hello was processed; an RST may discard unread bytes.
+                runner.AreEqual(1, await c.GetStream().ReadAsync(new byte[1]).AsTask().WaitAsync(Patience), "the proxy answers the hello");
+                Reset(c);
+            }, TlsFailureKind.ClosedInHandshake, TlsFailurePhase.InHandshake, "capture.test");
+        // The certificate lookup refuses the name (as before this change), so the handshake dies of that, not of a close.
+        await Fails("a control character in the SNI is recorded as 'other' and costs the whole SNI",
+            async c => { await c.GetStream().WriteAsync(hostile); c.Client.Shutdown(SocketShutdown.Send); },
+            TlsFailureKind.Other, TlsFailurePhase.InHandshake, null);
         await Fails("non-TLS bytes after the CONNECT are not TLS",
             c => c.GetStream().WriteAsync(Encoding.ASCII.GetBytes("GET / HTTP/1.1\r\nHost: x\r\n\r\n")).AsTask(), TlsFailureKind.NotTls, Before, null);
         await Fails("a silent client is a timeout, and Time is the wait", _ => Task.CompletedTask,
             TlsFailureKind.Timeout, Before, null, TimeSpan.FromMilliseconds(1500));
+
+        await runner.RunAsync("a .NET client that rejects the certificate (TLS 1.2 and 1.3) is never mislabelled", async () =>
+        {
+            foreach (var protocol in new[] { SslProtocols.Tls12, SslProtocols.Tls13 })
+            {
+                await WithProxyAsync(ca, null, async (port, store) =>
+                {
+                    using var client = await OpenTunnelAsync(port);
+                    using var ssl = new SslStream(client.GetStream());
+                    var refused = false;
+                    try { await ssl.AuthenticateAsClientAsync(Client("reject.test", protocol, accept: false)); }
+                    catch (Exception ex) when (ex is AuthenticationException or IOException) { refused = true; }
+                    client.Dispose();
+                    runner.IsTrue(refused, $"{protocol}: the client refused the certificate");
+
+                    // The server may see this in the handshake or only on the first read (a later change
+                    // records that); whatever is recorded now must say "rejected".
+                    await Poll.UntilAsync(() => store.Snapshot().Any(s => s.TlsFailure is not null), 1500);
+                    foreach (var row in store.Snapshot().Where(s => s.TlsFailure is not null))
+                        runner.AreEqual(TlsFailureKind.Rejected, row.TlsFailure!.Kind, $"{protocol}: a recorded row says rejected");
+                });
+            }
+        });
 
         await runner.RunAsync("a client that completes the handshake and sends a request leaves no failure evidence", () =>
             WithProxyAsync(ca, null, async (port, store) =>
@@ -136,6 +177,7 @@ internal static class TlsFailureEvidenceTests
             try
             {
                 for (var i = 0; i < 5; i++) clients.Add(await OpenTunnelAsync(proxy.Endpoint!.Port));
+                await clients[4].GetStream().WriteAsync(hello.AsMemory(0, 100)); // one has begun a hello; none finishes
                 runner.IsTrue(await Poll.UntilAsync(() => proxy.ActiveConnections == 5), "five handshakes are in flight");
                 await proxy.StopAsync();
                 runner.IsTrue(await Poll.UntilAsync(() => proxy.ActiveConnections == 0), "they all end");
