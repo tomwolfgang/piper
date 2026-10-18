@@ -95,8 +95,27 @@ internal static class JsonTreeTests
             // 1,001 characters of `a: "` and emoji ends on the first half of a surrogate pair.
             using var emoji = JsonDocument.Parse("\"" + string.Concat(Enumerable.Repeat("\\ud83d\\ude00", 600)) + "\"");
             var clipped = JsonTreeText.Format("a", emoji.RootElement, 1001);
+            runner.IsTrue(clipped.Contains("\U0001F600", StringComparison.Ordinal), "the clipped text really holds emoji, not \\u escapes (so the cut below has a pair to split)");
             runner.IsTrue(clipped.Contains("... (", StringComparison.Ordinal) && !char.IsHighSurrogate(clipped[clipped.IndexOf("... (", StringComparison.Ordinal) - 1]),
                 "a cut never leaves half of a surrogate pair");
+            return Task.CompletedTask;
+        });
+
+        await runner.RunAsync("json tree shows, searches and copies non-ASCII and HTML-sensitive text as it was sent", () =>
+        {
+            var source = JsonTreeSource.Parse("{\"n\":\"Jos\\u00e9\",\"h\":\"<b>&'+`\",\"q\":\"a\\\"b\\\\c\\n\\t\\u0001\",\"e\":\"\\ud83d\\ude00\"}");
+            var level = source.Children(source.Root()!.Value)!;
+            string TextOf(string name) => level.Children.First(c => c.Name == name).Text;
+            runner.AreEqual("n: \"José\"", TextOf("n"), "a non-ASCII character is shown, not written as \\u00e9");
+            runner.AreEqual("h: \"<b>&'+`\"", TextOf("h"), "HTML-sensitive characters are shown as they are");
+            runner.AreEqual("q: \"a\\\"b\\\\c\\n\\t\\u0001\"", TextOf("q"), "what JSON requires is still escaped: quote, backslash, control characters");
+            runner.AreEqual("e: \"\U0001F600\"", TextOf("e"), "an emoji is shown whole");
+            runner.AreEqual(1, source.Search("José", CancellationToken.None)!.Count, "a search for a non-ASCII word finds it");
+            runner.AreEqual(1, source.Search("<b>", CancellationToken.None)!.Count, "a search for markup finds it");
+            runner.AreEqual(1, source.Search("&'+", CancellationToken.None)!.Count, "a search for & ' + finds it");
+            var name = level.Children.First(c => c.Name == "n");
+            runner.AreEqual("n: \"José\"", source.FullText(name.Name, name.Value), "the copy path gives the same text");
+            source.Retire();
             return Task.CompletedTask;
         });
 
