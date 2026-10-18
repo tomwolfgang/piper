@@ -16,6 +16,8 @@ public sealed class ConfigurationsDialog : Form
     private DarkTabControl _tabs = null!;
     private Label _trustStatus = null!;
     private readonly Func<bool> _isCertificateTrusted;
+    // What is saved, not what the boxes say now: the status line describes what Piper does at this moment.
+    private readonly bool _savedDecryptsWhenUntrusted;
     private CheckBox _http2Downstream = null!;
     private CheckBox _http2Upstream = null!;
     private CheckBox _http3Upstream = null!;
@@ -28,6 +30,7 @@ public sealed class ConfigurationsDialog : Form
         Action openAnalyticsFolder, Func<bool> isCertificateTrusted)
     {
         _isCertificateTrusted = isCertificateTrusted;
+        _savedDecryptsWhenUntrusted = options.DecryptHttps && options.DecryptWhenUntrusted;
         Text = Strings.Configurations.Caption;
         StartPosition = FormStartPosition.CenterParent;
         FormBorderStyle = FormBorderStyle.FixedDialog;
@@ -296,7 +299,9 @@ public sealed class ConfigurationsDialog : Form
     private void RefreshTrustStatus()
     {
         var trusted = _isCertificateTrusted();
-        _trustStatus.Text = trusted ? Strings.Configurations.CertificateTrusted : Strings.Configurations.CertificateNotTrusted;
+        _trustStatus.Text = trusted ? Strings.Configurations.CertificateTrusted
+            : _savedDecryptsWhenUntrusted ? Strings.Configurations.CertificateNotTrustedDecrypting
+            : Strings.Configurations.CertificateNotTrusted;
         _trustStatus.ForeColor = trusted ? Palette.StatusOk : Palette.StatusClientError;
     }
 

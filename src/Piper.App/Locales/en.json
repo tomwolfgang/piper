@@ -816,6 +816,7 @@
     "openCertificateFolder": "Open certificate folder",
     "certificateTrusted": "Status: Trusted. Piper decrypts HTTPS while Decrypt HTTPS traffic is on.",
     "certificateNotTrusted": "Status: Not trusted. HTTPS passes through unread.",
+    "certificateNotTrustedDecrypting": "Status: Not trusted by Windows. Piper decrypts HTTPS anyway; clients must trust the certificate themselves.",
     "certificateActionsNote": "Trust, Remove and Export take effect immediately. Cancel does not undo them.",
 
     "analyticsEnabled": "Send anonymous feedback",
