@@ -196,6 +196,7 @@ internal static class Strings
                 ("state", https switch
                 {
                     HttpsState.Decrypting => I18n.T("statusBar.httpsOn"),
+                    HttpsState.DecryptingUntrusted => I18n.T("statusBar.httpsDecryptingUntrusted"),
                     HttpsState.NotTrusted => I18n.T("statusBar.httpsNotTrusted"),
                     _ => I18n.T("statusBar.httpsOff"),
                 }));
@@ -203,6 +204,7 @@ internal static class Strings
         public static string HttpsLabel(HttpsState https) => https switch
         {
             HttpsState.Decrypting => I18n.T("statusBar.httpsDecrypting"),
+            HttpsState.DecryptingUntrusted => I18n.T("statusBar.httpsDecryptingNoTrust"),
             HttpsState.NotTrusted => I18n.T("statusBar.httpsNotDecrypted"),
             _ => I18n.T("statusBar.httpsDecryptionOff"),
         };
@@ -210,6 +212,7 @@ internal static class Strings
         public static string HttpsTooltip(HttpsState https) => https switch
         {
             HttpsState.Decrypting => I18n.T("statusBar.httpsDecryptingTooltip"),
+            HttpsState.DecryptingUntrusted => I18n.T("statusBar.httpsDecryptingNoTrustTooltip"),
             HttpsState.NotTrusted => I18n.T("statusBar.httpsNotDecryptedTooltip"),
             _ => I18n.T("statusBar.httpsDecryptionOffTooltip"),
         };
@@ -353,7 +356,6 @@ internal static class Strings
             I18n.T("log.restoredLeftoverProxy", ("endpoint", endpoint));
         public static string StartupDecryptionOff => I18n.T("log.startupDecryptionOff");
         public static string StartupPromptOff => I18n.T("log.startupPromptOff");
-        public static string DontAskAgainNotSaved => I18n.T("log.dontAskAgainNotSaved");
         public static string RootNowTrusted => I18n.T("log.rootNowTrusted");
         public static string RootNoLongerTrusted => I18n.T("log.rootNoLongerTrusted");
         public static string RootTrusted(string? thumbprint) => I18n.T("log.rootTrusted", ("thumbprint", thumbprint));

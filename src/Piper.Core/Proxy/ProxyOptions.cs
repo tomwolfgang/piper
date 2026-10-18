@@ -25,6 +25,13 @@ public sealed class ProxyOptions
     private volatile bool _decryptionSuspended;
 
     /// <summary>
+    /// Decrypt HTTPS even while Windows does not trust Piper's root, for clients that do not use the
+    /// Windows store (Firefox, Java, Node, curl --cacert, devices). Off by default: an untrusted root
+    /// then means HTTPS is tunnelled unread, since a client that does not trust it fails every handshake.
+    /// </summary>
+    public bool DecryptWhenUntrusted { get; set; }
+
+    /// <summary>
     /// Offer to trust Piper's root at startup while it is untrusted. Saved with the other
     /// configuration; the user turns it back on under Configurations after choosing Don't ask again.
     /// </summary>
