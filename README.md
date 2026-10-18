@@ -86,7 +86,11 @@ trusted Piper still captures plain HTTP and passes HTTPS through unread, and the
 bar under the toolbar say so (**HTTPS: Not decrypted**; click either to trust the root). At startup an
 untrusted root brings up a prompt with **Install certificate**, **Not now** and **Don't ask again**;
 the last one is undone with **Configurations > HTTPS > Ask to trust the Piper certificate when Piper
-starts**. HTTPS is decrypted only while **Decrypt HTTPS traffic** is on and the root is trusted.
+starts**. HTTPS is decrypted only while **Decrypt HTTPS traffic** is on and the root is trusted. Clients
+that do not use the Windows store (Firefox, Java, Node, curl --cacert, devices) can still be decrypted
+once you install the certificate in them: turn on **Configurations > HTTPS > Decrypt HTTPS even when
+Windows does not trust the Piper certificate** (off by default; a client that does not trust the
+certificate then fails its handshake, and the status bar says so).
 
 Piper validates each origin server's certificate by default, the same as a browser would. If you
 need to reach a known origin whose certificate doesn't validate (self-signed, expired, or a

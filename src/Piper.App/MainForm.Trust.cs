@@ -7,16 +7,16 @@ using Piper.Core.Security;
 namespace Piper.App;
 
 /// <summary>
-/// The HTTPS trust indicator: what the status bar and the warning bar say, and the startup prompt.
-/// Installing or removing the root is still done only by <c>TrustRootCertificate</c> and
-/// <c>UntrustRootCertificate</c>, each behind a confirmation; nothing here calls the trust store's
-/// write methods.
+/// What Piper does about the trust of its root: the cached trust read, applying it to the proxy and
+/// to the status bar and warning bar, and the startup prompt. Installing or removing the root is still done only by
+/// <c>TrustRootCertificate</c> and <c>UntrustRootCertificate</c>; nothing here calls the trust
+/// store's write methods.
 /// </summary>
 public sealed partial class MainForm
 {
     /// <summary>
     /// How long a trust-store read is reused. The status bar asks every second; the Windows store is
-    /// read only this often, or at once after the user trusts or removes the root.
+    /// read only this often (on a worker thread), or at once after the user trusts or removes the root.
     /// </summary>
     private static readonly TimeSpan TrustCheckLifetime = TimeSpan.FromSeconds(30);
 
@@ -56,10 +56,11 @@ public sealed partial class MainForm
 
     /// <summary>
     /// Brings the proxy and the indicator in line with the (cached) trust state and returns it: HTTPS
-    /// is decrypted only while the option is on and the root is trusted; otherwise it is tunnelled
-    /// unread rather than failing every client's handshake. The status timer passes
-    /// <paramref name="refreshInBackground"/> so an aged-out answer is re-read on a worker thread and
-    /// the UI thread never waits on the certificate store (antivirus or policy hooks can make it slow).
+    /// is decrypted only while the option is on and the root is trusted (or the user opted in without
+    /// trust); otherwise it is tunnelled unread rather than failing every client's handshake. The
+    /// status timer passes <paramref name="refreshInBackground"/> so an aged-out answer is re-read on a
+    /// worker thread and the UI thread never waits on the certificate store (antivirus or policy hooks
+    /// can make it slow).
     /// </summary>
     private HttpsState ApplyTrustState(bool refreshInBackground = false) =>
         ApplyTrust(refreshInBackground ? _trust.ForDisplay(QueueTrustRead) : _trust.IsTrusted);
@@ -67,19 +68,19 @@ public sealed partial class MainForm
     /// <summary>Applies a trust answer that has already been read. Never touches the certificate store.</summary>
     private HttpsState ApplyTrust(bool trusted)
     {
-        _options.DecryptionSuspended = !trusted;
+        _options.DecryptionSuspended = TrustPolicy.IsSuspended(trusted, _options.DecryptWhenUntrusted);
 
         if (_lastTrusted is { } before && before != trusted)
             AppendLog(trusted ? Strings.Log.RootNowTrusted : Strings.Log.RootNoLongerTrusted);
         _lastTrusted = trusted;
 
-        _httpsState = TrustPolicy.StateOf(_options.DecryptHttps, trusted);
+        _httpsState = TrustPolicy.StateOf(_options.DecryptHttps, trusted, _options.DecryptWhenUntrusted);
         _httpsStatusLabel.Text = Strings.StatusBar.HttpsLabel(_httpsState);
         _httpsStatusLabel.ToolTipText = Strings.StatusBar.HttpsTooltip(_httpsState);
         _httpsStatusLabel.ForeColor = _httpsState switch
         {
             HttpsState.Decrypting => Palette.StatusOk,
-            HttpsState.NotTrusted => Palette.StatusClientError,
+            HttpsState.DecryptingUntrusted or HttpsState.NotTrusted => Palette.StatusClientError,
             _ => Palette.TextDim,
         };
         _trustBar.Visible = _httpsState == HttpsState.NotTrusted;
