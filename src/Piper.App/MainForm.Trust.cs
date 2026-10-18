@@ -1,0 +1,97 @@
+using System.Windows.Forms;
+using Piper.Core.Proxy;
+using Piper.Core.Security;
+
+namespace Piper.App;
+
+/// <summary>
+/// What Piper does about the trust of its root: the cached trust read, applying it to the proxy,
+/// and the startup prompt. Installing or removing the root is still done only by
+/// <c>TrustRootCertificate</c> and <c>UntrustRootCertificate</c>; nothing here calls the trust
+/// store's write methods.
+/// </summary>
+public sealed partial class MainForm
+{
+    /// <summary>
+    /// How long a trust-store read is reused. The status bar asks every second, so for now the store is
+    /// read only at startup, before capture starts, and after the user trusts or removes the root
+    /// (each calls Invalidate); a later change in this stack also notices changes made outside Piper.
+    /// </summary>
+    private static readonly TimeSpan TrustCheckLifetime = Timeout.InfiniteTimeSpan;
+
+    private readonly TrustStateCache _trust;
+    private HttpsState _httpsState;
+    private bool? _lastTrusted;
+
+    /// <summary>
+    /// Re-reads trust now. Call after the user trusts or removes the root, and before capture starts.
+    /// </summary>
+    private void RefreshTrustState()
+    {
+        _trust.Invalidate();
+        ApplyTrustState();
+    }
+
+    /// <summary>
+    /// Brings the proxy in line with the cached trust state and returns it: HTTPS is decrypted only
+    /// while the option is on and the root is trusted; otherwise it is tunnelled unread rather than
+    /// failing every client's handshake.
+    /// </summary>
+    private HttpsState ApplyTrustState()
+    {
+        var trusted = _trust.IsTrusted;
+        _options.DecryptionSuspended = TrustPolicy.IsSuspended(trusted, _options.DecryptWhenUntrusted);
+
+        if (_lastTrusted is { } before && before != trusted)
+            AppendLog(trusted ? Strings.Log.RootNowTrusted : Strings.Log.RootNoLongerTrusted);
+        _lastTrusted = trusted;
+
+        _httpsState = TrustPolicy.StateOf(_options.DecryptHttps, trusted, _options.DecryptWhenUntrusted);
+        return _httpsState;
+    }
+
+    /// <summary>
+    /// The three-way startup question. Closing the dialog is "Not now": it neither installs anything
+    /// nor silences the prompt.
+    /// </summary>
+    private TrustPromptChoice ShowTrustPrompt()
+    {
+        var install = new TaskDialogButton(Strings.Certificates.StartupTrustInstall);
+        var notNow = new TaskDialogButton(Strings.Certificates.StartupTrustNotNow);
+        var dontAskAgain = new TaskDialogButton(Strings.Certificates.StartupTrustDontAsk);
+        var page = new TaskDialogPage
+        {
+            Caption = Strings.Certificates.StartupTrustCaption,
+            Text = Strings.Certificates.StartupTrustBody,
+            Icon = TaskDialogIcon.Warning,
+            AllowCancel = true,
+            DefaultButton = notNow,
+            Buttons = { install, notNow, dontAskAgain },
+        };
+
+        var pressed = TaskDialog.ShowDialog(this, page);
+        return pressed == install ? TrustPromptChoice.InstallCertificate
+            : pressed == dontAskAgain ? TrustPromptChoice.DontAskAgain
+            : TrustPromptChoice.NotNow;
+    }
+
+    /// <summary>
+    /// Saves Don't ask again. The settings store is best-effort and swallows I/O failures, so this
+    /// reads the file back: when it did not stick the user is told the prompt will return.
+    /// </summary>
+    private void PersistDontAskAgain()
+    {
+        _options.AskToTrustCertificate = false;
+        try
+        {
+            ProxyConfigurationSettingsStore.Save(ProxyConfigurationSettings.From(_options));
+            if (ProxyConfigurationSettingsStore.Load() is { AskToTrustCertificate: false }) return;
+        }
+        catch (Exception ex) when (ex is NotSupportedException or ArgumentException)
+        {
+            // A profile path the store cannot use; reported below like any other failure to save.
+        }
+
+        AppendLog(Strings.Log.DontAskAgainNotSaved);
+    }
+}

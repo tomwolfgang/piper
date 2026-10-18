@@ -1,4 +1,5 @@
 using Piper.Core.Proxy;
+using Piper.Core.Security;
 using Piper.Core.Sessions;
 
 namespace Piper.App;
@@ -190,9 +191,15 @@ internal static class Strings
 
         public static string FilterTimedOutSuffix => I18n.T("statusBar.filterTimedOutSuffix");
 
-        public static string Listening(object? endpoint, bool decryptHttps) =>
+        public static string Listening(object? endpoint, HttpsState https) =>
             I18n.T("statusBar.listening", ("endpoint", endpoint),
-                ("state", decryptHttps ? I18n.T("statusBar.httpsOn") : I18n.T("statusBar.httpsOff")));
+                ("state", https switch
+                {
+                    HttpsState.Decrypting => I18n.T("statusBar.httpsOn"),
+                    HttpsState.DecryptingUntrusted => I18n.T("statusBar.httpsDecryptingUntrusted"),
+                    HttpsState.NotTrusted => I18n.T("statusBar.httpsNotTrusted"),
+                    _ => I18n.T("statusBar.httpsOff"),
+                }));
 
         public static string Sessions(int total) => I18n.T("statusBar.sessions", ("count", total));
 
@@ -256,6 +263,9 @@ internal static class Strings
     {
         public static string StartupTrustCaption => I18n.T("certificates.startupTrustCaption");
         public static string StartupTrustBody => I18n.T("certificates.startupTrustBody");
+        public static string StartupTrustInstall => I18n.T("certificates.startupTrustInstall");
+        public static string StartupTrustNotNow => I18n.T("certificates.startupTrustNotNow");
+        public static string StartupTrustDontAsk => I18n.T("certificates.startupTrustDontAsk");
 
         public static string StartupInstallFailed(string message) =>
             I18n.T("certificates.startupInstallFailed", ("message", message));
@@ -325,7 +335,11 @@ internal static class Strings
 
         public static string RestoredLeftoverProxy(string endpoint) =>
             I18n.T("log.restoredLeftoverProxy", ("endpoint", endpoint));
-        public static string StartupCaptureOff => I18n.T("log.startupCaptureOff");
+        public static string StartupDecryptionOff => I18n.T("log.startupDecryptionOff");
+        public static string DontAskAgainNotSaved => I18n.T("log.dontAskAgainNotSaved");
+        public static string StartupPromptOff => I18n.T("log.startupPromptOff");
+        public static string RootNowTrusted => I18n.T("log.rootNowTrusted");
+        public static string RootNoLongerTrusted => I18n.T("log.rootNoLongerTrusted");
         public static string RootTrusted(string? thumbprint) => I18n.T("log.rootTrusted", ("thumbprint", thumbprint));
         public static string TrustRootFailed(string message) => I18n.T("log.trustRootFailed", ("message", message));
         public static string TrustingRootFailed(string message) => I18n.T("log.trustingRootFailed", ("message", message));

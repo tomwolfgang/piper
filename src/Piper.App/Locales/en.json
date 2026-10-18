@@ -117,6 +117,8 @@
 
     "httpsOn": "on",
     "httpsOff": "off",
+    "httpsNotTrusted": "off (Piper certificate not trusted)",
+    "httpsDecryptingUntrusted": "on (Windows does not trust the Piper certificate; clients must trust it themselves)",
     "listening": "Listening on {{endpoint}}   -   HTTPS decryption {{state}}",
     "filterTimedOutSuffix": "   -   Warning: a filter pattern timed out, so the filters are not being applied",
 
@@ -164,12 +166,15 @@
 
   "certificates": {
     "startupTrustCaption": "Trust Piper certificate",
-    "startupTrustBody": "Piper's HTTPS inspection certificate is not trusted by Windows.\n\nClick OK to install Piper's root certificate for this Windows user and restart Piper. HTTPS capture will then work immediately.\n\nThis is a security-sensitive change: anything with access to Piper's private key can impersonate HTTPS sites to this Windows account. Only continue on a machine you control.",
-    "startupInstallFailed": "Piper could not install its root certificate, so capture has not started.\n\n{{message}}",
+    "startupTrustBody": "Piper's HTTPS inspection certificate is not trusted by Windows.\n\nWithout it Piper still captures plain HTTP and passes HTTPS through unread. Install certificate adds Piper's root certificate for this Windows user and restarts Piper, so HTTPS is decrypted from then on.\n\nThis is a security-sensitive change: anything with access to Piper's private key can impersonate HTTPS sites to this Windows account. Only continue on a machine you control.\n\nNot now asks again next time. Don't ask again stops this prompt.",
+    "startupTrustInstall": "Install certificate",
+    "startupTrustNotNow": "Not now",
+    "startupTrustDontAsk": "Don't ask again",
+    "startupInstallFailed": "Piper could not install its root certificate and restart.\n\n{{message}}\n\nCapture is still starting. HTTPS is decrypted only while Windows trusts the certificate.",
 
     "alreadyTrusted": "The Piper root certificate is already trusted.",
     "trustCaption": "Trust the Piper root certificate",
-    "trustBody": "Add the Piper root certificate to your user's Trusted Root store?\n\nThis is required to inspect HTTPS traffic, and it is a real security tradeoff: anything holding the matching private key - which is stored unencrypted in your user profile - can impersonate any HTTPS site to this Windows account.\n\nOnly do this on a machine you control, and use Tools > Remove trusted root certificate when you are finished.\n\nPrivate key location:\n{{privateKeyPath}}\n\nThumbprint:\n{{thumbprint}}",
+    "trustBody": "Add the Piper root certificate to your user's Trusted Root store?\n\nThis is required to inspect HTTPS traffic, and it is a real security tradeoff: anything holding the matching private key - which is stored unencrypted in your user profile - can impersonate any HTTPS site to this Windows account.\n\nOnly do this on a machine you control, and use Tools > Configurations > HTTPS > Remove trusted root when you are finished.\n\nPrivate key location:\n{{privateKeyPath}}\n\nThumbprint:\n{{thumbprint}}",
 
     "removed_one": "Removed {{count}} Piper root certificate.",
     "removed_other": "Removed {{count}} Piper root certificates.",
@@ -216,12 +221,16 @@
 
     "rootCaPath": "Root CA: {{path}}",
     "rootCaTrusted": "Root CA is trusted by the current user. HTTPS decryption will work.",
-    "rootCaNotTrusted": "Root CA is NOT trusted. HTTPS sites will fail until you use Tools > Configurations > HTTPS.",
+    "rootCaNotTrusted": "Root CA is NOT trusted. HTTPS is not decrypted until you trust it (Tools > Configurations > HTTPS).",
     "upstreamValidationOffAtStartup": "Origin server certificate verification is OFF (Configurations > HTTPS). Piper cannot tell a real origin from something impersonating it.",
     "upstreamValidationOffAfterSave": "Origin server certificate verification is OFF. Piper cannot tell a real origin from something impersonating it. Turn it back on when you are done testing.",
 
     "restoredLeftoverProxy": "Restored the system proxy that a previous session left pointing at {{endpoint}}.",
-    "startupCaptureOff": "Root certificate is not trusted; startup capture remains off.",
+    "startupDecryptionOff": "Root certificate is not trusted; capture starts with HTTPS decryption off.",
+    "dontAskAgainNotSaved": "Could not save Don't ask again; the startup prompt will come back next time.",
+    "startupPromptOff": "Root certificate is not trusted and the startup prompt is turned off; HTTPS is not decrypted. Trust the certificate under Tools > Configurations > HTTPS.",
+    "rootNowTrusted": "The Piper root certificate is now trusted; HTTPS decryption follows the Decrypt HTTPS setting.",
+    "rootNoLongerTrusted": "The Piper root certificate is no longer trusted; HTTPS is passed through undecrypted.",
     "rootTrusted": "Root certificate {{thumbprint}} added to the current user's trusted roots.",
     "trustRootFailed": "Could not trust the root certificate: {{message}}",
     "trustingRootFailed": "Trusting the root failed: {{message}}",
