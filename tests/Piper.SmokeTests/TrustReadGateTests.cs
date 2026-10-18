@@ -66,5 +66,21 @@ internal static class TrustReadGateTests
             runner.IsTrue(gate.TryBegin(122_001) != 0, "only the current read's failure schedules a retry");
             return Task.CompletedTask;
         });
+
+        await runner.RunAsync("a store that stays hung costs at most two worker threads, not one more every abandon window", () =>
+        {
+            var gate = new TrustReadGate(Retry, Abandon);
+            var hung = gate.TryBegin(0);
+            var second = gate.TryBegin(120_000);
+            runner.IsTrue(second != 0, "the first hung read is abandoned and one replacement starts");
+            var started = 0;
+            for (long now = 240_000; now <= 8 * 3_600_000L; now += 120_000)
+                if (gate.TryBegin(now) != 0) started++;
+            runner.AreEqual(0, started, "eight hours of ticks start nothing while the abandoned read is still stuck");
+
+            gate.End(hung, failed: false, nowMs: 8 * 3_600_000L + 1); // the store finally answers the first read
+            runner.IsTrue(gate.TryBegin(8 * 3_600_000L + 2) != 0, "once the abandoned read returned, the stuck replacement is abandoned in turn and a new read starts");
+            return Task.CompletedTask;
+        });
     }
 }
