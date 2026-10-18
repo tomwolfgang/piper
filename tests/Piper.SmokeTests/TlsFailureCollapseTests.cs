@@ -51,6 +51,19 @@ internal static class TlsFailureCollapseTests
             lock (updates) runner.AreEqual(1, updates.Count, "and nothing after it");
         });
 
+        await runner.RunAsync("aggregator: a client the store does not admit cannot use up the allowance of the ones it does", () =>
+        {
+            var (store, _, aggregator) = Make();
+            store.CaptureFilter = session => session.ProcessName != "excluded.exe";
+            for (var i = 0; i < 50; i++) Fail(aggregator, "excluded.exe", "same.test");
+            for (var i = 0; i < 30; i++) Fail(aggregator, "excluded.exe", $"other{i}.test");
+            for (var i = 0; i < TlsFailureAggregator.MaxNewRowsPerWindow; i++) Fail(aggregator, "p.exe", $"h{i}.test");
+            var rows = Rows(store);
+            runner.IsTrue(rows.All(r => r.ProcessName == "p.exe" && !r.TlsFailure!.IsOverflow), "no row for the excluded client and none of the overflow kind");
+            runner.AreEqual(TlsFailureAggregator.MaxNewRowsPerWindow, rows.Length, "and each in-scope host still gets a row of its own");
+            return Task.CompletedTask;
+        });
+
         await runner.RunAsync("aggregator: 300 distinct hosts stay within the new-row limit; the rest are counted per process", () =>
         {
             var (store, clock, aggregator) = Make();
