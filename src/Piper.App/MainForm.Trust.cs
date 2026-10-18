@@ -17,7 +17,7 @@ public sealed partial class MainForm
     /// read only at startup, before capture starts, and after the user trusts or removes the root
     /// (each calls Invalidate); a later change in this stack also notices changes made outside Piper.
     /// </summary>
-    private static readonly TimeSpan TrustCheckLifetime = TimeSpan.MaxValue;
+    private static readonly TimeSpan TrustCheckLifetime = Timeout.InfiniteTimeSpan;
 
     private readonly TrustStateCache _trust;
     private HttpsState _httpsState;
@@ -40,34 +40,14 @@ public sealed partial class MainForm
     private HttpsState ApplyTrustState()
     {
         var trusted = _trust.IsTrusted;
-        _options.DecryptionSuspended = !trusted;
+        _options.DecryptionSuspended = TrustPolicy.IsSuspended(trusted, _options.DecryptWhenUntrusted);
 
         if (_lastTrusted is { } before && before != trusted)
             AppendLog(trusted ? Strings.Log.RootNowTrusted : Strings.Log.RootNoLongerTrusted);
         _lastTrusted = trusted;
 
-        _httpsState = TrustPolicy.StateOf(_options.DecryptHttps, trusted);
+        _httpsState = TrustPolicy.StateOf(_options.DecryptHttps, trusted, _options.DecryptWhenUntrusted);
         return _httpsState;
-    }
-
-    /// <summary>
-    /// Saves Don't ask again. The settings store is best-effort and swallows I/O failures, so this
-    /// reads the file back: when it did not stick the user is told the prompt will return.
-    /// </summary>
-    private void PersistDontAskAgain()
-    {
-        _options.AskToTrustCertificate = false;
-        try
-        {
-            ProxyConfigurationSettingsStore.Save(ProxyConfigurationSettings.From(_options));
-            if (ProxyConfigurationSettingsStore.Load() is { AskToTrustCertificate: false }) return;
-        }
-        catch (Exception ex) when (ex is NotSupportedException or ArgumentException)
-        {
-            // A profile path the store cannot use; reported below like any other failure to save.
-        }
-
-        AppendLog(Strings.Log.DontAskAgainNotSaved);
     }
 
     /// <summary>
