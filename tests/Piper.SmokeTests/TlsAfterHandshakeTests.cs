@@ -43,19 +43,25 @@ internal static class TlsAfterHandshakeTests
                     using var client = await TlsFailureEvidenceTests.OpenTunnelAsync(port);
                     using var ssl = new SslStream(client.GetStream());
                     await ssl.AuthenticateAsClientAsync(TlsFailureEvidenceTests.Client("close.test", how.EndsWith("1.2") ? SslProtocols.Tls12 : SslProtocols.Tls13, accept: true));
-                    if (how.StartsWith("RST")) TlsFailureEvidenceTests.Reset(client); else client.Dispose();
+                    if (how.StartsWith("RST")) TlsFailureEvidenceTests.Reset(client); else await TlsFailureEvidenceTests.CloseGracefullyAsync(client);
 
                     runner.IsTrue(await Poll.UntilAsync(() => store.Snapshot().Any(s => s.TlsFailure is not null)), $"{how}: a row is recorded");
                     await Task.Delay(300);
                     var rows = Rows(store);
                     runner.AreEqual(1, rows.Length, $"{how}: once");
                     var failure = rows[0].TlsFailure!;
+                    // A reset can beat a TLS 1.3 server's reading of the client's Finished: then it is the handshake that failed.
+                    if (how == "RST 1.3" && failure.Phase == TlsFailurePhase.InHandshake)
+                    {
+                        runner.AreEqual(TlsFailureKind.ClosedInHandshake, failure.Kind, $"{how}: a reset in the handshake");
+                        return;
+                    }
                     runner.IsTrue(failure is { Kind: TlsFailureKind.ClosedAfterHandshake, Phase: TlsFailurePhase.AfterHandshake, Attempts: 1, IsOverflow: false },
                         $"{how}: closed after the handshake ({failure.Kind}/{failure.Phase})");
                     runner.AreEqual("close.test", failure.Sni, $"{how}: with the SNI");
                     runner.IsTrue(rows[0] is { State: SessionState.Failed, IsTunnel: true, IsHttps: true, ServerEndpoint: "127.0.0.1:9" }
                                   && rows[0].Completed is not null && failure.LastSeen == rows[0].Completed, $"{how}: a failed tunnel row");
-                });
+                }, WindowOpenWide);
             }
         });
 
@@ -151,10 +157,12 @@ internal static class TlsAfterHandshakeTests
                 using var client = await TlsFailureEvidenceTests.OpenTunnelAsync(port);
                 using var ssl = new SslStream(client.GetStream());
                 await ssl.AuthenticateAsClientAsync(TlsFailureEvidenceTests.Client("off.test", SslProtocols.None, accept: true));
-                client.Dispose();
+                await TlsFailureEvidenceTests.CloseGracefullyAsync(client);
                 await Task.Delay(500);
                 runner.AreEqual(0, Rows(store).Length, "switched off: a plain close is not recorded");
             }, o => o.RecordClosedAfterHandshake = false);
+            var defaults = new ProxyOptions();
+            runner.IsTrue(defaults.RecordClosedAfterHandshake && defaults.ClosedAfterHandshakeWindow == TimeSpan.FromSeconds(2), "by default: on, with a 2 s window");
 
             await TlsFailureEvidenceTests.WithProxyAsync(ca, null, async (port, store) =>
             {
