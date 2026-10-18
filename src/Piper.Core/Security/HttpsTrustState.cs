@@ -3,10 +3,16 @@ namespace Piper.Core.Security;
 /// <summary>What Piper is really doing with HTTPS right now.</summary>
 public enum HttpsState
 {
-    /// <summary>Decryption is switched on and the root is trusted, so HTTPS bodies are readable.</summary>
+    /// <summary>Decryption is switched on and Windows trusts the root, so HTTPS bodies are readable.</summary>
     Decrypting,
 
-    /// <summary>Decryption is switched on but the root is not trusted, so HTTPS is tunnelled unread.</summary>
+    /// <summary>
+    /// Decryption is switched on and the user chose to decrypt although Windows does not trust the root:
+    /// only clients that trust it some other way (their own store or CA file) can connect.
+    /// </summary>
+    DecryptingUntrusted,
+
+    /// <summary>Decryption is switched on but Windows does not trust the root, so HTTPS is tunnelled unread.</summary>
     NotTrusted,
 
     /// <summary>The user switched decryption off; HTTPS is tunnelled unread by choice.</summary>
@@ -30,36 +36,47 @@ public readonly record struct StartupTrustDecision(
     bool Prompted, bool InstallRequested, bool SuppressFuturePrompts, bool StartCapture);
 
 /// <summary>
-/// Pure rules relating the trust of Piper's root, the Decrypt HTTPS option and the startup prompt.
-/// Nothing here touches the certificate store: installing or removing the root stays an explicit
-/// user action carried out by the caller.
+/// Pure rules relating the trust of Piper's root, the Decrypt HTTPS option, the opt-in to decrypt
+/// without Windows trust, and the startup prompt. Nothing here touches the certificate store:
+/// installing or removing the root stays an explicit user action carried out by the caller.
 /// </summary>
 public static class TrustPolicy
 {
-    /// <summary>Decryption is active only when it is switched on and the root is trusted.</summary>
-    public static bool ShouldDecrypt(bool decryptHttps, bool trusted) => decryptHttps && trusted;
+    /// <summary>
+    /// Whether the proxy must tunnel HTTPS unread because the root is untrusted: when Windows does not
+    /// trust it and the user has not opted in to decrypting anyway.
+    /// </summary>
+    public static bool IsSuspended(bool trusted, bool decryptWhenUntrusted) => !trusted && !decryptWhenUntrusted;
 
-    public static HttpsState StateOf(bool decryptHttps, bool trusted) =>
-        !decryptHttps ? HttpsState.Off : trusted ? HttpsState.Decrypting : HttpsState.NotTrusted;
+    /// <summary>Decryption is active when it is switched on and the root is trusted or the user opted in without trust.</summary>
+    public static bool ShouldDecrypt(bool decryptHttps, bool trusted, bool decryptWhenUntrusted) =>
+        decryptHttps && !IsSuspended(trusted, decryptWhenUntrusted);
+
+    public static HttpsState StateOf(bool decryptHttps, bool trusted, bool decryptWhenUntrusted) =>
+        !decryptHttps ? HttpsState.Off
+        : trusted ? HttpsState.Decrypting
+        : decryptWhenUntrusted ? HttpsState.DecryptingUntrusted
+        : HttpsState.NotTrusted;
 
     /// <summary>
     /// Whether the startup prompt is shown. Not when decryption is off (trust would change nothing),
-    /// when the root is already trusted, or when the user said Don't ask again.
+    /// when the root is already trusted, when the user opted in to decrypting without trust, or when
+    /// they said Don't ask again.
     /// </summary>
-    public static bool ShouldPrompt(bool decryptHttps, bool trusted, bool askAtStartup) =>
-        decryptHttps && !trusted && askAtStartup;
+    public static bool ShouldPrompt(bool decryptHttps, bool trusted, bool askAtStartup, bool decryptWhenUntrusted) =>
+        decryptHttps && !trusted && askAtStartup && !decryptWhenUntrusted;
 
     /// <summary>
     /// Runs the startup decision. <paramref name="ask"/> is called only when <see cref="ShouldPrompt"/>
     /// holds. Declining, or choosing Don't ask again, never installs anything and never stops
     /// capture: it starts with decryption off.
     /// </summary>
-    public static StartupTrustDecision DecideStartup(
-        bool decryptHttps, bool trusted, bool askAtStartup, bool captureOnStartup, Func<TrustPromptChoice> ask)
+    public static StartupTrustDecision DecideStartup(bool decryptHttps, bool trusted, bool askAtStartup,
+        bool decryptWhenUntrusted, bool captureOnStartup, Func<TrustPromptChoice> ask)
     {
         ArgumentNullException.ThrowIfNull(ask);
 
-        if (!ShouldPrompt(decryptHttps, trusted, askAtStartup))
+        if (!ShouldPrompt(decryptHttps, trusted, askAtStartup, decryptWhenUntrusted))
             return new StartupTrustDecision(false, false, false, captureOnStartup);
 
         var choice = ask();
@@ -69,88 +86,4 @@ public static class TrustPolicy
             SuppressFuturePrompts: choice == TrustPromptChoice.DontAskAgain,
             StartCapture: captureOnStartup);
     }
-}
-
-/// <summary>
-/// Remembers the answer to "is the Piper root trusted?" so the status bar can ask every second without
-/// reading the Windows certificate store every second. The answer is re-read when <see cref="Invalidate"/>
-/// is called (after the user trusts or removes the root) and otherwise when it is older than the
-/// lifetime, which also notices a root trusted or removed outside Piper. Safe to call from any thread;
-/// the store is read outside the lock, so <see cref="Last"/> and <see cref="NeedsRead"/> never wait for a read.
-/// </summary>
-public sealed class TrustStateCache(Func<bool> query, TimeSpan lifetime, TimeProvider? clock = null)
-{
-    private readonly Func<bool> _query = query ?? throw new ArgumentNullException(nameof(query));
-    private readonly TimeProvider _clock = clock ?? TimeProvider.System;
-    private readonly object _gate = new();
-    private bool _valid;
-    private bool _hasValue;
-    private bool _value;
-    private long _readAt;
-    private int _generation;
-
-    /// <summary>How many times the underlying check has run.</summary>
-    public int QueryCount
-    {
-        get { lock (_gate) return _queryCount; }
-    }
-
-    private int _queryCount;
-
-    /// <summary>The current answer, reading the store first when there is none or it has aged out.</summary>
-    public bool IsTrusted
-    {
-        get
-        {
-            int generation;
-            lock (_gate)
-            {
-                if (IsFresh()) return _value;
-                generation = _generation;
-            }
-
-            var value = _query();
-            lock (_gate)
-            {
-                _queryCount++;
-                // An Invalidate that arrived during the read means the value may predate the change
-                // it was called for (a slow worker finishing after the user clicked Trust or Remove).
-                // It is returned to its own caller but never stored, so neither Last nor the next
-                // read can see the old answer.
-                if (generation == _generation)
-                {
-                    _value = value;
-                    _hasValue = true;
-                    _readAt = _clock.GetTimestamp();
-                    _valid = true;
-                }
-            }
-
-            return value;
-        }
-    }
-
-    /// <summary>The most recent answer without reading the store, or null before the first read.</summary>
-    public bool? Last
-    {
-        get { lock (_gate) return _hasValue ? _value : null; }
-    }
-
-    /// <summary>True when <see cref="IsTrusted"/> would read the store.</summary>
-    public bool NeedsRead
-    {
-        get { lock (_gate) return !IsFresh(); }
-    }
-
-    /// <summary>Forces the next read to ask the store again.</summary>
-    public void Invalidate()
-    {
-        lock (_gate)
-        {
-            _valid = false;
-            _generation++;
-        }
-    }
-
-    private bool IsFresh() => _valid && _clock.GetElapsedTime(_readAt) < lifetime;
 }

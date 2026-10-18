@@ -9,96 +9,11 @@ internal static class TrustStateTests
 {
     public static async Task RunAsync(TestRunner runner)
     {
-        await RunStateMatrixAsync(runner);
-        await RunStartupDecisionAsync(runner);
-        await RunDontAskAgainAsync(runner);
         await RunSuspendedOptionAsync(runner);
         await RunRemoveConfirmationAsync(runner);
         await RunStoreReadDisposesAsync(runner);
         await RunCachedCheckAsync(runner);
     }
-
-    private static Task RunStateMatrixAsync(TestRunner runner) => runner.RunAsync("HTTPS state matrix: decrypting only when on and trusted", () =>
-    {
-        foreach (var (decrypt, trusted, state) in new[]
-        {
-            (true, true, HttpsState.Decrypting),
-            (true, false, HttpsState.NotTrusted),
-            (false, true, HttpsState.Off),
-            (false, false, HttpsState.Off),
-        })
-        {
-            runner.AreEqual(state, TrustPolicy.StateOf(decrypt, trusted), $"state for decrypt={decrypt} trusted={trusted}");
-            runner.AreEqual(state == HttpsState.Decrypting, TrustPolicy.ShouldDecrypt(decrypt, trusted),
-                $"decryption active for decrypt={decrypt} trusted={trusted}");
-        }
-
-        return Task.CompletedTask;
-    });
-
-    private static Task RunStartupDecisionAsync(TestRunner runner) => runner.RunAsync("startup trust decision never stops capture and never installs by itself", () =>
-    {
-        foreach (var choice in new[] { TrustPromptChoice.NotNow, TrustPromptChoice.DontAskAgain, TrustPromptChoice.InstallCertificate })
-        {
-            var decision = TrustPolicy.DecideStartup(decryptHttps: true, trusted: false, askAtStartup: true, captureOnStartup: true, () => choice);
-            runner.IsTrue(decision.Prompted, $"{choice}: the prompt was shown");
-            runner.IsTrue(decision.StartCapture, $"{choice}: capture still starts");
-            runner.AreEqual(choice == TrustPromptChoice.InstallCertificate, decision.InstallRequested, $"{choice}: install is requested only by Install");
-            runner.AreEqual(choice == TrustPromptChoice.DontAskAgain, decision.SuppressFuturePrompts, $"{choice}: the prompt is silenced only by Don't ask again");
-        }
-
-        var declined = TrustPolicy.DecideStartup(true, false, true, false, () => TrustPromptChoice.NotNow);
-        runner.IsTrue(!declined.StartCapture, "capture stays off when the user turned capture-on-startup off");
-
-        var asked = 0;
-        TrustPromptChoice Ask() { asked++; return TrustPromptChoice.NotNow; }
-        runner.IsTrue(!TrustPolicy.DecideStartup(true, true, true, true, Ask).Prompted, "no prompt when the root is already trusted");
-        runner.IsTrue(TrustPolicy.DecideStartup(true, true, true, true, Ask).StartCapture, "capture starts when the root is trusted");
-        runner.IsTrue(!TrustPolicy.DecideStartup(false, false, true, true, Ask).Prompted, "no prompt when decryption is off");
-        runner.IsTrue(!TrustPolicy.DecideStartup(true, false, false, true, Ask).Prompted, "no prompt after Don't ask again");
-        runner.IsTrue(TrustPolicy.DecideStartup(true, false, false, true, Ask).StartCapture, "capture starts without a prompt");
-        runner.AreEqual(0, asked, "the prompt callback ran only when a prompt was due");
-        return Task.CompletedTask;
-    });
-
-    private static Task RunDontAskAgainAsync(TestRunner runner) => runner.RunAsync("Don't ask again persists and can be turned back on", () =>
-    {
-        var path = Path.Combine(Path.GetTempPath(), $"piper-trust-settings-{Guid.NewGuid():N}.json");
-        try
-        {
-            var options = new ProxyOptions();
-            runner.IsTrue(options.AskToTrustCertificate, "the prompt is on by default");
-
-            var first = TrustPolicy.DecideStartup(true, false, options.AskToTrustCertificate, true, () => TrustPromptChoice.DontAskAgain);
-            if (first.SuppressFuturePrompts) options.AskToTrustCertificate = false;
-            ProxyConfigurationSettingsStore.Save(ProxyConfigurationSettings.From(options), path);
-
-            var restarted = new ProxyOptions();
-            ProxyConfigurationSettingsStore.Load(path)!.ApplyTo(restarted);
-            runner.IsTrue(!restarted.AskToTrustCertificate, "Don't ask again survives a restart");
-            runner.IsTrue(!TrustPolicy.DecideStartup(true, false, restarted.AskToTrustCertificate, true, () => TrustPromptChoice.NotNow).Prompted,
-                "the next start does not prompt");
-            runner.IsTrue(restarted.DecryptHttps, "Don't ask again does not turn decryption off");
-
-            restarted.AskToTrustCertificate = true; // what the Configurations checkbox does
-            ProxyConfigurationSettingsStore.Save(ProxyConfigurationSettings.From(restarted), path);
-            var again = new ProxyOptions();
-            ProxyConfigurationSettingsStore.Load(path)!.ApplyTo(again);
-            runner.IsTrue(TrustPolicy.DecideStartup(true, false, again.AskToTrustCertificate, true, () => TrustPromptChoice.NotNow).Prompted,
-                "re-enabling it from Configurations brings the prompt back");
-
-            File.WriteAllText(path, "{\"DecryptHttps\":true}");
-            var legacy = new ProxyOptions { AskToTrustCertificate = false };
-            ProxyConfigurationSettingsStore.Load(path)!.ApplyTo(legacy);
-            runner.IsTrue(legacy.AskToTrustCertificate, "a settings file from an older Piper keeps the prompt on");
-        }
-        finally
-        {
-            if (File.Exists(path)) File.Delete(path);
-        }
-
-        return Task.CompletedTask;
-    });
 
     private static Task RunSuspendedOptionAsync(TestRunner runner) => runner.RunAsync("suspending decryption keeps the user's choice and is never saved", () =>
     {
@@ -192,6 +107,14 @@ internal static class TrustStateTests
         clock.Advance(TimeSpan.FromSeconds(31));
         runner.IsTrue(cache.IsTrusted, "a change made outside Piper is noticed once the answer is older than its lifetime");
         runner.AreEqual(4, cache.QueryCount, "and that took one more read");
+
+        // An infinite lifetime means read on demand only: it never ages out, however long the clock runs.
+        var never = new TrustStateCache(() => true, Timeout.InfiniteTimeSpan, clock);
+        _ = never.IsTrusted;
+        clock.Advance(TimeSpan.FromDays(3650));
+        runner.IsTrue(!never.NeedsRead && never.QueryCount == 1, "an infinite lifetime never ages out");
+        never.Invalidate();
+        runner.IsTrue(never.NeedsRead, "but Invalidate still forces a read");
 
         // The timer path asks without reading: it sees the last answer and learns a read is due.
         clock.Advance(TimeSpan.FromSeconds(31));

@@ -57,9 +57,8 @@ public static class AnalyticsEvents
 
     /// <summary>
     /// The root-certificate step - the one most likely to lose a new user.
-    /// <see cref="AnalyticsProperties.Result"/> is "ok", "declined", "suppressed" (Don't ask again),
-    /// "failed", or "already" when a run starts with the root trusted, so returning users are not read
-    /// as having skipped it.
+    /// <see cref="AnalyticsProperties.Result"/> is "ok", "declined", "failed", or "already" when a
+    /// run starts with the root trusted, so returning users are not read as having skipped it.
     /// </summary>
     public const string CertTrusted = "piper_usage_cert_trusted";
 

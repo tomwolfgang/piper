@@ -501,7 +501,7 @@ public sealed partial class MainForm : Form, IMessageFilter
         }
 
         var decision = TrustPolicy.DecideStartup(_options.DecryptHttps, trusted: false,
-            _options.AskToTrustCertificate, _captureEnabledOnStartup, () =>
+            _options.AskToTrustCertificate, _options.DecryptWhenUntrusted, _captureEnabledOnStartup, () =>
             {
                 // Worth a line of its own: this dialog is modal, so while it is up the main window is
                 // disabled and refuses every drop. That reads as "drag and drop is broken" to a user who
@@ -519,14 +519,14 @@ public sealed partial class MainForm : Form, IMessageFilter
 
         if (decision.SuppressFuturePrompts)
         {
-            PersistDontAskAgain();
+            _options.AskToTrustCertificate = false;
+            ProxyConfigurationSettingsStore.Save(ProxyConfigurationSettings.From(_options));
         }
 
         if (!decision.InstallRequested)
         {
-            // "suppressed" is Don't ask again, so permanent silencing can be told from putting it off.
-            Analytics.Track(AnalyticsEvents.CertTrusted, (AnalyticsProperties.Source, "startup"),
-                (AnalyticsProperties.Result, decision.SuppressFuturePrompts ? "suppressed" : "declined"));
+            Analytics.Track(AnalyticsEvents.CertTrusted,
+                (AnalyticsProperties.Source, "startup"), (AnalyticsProperties.Result, "declined"));
             AppendLog(Strings.Log.StartupDecryptionOff);
             return true;
         }
@@ -1630,7 +1630,7 @@ public sealed partial class MainForm : Form, IMessageFilter
 
     private void TrustRootCertificate()
     {
-        // A user action, so ask the store rather than trust a read up to half a minute old.
+        // A user action, so ask the store rather than trust the cached read.
         _trust.Invalidate();
         if (_trust.IsTrusted)
         {

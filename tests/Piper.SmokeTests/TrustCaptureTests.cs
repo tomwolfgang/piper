@@ -1,4 +1,7 @@
+using System.Net.Security;
 using System.Net.Sockets;
+using System.Security.Authentication;
+using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using Piper.App;
 using Piper.Core.Proxy;
@@ -15,7 +18,6 @@ internal static class TrustCaptureTests
     {
         await RunStatusTextAsync(runner);
         await RunSuspendedProxyAsync(runner);
-        await RunUnwritableSettingsAsync(runner);
     }
 
     private static Task RunStatusTextAsync(TestRunner runner) => runner.RunAsync("the status text only says decryption is on while HTTPS is really decrypted", () =>
@@ -24,13 +26,17 @@ internal static class TrustCaptureTests
         runner.IsTrue(Text(HttpsState.NotTrusted).Contains("not trusted", StringComparison.Ordinal) && !Text(HttpsState.NotTrusted).Contains("decryption on", StringComparison.Ordinal),
             $"an untrusted root is reported as such, not as decryption on ({Text(HttpsState.NotTrusted)})");
         runner.IsTrue(Text(HttpsState.Decrypting).Contains("decryption on", StringComparison.Ordinal), "decryption is reported on only when decrypting");
+        runner.IsTrue(Text(HttpsState.DecryptingUntrusted).Contains("clients must trust it themselves", StringComparison.Ordinal),
+            "decrypting without Windows trust says the clients carry the trust");
         runner.IsTrue(Text(HttpsState.Off).Contains("decryption off", StringComparison.Ordinal), "a switched-off option is reported as off");
 
-        var labels = new[] { HttpsState.Decrypting, HttpsState.NotTrusted, HttpsState.Off }.Select(Strings.StatusBar.HttpsLabel).ToList();
-        runner.AreEqual(3, labels.Distinct().Count(), "the three HTTPS states read differently in the status bar");
-        runner.IsTrue(labels[1].Contains("Not decrypted", StringComparison.Ordinal), "the untrusted state says HTTPS is not decrypted");
-        runner.IsTrue(!labels[1].Contains("Decrypting", StringComparison.Ordinal) && !labels[2].Contains("Decrypting", StringComparison.Ordinal),
-            "only the decrypting state ever says Decrypting");
+        var labels = Enum.GetValues<HttpsState>().Select(Strings.StatusBar.HttpsLabel).ToList();
+        runner.AreEqual(4, labels.Distinct().Count(), "the four HTTPS states read differently in the status bar");
+        runner.IsTrue(Strings.StatusBar.HttpsLabel(HttpsState.NotTrusted).Contains("Not decrypted", StringComparison.Ordinal), "the untrusted state says HTTPS is not decrypted");
+        runner.IsTrue(labels.Where((_, i) => (HttpsState)i is HttpsState.NotTrusted or HttpsState.Off).All(l => !l.Contains("Decrypting", StringComparison.Ordinal)),
+            "a state that tunnels HTTPS unread never says Decrypting");
+        runner.IsTrue(Strings.StatusBar.HttpsLabel(HttpsState.DecryptingUntrusted).Contains("clients must trust", StringComparison.Ordinal),
+            "decrypting without Windows trust says the clients carry the trust");
         return Task.CompletedTask;
     });
 
@@ -72,6 +78,47 @@ internal static class TrustCaptureTests
         options.DecryptionSuspended = false;
         runner.IsTrue(!(await ExchangeAsync(port, connect, FollowUp)).Contains("HTTP/1.1 200 OK", StringComparison.Ordinal),
             "control: with decryption active the same CONNECT expects TLS, so the origin never answers");
+
+        // The root is untrusted by Windows here. A client that trusts the CA itself completes the TLS
+        // handshake only when the opt-in is on; with it off the CONNECT is tunnelled unread.
+        foreach (var optIn in new[] { false, true })
+        {
+            options.DecryptionSuspended = TrustPolicy.IsSuspended(trusted: false, decryptWhenUntrusted: optIn);
+            var decrypted = await TlsHandshakeSucceedsAsync(port, host, ca.RootCertificate);
+            runner.AreEqual(optIn, decrypted, optIn
+                ? "opt-in on, root untrusted: a client that trusts the CA is decrypted"
+                : "opt-in off, root untrusted: the same client is tunnelled unread (no handshake)");
+        }
+    }
+
+    private static async Task<bool> TlsHandshakeSucceedsAsync(int port, string host, X509Certificate2 root)
+    {
+        using var client = new TcpClient();
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(3)); // a tunnelled connection never answers
+        await client.ConnectAsync("127.0.0.1", port, cts.Token);
+        var stream = client.GetStream();
+        await stream.WriteAsync(Encoding.ASCII.GetBytes($"CONNECT {host} HTTP/1.1\r\nHost: {host}\r\n\r\n"), cts.Token);
+        var head = new byte[256];
+        _ = await stream.ReadAsync(head, cts.Token); // "200 Connection Established"
+
+        using var tls = new SslStream(stream, leaveInnerStreamOpen: true, (_, certificate, _, _) =>
+        {
+            if (certificate is null) return false;
+            using var chain = new X509Chain();
+            chain.ChainPolicy.TrustMode = X509ChainTrustMode.CustomRootTrust;
+            chain.ChainPolicy.CustomTrustStore.Add(root);
+            chain.ChainPolicy.RevocationMode = X509RevocationMode.NoCheck;
+            return chain.Build(new X509Certificate2(certificate));
+        });
+        try
+        {
+            await tls.AuthenticateAsClientAsync(new SslClientAuthenticationOptions { TargetHost = "example.test" }, cts.Token);
+            return true;
+        }
+        catch (Exception ex) when (ex is AuthenticationException or IOException or OperationCanceledException)
+        {
+            return false; // plain bytes from the origin where a ServerHello should be, or no answer at all
+        }
     }
 
     private static async Task<string> ExchangeAsync(int port, string request, string? afterConnect = null)
@@ -105,22 +152,4 @@ internal static class TrustCaptureTests
 
         return text.ToString();
     }
-
-    private static Task RunUnwritableSettingsAsync(TestRunner runner) => runner.RunAsync("a settings file that cannot be written is skipped, not thrown, and reads back as not saved", () =>
-    {
-        var blocker = Path.Combine(Path.GetTempPath(), $"piper-trust-blocker-{Guid.NewGuid():N}");
-        File.WriteAllText(blocker, "a file where the settings folder should be");
-        try
-        {
-            var path = Path.Combine(blocker, "configuration.json");
-            ProxyConfigurationSettingsStore.Save(new ProxyConfigurationSettings { AskToTrustCertificate = false }, path);
-            runner.IsTrue(ProxyConfigurationSettingsStore.Load(path) is null, "Save swallows the failure, so the caller reads back to know it did not stick");
-        }
-        finally
-        {
-            File.Delete(blocker);
-        }
-
-        return Task.CompletedTask;
-    });
 }

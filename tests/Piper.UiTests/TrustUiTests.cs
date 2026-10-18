@@ -60,6 +60,15 @@ internal static class TrustUiTests
         dialog.ApplyTo(options);
         check(options.AskToTrustCertificate, "turning it back on is applied too");
 
+        var optIn = All(dialog).OfType<CheckBox>().Single(box => box.Text.StartsWith("Decrypt HTTPS even when Windows", StringComparison.Ordinal));
+        check(!optIn.Checked, "decrypting without Windows trust is off by default");
+        optIn.Checked = true;
+        dialog.ApplyTo(options);
+        check(options.DecryptWhenUntrusted, "turning it on is applied to the options only through the dialog");
+        optIn.Checked = false;
+        dialog.ApplyTo(options);
+        check(!options.DecryptWhenUntrusted, "and it can be turned off again");
+
         using var silenced = new ConfigurationsDialog(new ProxyOptions { AskToTrustCertificate = false }, true, "AllProcesses", true, false,
             () => { }, () => { }, () => { }, () => { }, () => { }, () => false);
         check(!All(silenced).OfType<CheckBox>().Single(box => box.Text.StartsWith("Ask to trust", StringComparison.Ordinal)).Checked,
