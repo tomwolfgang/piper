@@ -15,7 +15,9 @@
     <Compile Include="..\..\src\Piper.App\Controls\ImageDecoding.cs" Link="ImageDecoding.cs" />
     <Compile Include="..\..\src\Piper.App\Controls\ImageGuard.cs" Link="ImageGuard.cs" />
     <Compile Include="..\..\src\Piper.App\Controls\WebpView.cs" Link="WebpView.cs" />
-    <!-- WebpView.cs is compiled in, so the same WebView2 references as Piper.App are needed. -->
+    <Compile Include="..\..\src\Piper.App\Controls\VideoView.cs" Link="VideoView.cs" />
+    <Compile Include="..\..\src\Piper.App\Controls\VideoRange.cs" Link="VideoRange.cs" />
+    <!-- WebpView.cs and VideoView.cs are compiled in, so the same WebView2 references as Piper.App are needed. -->
     <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.4258.31" GeneratePathProperty="true" ExcludeAssets="build;buildTransitive" />
     <Reference Include="Microsoft.Web.WebView2.Core"><HintPath>$(PkgMicrosoft_Web_WebView2)\lib_manual\netcoreapp3.0\Microsoft.Web.WebView2.Core.dll</HintPath></Reference>
     <Reference Include="Microsoft.Web.WebView2.WinForms"><HintPath>$(PkgMicrosoft_Web_WebView2)\lib_manual\netcoreapp3.0\Microsoft.Web.WebView2.WinForms.dll</HintPath></Reference>

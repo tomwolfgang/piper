@@ -52,6 +52,7 @@ internal static class Program
         InspectorSaveTests.Run(Check, PumpUntil);
         WebpViewTests.Run(Check, PumpUntil);
         WebpInspectorTests.Run(Check, PumpUntil);
+        VideoViewTests.Run(Check, PumpUntil);
         JsonInspectorTests.Run(Check, PumpUntil);
         StatusImagesTests.Run(Check);
         TrustUiTests.Run(Check);
