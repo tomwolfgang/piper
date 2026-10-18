@@ -127,7 +127,8 @@ internal sealed class TlsFailureAggregator(SessionStore store, TimeProvider? tim
     {
         announce = schedule = added = false;
         if (!_entries.TryGetValue(key, out entry)) return false;
-        if (_time.GetElapsedTime(entry.FirstTicks, now) >= Episode)
+        // A declined key is asked again once per window: the scope or filter may have changed since.
+        if (_time.GetElapsedTime(entry.FirstTicks, now) >= (entry.Declined ? Window : Episode))
         {
             _entries.Remove(key);
             entry = null;
@@ -171,8 +172,8 @@ internal sealed class TlsFailureAggregator(SessionStore store, TimeProvider? tim
         return true;
     }
 
-    /// <summary>Marks the key's row as refused by the store for the rest of its episode and gives back the allowance
-    /// it took, if that window is still the current one. Lock held.</summary>
+    /// <summary>Marks the key's row as refused by the store for one window and gives back the allowance it
+    /// took, if that window is still the current one. Lock held.</summary>
     private void Decline(Entry entry)
     {
         entry.Declined = true;
