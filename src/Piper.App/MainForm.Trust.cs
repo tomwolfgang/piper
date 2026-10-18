@@ -1,7 +1,7 @@
-using System.Security.Cryptography;
 using System.Windows.Forms;
 using Piper.App.Controls;
 using Piper.App.Theme;
+using Piper.Core.Proxy;
 using Piper.Core.Security;
 
 namespace Piper.App;
@@ -61,19 +61,12 @@ public sealed partial class MainForm
     /// <paramref name="refreshInBackground"/> so an aged-out answer is re-read on a worker thread and
     /// the UI thread never waits on the certificate store (antivirus or policy hooks can make it slow).
     /// </summary>
-    private HttpsState ApplyTrustState(bool refreshInBackground = false)
-    {
-        bool trusted;
-        if (refreshInBackground && _trust.NeedsRead && _trust.Last is { } known)
-        {
-            QueueTrustRead();
-            trusted = known;
-        }
-        else
-        {
-            trusted = _trust.IsTrusted;
-        }
+    private HttpsState ApplyTrustState(bool refreshInBackground = false) =>
+        ApplyTrust(refreshInBackground ? _trust.ForDisplay(QueueTrustRead) : _trust.IsTrusted);
 
+    /// <summary>Applies a trust answer that has already been read. Never touches the certificate store.</summary>
+    private HttpsState ApplyTrust(bool trusted)
+    {
         _options.DecryptionSuspended = !trusted;
 
         if (_lastTrusted is { } before && before != trusted)
@@ -95,31 +88,30 @@ public sealed partial class MainForm
     }
 
     private bool _trustReadQueued;
+    private long _trustReadRetryAt;
 
-    /// <summary>Re-reads trust off the UI thread, then applies the fresh answer back on it.</summary>
+    /// <summary>
+    /// Re-reads trust off the UI thread, then paints the answer it left in the cache. The UI thread
+    /// never reads the store here, so a failed read keeps the last answer on screen; it is retried
+    /// after one cache lifetime rather than every second.
+    /// </summary>
     private void QueueTrustRead()
     {
-        if (_trustReadQueued) return;
+        if (_trustReadQueued || Environment.TickCount64 < _trustReadRetryAt) return;
         _trustReadQueued = true;
 
-        _ = Task.Run(() =>
+        _ = Task.Run(() => _trust.TryRefresh()).ContinueWith(read =>
         {
-            try
-            {
-                _ = _trust.IsTrusted;
-            }
-            catch (Exception ex) when (ex is CryptographicException or IOException or UnauthorizedAccessException)
-            {
-                // Keep showing the last answer; the next tick asks again.
-            }
-        }).ContinueWith(_ =>
-        {
+            // A task that faulted with something TryRefresh does not handle is a failed read too.
+            var failed = !read.IsCompletedSuccessfully || !read.Result;
+            _ = read.Exception;
             try
             {
                 BeginInvoke(() =>
                 {
                     _trustReadQueued = false;
-                    ApplyTrustState();
+                    if (failed) _trustReadRetryAt = Environment.TickCount64 + (long)TrustCheckLifetime.TotalMilliseconds;
+                    if (_trust.Last is { } last) ApplyTrust(last);
                 });
             }
             catch (Exception ex) when (ex is InvalidOperationException or ObjectDisposedException)
@@ -127,6 +119,26 @@ public sealed partial class MainForm
                 // The window is closing; nothing is left to update.
             }
         }, TaskScheduler.Default);
+    }
+
+    /// <summary>
+    /// Saves Don't ask again. The settings store is best-effort and swallows I/O failures, so this
+    /// reads the file back: when it did not stick the user is told the prompt will return.
+    /// </summary>
+    private void PersistDontAskAgain()
+    {
+        _options.AskToTrustCertificate = false;
+        try
+        {
+            ProxyConfigurationSettingsStore.Save(ProxyConfigurationSettings.From(_options));
+            if (ProxyConfigurationSettingsStore.Load() is { AskToTrustCertificate: false }) return;
+        }
+        catch (Exception ex) when (ex is NotSupportedException or ArgumentException)
+        {
+            // A profile path the store cannot use; reported below like any other failure to save.
+        }
+
+        AppendLog(Strings.Log.DontAskAgainNotSaved);
     }
 
     /// <summary>

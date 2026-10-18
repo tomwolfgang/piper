@@ -519,8 +519,7 @@ public sealed partial class MainForm : Form, IMessageFilter
 
         if (decision.SuppressFuturePrompts)
         {
-            _options.AskToTrustCertificate = false;
-            ProxyConfigurationSettingsStore.Save(ProxyConfigurationSettings.From(_options));
+            PersistDontAskAgain();
         }
 
         if (!decision.InstallRequested)
@@ -1203,7 +1202,8 @@ public sealed partial class MainForm : Form, IMessageFilter
     private void RefreshStatusColours()
     {
         UpdateCaptureStatus();
-        ApplyTrustState();
+        // Repainting from the cached answer: this runs on the UI thread after every theme change.
+        ApplyTrustState(refreshInBackground: true);
         _selectedSessionDetailsLabel.ForeColor = Palette.TextDim;
     }
 
