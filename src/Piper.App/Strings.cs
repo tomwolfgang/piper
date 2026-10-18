@@ -754,6 +754,8 @@ internal static class Strings
         public static string VideoLoading(string? contentType) =>
             I18n.T("inspector.videoLoading", ("contentType", contentType ?? DetectedVideo));
         public static string VideoFailed(string message) => I18n.T("inspector.videoFailed", ("message", message));
+        public static string VideoNeedsRuntime => I18n.T("inspector.videoNeedsRuntime");
+        public static string VideoNotLoaded => I18n.T("inspector.videoNotLoaded");
 
         public static string NoBody => I18n.T("inspector.noBody");
         public static string Truncated => I18n.T("inspector.truncated");

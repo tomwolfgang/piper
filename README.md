@@ -287,6 +287,15 @@ Close other programs first, use `--wait-quiet 10`, and report the median and ran
   per-selection address, so Piper never writes it to disk and drops it when you select another message or
   close the inspector (the runtime keeps its own profile folder, but not a copy of the image). Without the
   runtime the tab says so. WebP cannot be converted: keep the original with Save > Response body only
+- Video tab: the response plays in the Microsoft Edge WebView2 Runtime, in the same locked-down view as
+  WebP (no scripts, downloads or navigation). Piper holds the body only in memory and never writes it to
+  disk: it answers the player's requests, including the byte-range requests it uses to seek, from that
+  memory on a private per-selection address, and drops the body when you select another message or close the
+  inspector. Piper creates no temporary file for it (older builds wrote one under
+  `%TEMP%\Piper\video-inspector`; a file left there can be deleted). What the runtime itself keeps is outside
+  Piper's control: it has its own profile folder, the player's in-memory cache may hold the fetched bytes
+  for a while after you select another message, and the response is marked `no-store` so the runtime should
+  not cache a copy on disk. Without the runtime the tab says so
 - Composer with search, raw-request editing, repeat-N, and verbatim header sending
 - Composer history grouped into collapsible hosts, repeat sends folded into one counted row, and
   the response to the last send inspectable without leaving the Composer. Which hosts you have

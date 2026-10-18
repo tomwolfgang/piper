@@ -553,6 +553,8 @@
     "videoLoadedNoContentType": "Video loaded from response bytes (no Content-Type)",
     "videoLoading": "{{contentType}}\nLoading the embedded media player...",
     "videoFailed": "Could not load the video player: {{message}}",
+    "videoNeedsRuntime": "Showing video needs the Microsoft Edge WebView2 Runtime.",
+    "videoNotLoaded": "Could not load the video player.",
 
     "noBody": "(no body)",
     "truncated": "\n\n[truncated]",

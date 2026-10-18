@@ -40,14 +40,29 @@ internal static class InspectorSaveTests
             check(TextOf(inspector).Contains("7 x 5 px"), "setup: the dropped image is on screen while another session is selected");
 
             typeof(MessageInspector).GetMethod("SaveCurrentImage", Instance)!.Invoke(inspector, ["png"]);
-            pumpUntil(() => File.Exists(target) && new FileInfo(target).Length > 0);
+            // Until the file decodes, not merely exists: a file written in pieces is not an image yet.
+            Size? saved = null;
+            pumpUntil(() => (saved = TryDecode(target)) is not null);
             check(asked == "png", "the save asks for the requested format");
-            using var saved = File.Exists(target) ? new Bitmap(target) : null;
             check(saved is { Width: 7, Height: 5 }, $"the saved file is the dropped 7 x 5 image (got {saved?.Width} x {saved?.Height})");
         }
         finally
         {
             Directory.Delete(folder, recursive: true);
+        }
+    }
+
+    private static Size? TryDecode(string path)
+    {
+        try
+        {
+            using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+            using var image = Image.FromStream(stream);
+            return image.Size;
+        }
+        catch (Exception ex) when (ex is IOException or ArgumentException or OutOfMemoryException or UnauthorizedAccessException)
+        {
+            return null; // not there yet, still being written, or not a whole image yet
         }
     }
 

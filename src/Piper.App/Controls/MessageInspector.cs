@@ -43,7 +43,7 @@ public sealed class MessageInspector : UserControl
     private readonly Label? _imageStatus;
     private readonly Button? _imageTryAnyway;
     private readonly Panel? _imageForcePanel;
-    private readonly WebView2? _videoView;
+    private readonly VideoView? _videoView;
     private readonly Label? _videoStatus;
     private readonly Button? _videoTryAnyway;
     private readonly Panel? _videoForcePanel;
@@ -61,7 +61,6 @@ public sealed class MessageInspector : UserControl
     private HttpMessage? _renderedVideo;
     private HttpMessage? _droppedImage;
     private HttpMessage? _droppedVideo;
-    private string? _videoFilePath;
     // A node's tree path (child index at each level) is kept for a match, because a match in a
     // collapsed branch has no TreeNode until the path to it is expanded.
     private readonly List<int[]> _jsonMatches = [];
@@ -78,8 +77,9 @@ public sealed class MessageInspector : UserControl
 
     /// <param name="startWebpView">Starts the WebP preview's WebView2; a test seam, null for the real one.</param>
     /// <param name="chooseImageSavePath">Replaces the Save image dialog: gets the requested format (null for any) and returns the file to write, or null to cancel. A test seam, null for the real dialog.</param>
+    /// <param name="startVideoView">Starts the video preview's WebView2; a test seam, null for the real one.</param>
     public MessageInspector(string caption, bool showImageViewer = false, bool showWebForms = false, Func<WebView2, Task>? startWebpView = null,
-        Func<string?, string?>? chooseImageSavePath = null)
+        Func<string?, string?>? chooseImageSavePath = null, Func<WebView2, Task>? startVideoView = null)
     {
         _startWebpView = startWebpView;
         _chooseImageSavePath = chooseImageSavePath;
@@ -357,7 +357,7 @@ public sealed class MessageInspector : UserControl
             };
             _videoTryAnyway.Click += (_, _) => TryRenderVideo();
             _videoForcePanel = BuildForcePanel(_videoTryAnyway);
-            _videoView = new WebView2 { Dock = DockStyle.Fill, DefaultBackgroundColor = Palette.Surface };
+            _videoView = new VideoView(startVideoView);
         }
 
         _tabs = new DarkTabControl { Dock = DockStyle.Fill, Font = Palette.UiFont };
@@ -1280,66 +1280,31 @@ public sealed class MessageInspector : UserControl
 
         if (_videoForcePanel is not null) _videoForcePanel.Visible = false;
         ClearVideo();
-        var decodedBody = message.DecodedBody;
-        var extension = VideoExtensionFor(contentType, decodedBody);
-        var folder = Path.Combine(Path.GetTempPath(), "Piper", "video-inspector");
-        var path = Path.Combine(folder, $"{Guid.NewGuid():N}{extension}");
+        _videoStatus.Text = Strings.Inspector.VideoLoading(contentType);
         try
         {
-            Directory.CreateDirectory(folder);
-            File.WriteAllBytes(path, decodedBody);
-            _videoFilePath = path;
-            _videoStatus.Text = Strings.Inspector.VideoLoading(contentType);
+            // View-only: the body is served from memory to a locked-down WebView2, never written out; see VideoView.
+            var result = await _videoView.ShowAsync(message.DecodedBody, contentType);
+            if (result == VideoShowResult.Superseded || IsDisposed) return;
 
-            await _videoView.EnsureCoreWebView2Async();
-            if (_videoFilePath != path
-                || (!ReferenceEquals(_message, message) && !ReferenceEquals(_droppedVideo, message))) return;
-
-            _videoView.Source = new Uri(path);
-            _videoStatus.Text = contentType ?? Strings.Inspector.VideoLoadedNoContentType;
+            _videoStatus.Text = result switch
+            {
+                VideoShowResult.Shown => contentType ?? Strings.Inspector.VideoLoadedNoContentType,
+                VideoShowResult.RuntimeUnavailable => Strings.Inspector.VideoNeedsRuntime,
+                _ => Strings.Inspector.VideoNotLoaded,
+            };
         }
         catch (Exception ex)
         {
-            if (_videoFilePath == path) _videoFilePath = null;
-            TryDeleteFile(path);
-            _videoStatus.Text = Strings.Inspector.VideoFailed(ex.Message);
+            if (!IsDisposed) _videoStatus.Text = Strings.Inspector.VideoFailed(ex.Message);
         }
     }
 
     private void ClearVideo()
     {
-        if (_videoView?.CoreWebView2 is not null) _videoView.CoreWebView2.Navigate("about:blank");
-        if (_videoFilePath is { } path) TryDeleteFile(path);
-        _videoFilePath = null;
+        _videoView?.Clear();
         if (_videoStatus is not null) _videoStatus.Text = string.Empty;
         if (_videoForcePanel is not null) _videoForcePanel.Visible = false;
-    }
-
-    private static void TryDeleteFile(string path)
-    {
-        try { if (File.Exists(path)) File.Delete(path); }
-        catch (IOException) { }
-        catch (UnauthorizedAccessException) { }
-    }
-
-    private static string VideoExtensionFor(string? contentType, byte[] bytes)
-    {
-        var declared = contentType?.Split(';')[0].Trim().ToLowerInvariant() switch
-        {
-            "video/mp4" => ".mp4",
-            "video/webm" => ".webm",
-            "video/ogg" => ".ogv",
-            "video/quicktime" => ".mov",
-            "video/x-msvideo" => ".avi",
-            _ => null,
-        };
-        if (declared is not null) return declared;
-        if (bytes.Length >= 12 && bytes.AsSpan(4, 4).SequenceEqual("ftyp"u8)) return ".mp4";
-        if (bytes.Length >= 4 && bytes.AsSpan(0, 4).SequenceEqual("OggS"u8)) return ".ogv";
-        if (bytes.Length >= 4 && bytes.AsSpan(0, 4).SequenceEqual(new byte[] { 0x1A, 0x45, 0xDF, 0xA3 })) return ".webm";
-        if (bytes.Length >= 12 && bytes.AsSpan(0, 4).SequenceEqual("RIFF"u8)
-            && bytes.AsSpan(8, 4).SequenceEqual("AVI "u8)) return ".avi";
-        return ".video";
     }
 
     private static string RenderRaw(HttpMessage message)
