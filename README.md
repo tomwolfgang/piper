@@ -75,12 +75,22 @@ existing proxy settings are saved and restored when you turn it off or close the
 
 ### HTTPS
 
-Decrypting HTTPS needs the generated root CA trusted, via **Tools > Trust root
-certificate**. Read the dialog before accepting: the private key sits unencrypted in
+Decrypting HTTPS needs the generated root CA trusted, via **Tools > Configurations > HTTPS >
+Trust root certificate**. Read the dialog before accepting: the private key sits unencrypted in
 `%LOCALAPPDATA%\Piper\Certificates`, so anything able to read it can impersonate any
-TLS site to your Windows account. **Tools > Remove trusted root certificate** reverses it.
+TLS site to your Windows account. **Remove trusted root** on the same page reverses it (after a
+confirmation), and that page shows whether the root is trusted right now.
 
-Nothing installs the root implicitly - it is only ever a deliberate menu action.
+Nothing installs the root implicitly - it is only ever a deliberate click. While the root is not
+trusted Piper still captures plain HTTP and passes HTTPS through unread, and the status bar and a
+bar under the toolbar say so (**HTTPS: Not decrypted**; click either to trust the root). At startup an
+untrusted root brings up a prompt with **Install certificate**, **Not now** and **Don't ask again**;
+the last one is undone with **Configurations > HTTPS > Ask to trust the Piper certificate when Piper
+starts**. HTTPS is decrypted only while **Decrypt HTTPS traffic** is on and the root is trusted. Clients
+that do not use the Windows store (Firefox, Java, Node, curl --cacert, devices) can still be decrypted
+once you install the certificate in them: turn on **Configurations > HTTPS > Decrypt HTTPS even when
+Windows does not trust the Piper certificate** (off by default; a client that does not trust the
+certificate then fails its handshake, and the status bar says so).
 
 Piper validates each origin server's certificate by default, the same as a browser would. If you
 need to reach a known origin whose certificate doesn't validate (self-signed, expired, or a

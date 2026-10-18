@@ -10,6 +10,7 @@ internal static class TrustStateTests
     public static async Task RunAsync(TestRunner runner)
     {
         await RunSuspendedOptionAsync(runner);
+        await RunRemoveConfirmationAsync(runner);
         await RunStoreReadDisposesAsync(runner);
         await RunCachedCheckAsync(runner);
     }
@@ -25,6 +26,21 @@ internal static class TrustStateTests
             "the suspension is never saved");
         options.DecryptionSuspended = false;
         runner.IsTrue(options.ShouldDecrypt("example.test"), "and decryption resumes when it is lifted");
+        return Task.CompletedTask;
+    });
+
+    private static Task RunRemoveConfirmationAsync(TestRunner runner) => runner.RunAsync("removing the root needs a confirmation, and declining removes nothing", () =>
+    {
+        var removals = 0;
+        var declined = RootRemoval.RemoveIfConfirmed(() => false, () => { removals++; return 1; });
+        runner.IsTrue(declined is null && removals == 0, "declining runs no removal and reports none");
+
+        var confirmed = RootRemoval.RemoveIfConfirmed(() => true, () => { removals++; return 2; });
+        runner.IsTrue(confirmed == 2 && removals == 1, "confirming runs the removal once and reports its count");
+
+        var asked = 0;
+        _ = RootRemoval.RemoveIfConfirmed(() => { asked++; return false; }, () => 0);
+        runner.AreEqual(1, asked, "the user is asked exactly once");
         return Task.CompletedTask;
     });
 

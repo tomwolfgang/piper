@@ -37,7 +37,7 @@ public sealed partial class MainForm
         _httpsStatusLabel.Click += (_, _) =>
         {
             if (_httpsState == HttpsState.NotTrusted) TrustRootCertificate();
-            else ShowConfigurations();
+            else ShowConfigurations(httpsTab: true);
         };
 
         // After the capture state and process scope: the controls that describe what is captured.

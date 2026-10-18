@@ -11,6 +11,13 @@ public sealed class ConfigurationsDialog : Form
     private CheckBox _wheelZoom = null!;
     private ComboBox _captureScope = null!;
     private CheckBox _decryptHttps = null!;
+    private CheckBox _askToTrust = null!;
+    private CheckBox _decryptWhenUntrusted = null!;
+    private DarkTabControl _tabs = null!;
+    private Label _trustStatus = null!;
+    private readonly Func<bool> _isCertificateTrusted;
+    // What is saved, not what the boxes say now: the status line describes what Piper does at this moment.
+    private readonly bool _savedDecryptsWhenUntrusted;
     private CheckBox _http2Downstream = null!;
     private CheckBox _http2Upstream = null!;
     private CheckBox _http3Upstream = null!;
@@ -20,8 +27,10 @@ public sealed class ConfigurationsDialog : Form
     public ConfigurationsDialog(ProxyOptions options, bool captureOnStartup, string captureScope,
         bool wheelZoom, bool analyticsEnabled,
         Action trustRoot, Action removeTrustedRoot, Action exportRoot, Action openCertificateFolder,
-        Action openAnalyticsFolder)
+        Action openAnalyticsFolder, Func<bool> isCertificateTrusted)
     {
+        _isCertificateTrusted = isCertificateTrusted;
+        _savedDecryptsWhenUntrusted = options.DecryptHttps && options.DecryptWhenUntrusted;
         Text = Strings.Configurations.Caption;
         StartPosition = FormStartPosition.CenterParent;
         FormBorderStyle = FormBorderStyle.FixedDialog;
@@ -30,7 +39,7 @@ public sealed class ConfigurationsDialog : Form
         MaximizeBox = false;
         ShowInTaskbar = false;
 
-        var tabs = new DarkTabControl { Dock = DockStyle.Fill, Font = Palette.UiFont };
+        var tabs = _tabs = new DarkTabControl { Dock = DockStyle.Fill, Font = Palette.UiFont };
         tabs.TabPages.Add(CreateGeneralPage(captureOnStartup, captureScope, wheelZoom));
         tabs.TabPages.Add(CreateHttpsPage(options, trustRoot, removeTrustedRoot, exportRoot, openCertificateFolder));
         tabs.TabPages.Add(CreatePrivacyPage(analyticsEnabled, openAnalyticsFolder));
@@ -60,7 +69,12 @@ public sealed class ConfigurationsDialog : Form
         AcceptButton = save;
         CancelButton = cancel;
         Palette.Apply(this);
+        // After the theme walk, which resets label colours.
+        RefreshTrustStatus();
     }
+
+    /// <summary>Opens on the HTTPS tab, where the certificate controls are.</summary>
+    public void SelectHttpsTab() => _tabs.SelectedIndex = 1;
 
     public bool CaptureOnStartup => _captureOnStartup.Checked;
 
@@ -74,6 +88,8 @@ public sealed class ConfigurationsDialog : Form
     public void ApplyTo(ProxyOptions options)
     {
         options.DecryptHttps = _decryptHttps.Checked;
+        options.AskToTrustCertificate = _askToTrust.Checked;
+        options.DecryptWhenUntrusted = _decryptWhenUntrusted.Checked;
         options.EnableHttp2Downstream = _http2Downstream.Checked;
         options.EnableHttp2Upstream = _http2Upstream.Checked;
         options.EnableHttp3Upstream = _http3Upstream.Checked;
@@ -181,6 +197,10 @@ public sealed class ConfigurationsDialog : Form
 
         _decryptHttps = AddOption(panel, Strings.Configurations.DecryptHttps, options.DecryptHttps,
             Strings.Configurations.DecryptHttpsNote);
+        _askToTrust = AddOption(panel, Strings.Configurations.AskToTrust, options.AskToTrustCertificate,
+            Strings.Configurations.AskToTrustNote, descriptionMaxWidth: 560);
+        _decryptWhenUntrusted = AddOption(panel, Strings.Configurations.DecryptWhenUntrusted, options.DecryptWhenUntrusted,
+            Strings.Configurations.DecryptWhenUntrustedNote, descriptionMaxWidth: 560);
         _http2Downstream = AddOption(panel, Strings.Configurations.Http2Downstream, options.EnableHttp2Downstream,
             Strings.Configurations.Http2DownstreamNote);
         _http2Upstream = AddOption(panel, Strings.Configurations.Http2Upstream, options.EnableHttp2Upstream,
@@ -196,7 +216,7 @@ public sealed class ConfigurationsDialog : Form
         {
             Text = Strings.Configurations.CertificatesGroup,
             Width = 590,
-            Height = 118,
+            Height = 172,
             Margin = new Padding(0, 14, 0, 0),
         };
         var actions = new FlowLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(8) };
@@ -204,11 +224,24 @@ public sealed class ConfigurationsDialog : Form
         actions.Controls.Add(new Button { Text = Strings.Configurations.RemoveTrustedRoot, AutoSize = true });
         actions.Controls.Add(new Button { Text = Strings.Configurations.ExportRoot, AutoSize = true });
         actions.Controls.Add(new Button { Text = Strings.Configurations.OpenCertificateFolder, AutoSize = true });
-        actions.Controls[0].Click += (_, _) => trustRoot();
-        actions.Controls[1].Click += (_, _) => removeTrustedRoot();
+        // The status line is read again after each action: Trust and Remove change it at once, and
+        // they take effect at once whether or not this dialog is later saved.
+        actions.Controls[0].Click += (_, _) => { trustRoot(); RefreshTrustStatus(); };
+        actions.Controls[1].Click += (_, _) => { removeTrustedRoot(); RefreshTrustStatus(); };
         actions.Controls[2].Click += (_, _) => exportRoot();
         actions.Controls[3].Click += (_, _) => openCertificateFolder();
+        _trustStatus = new Label { Dock = DockStyle.Top, Height = 30, Padding = new Padding(8, 8, 8, 0) };
+        var actionsNote = new Label
+        {
+            Dock = DockStyle.Bottom,
+            Height = 28,
+            Padding = new Padding(8, 0, 8, 0),
+            Text = Strings.Configurations.CertificateActionsNote,
+            ForeColor = Palette.TextDim,
+        };
         certificates.Controls.Add(actions);
+        certificates.Controls.Add(_trustStatus);
+        certificates.Controls.Add(actionsNote);
         panel.Controls.Add(certificates);
 
         page.Controls.Add(panel);
@@ -260,6 +293,16 @@ public sealed class ConfigurationsDialog : Form
 
         page.Controls.Add(panel);
         return page;
+    }
+
+    /// <summary>Shows whether Windows trusts the Piper root right now.</summary>
+    private void RefreshTrustStatus()
+    {
+        var trusted = _isCertificateTrusted();
+        _trustStatus.Text = trusted ? Strings.Configurations.CertificateTrusted
+            : _savedDecryptsWhenUntrusted ? Strings.Configurations.CertificateNotTrustedDecrypting
+            : Strings.Configurations.CertificateNotTrusted;
+        _trustStatus.ForeColor = trusted ? Palette.StatusOk : Palette.StatusClientError;
     }
 
     private static CheckBox AddOption(FlowLayoutPanel panel, string text, bool value, string description,
