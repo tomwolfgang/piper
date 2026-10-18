@@ -53,7 +53,7 @@ internal static class TlsFailureCollapseTests
 
         await runner.RunAsync("aggregator: a client the store does not admit cannot use up the allowance of the ones it does", () =>
         {
-            var (store, _, aggregator) = Make();
+            var (store, clock, aggregator) = Make();
             store.CaptureFilter = session => session.ProcessName != "excluded.exe";
             for (var i = 0; i < 50; i++) Fail(aggregator, "excluded.exe", "same.test");
             for (var i = 0; i < 30; i++) Fail(aggregator, "excluded.exe", $"other{i}.test");
@@ -61,6 +61,13 @@ internal static class TlsFailureCollapseTests
             var rows = Rows(store);
             runner.IsTrue(rows.All(r => r.ProcessName == "p.exe" && !r.TlsFailure!.IsOverflow), "no row for the excluded client and none of the overflow kind");
             runner.AreEqual(TlsFailureAggregator.MaxNewRowsPerWindow, rows.Length, "and each in-scope host still gets a row of its own");
+
+            store.CaptureFilter = null; // the scope is widened to include it
+            Fail(aggregator, "excluded.exe", "same.test");
+            runner.AreEqual(TlsFailureAggregator.MaxNewRowsPerWindow, Rows(store).Length, "within the window it is still declined");
+            clock.Advance(TimeSpan.FromSeconds(11));
+            Fail(aggregator, "excluded.exe", "same.test");
+            runner.IsTrue(Rows(store).Any(r => r.ProcessName == "excluded.exe"), "a window later the store is asked again, and it gets its row");
             return Task.CompletedTask;
         });
 
