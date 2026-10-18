@@ -842,7 +842,7 @@ public sealed class ProxyServer : IAsyncDisposable
         var established = Stopwatch.GetTimestamp();
         if (ssl.NegotiatedApplicationProtocol == SslApplicationProtocol.Http2)
         {
-            await RunHttp2Async(ssl, clientEndpoint, processName, ct).ConfigureAwait(false);
+            await RunHttp2Async(ssl, connect, host, port, clientEndpoint, processName, established, ct).ConfigureAwait(false);
             return;
         }
 
@@ -1014,7 +1014,9 @@ public sealed class ProxyServer : IAsyncDisposable
     /// <summary>Runs one browser-facing HTTP/2 connection. Each stream is forwarded independently
     /// (see <see cref="Http2RequestForwarder"/>) and recorded as its own <see cref="Session"/>,
     /// exactly like an HTTP/1.1 request -- the multiplexing is invisible below this point.</summary>
-    private async Task RunHttp2Async(SslStream ssl, string clientEndpoint, Task<string> processName, CancellationToken ct)
+    private async Task RunHttp2Async(
+        SslStream ssl, HttpRequestData connect, string host, int port, string clientEndpoint, Task<string> processName,
+        long established, CancellationToken ct)
     {
         var connection = new Http2Connection(ssl,
             async (request, streamCt) => await Http2RequestForwarder.ForwardAsync(
@@ -1026,9 +1028,18 @@ public sealed class ProxyServer : IAsyncDisposable
         try
         {
             await connection.RunAsync(ct).ConfigureAwait(false);
+            // The peer ended it, having opened no stream: no request was ever made.
+            if (connection is { OpenedStream: false, EndedByPeer: true })
+                await RecordAfterHandshakeAsync(ssl, connect, host, port, clientEndpoint, processName, established, connection.ReadFailure, ct).ConfigureAwait(false);
         }
         catch (OperationCanceledException) { }
-        catch (IOException ex) { Log?.Invoke(this, $"HTTP/2 IO error from {clientEndpoint}: {ex.GetType().Name}: {ex.Message}"); }
+        catch (IOException ex)
+        {
+            Log?.Invoke(this, $"HTTP/2 IO error from {clientEndpoint}: {ex.GetType().Name}: {ex.Message}");
+            // Before the preface was complete, or a reset before any stream: nothing was requested.
+            if (!connection.OpenedStream)
+                await RecordAfterHandshakeAsync(ssl, connect, host, port, clientEndpoint, processName, established, ex, ct).ConfigureAwait(false);
+        }
         catch (Http2ProtocolException ex) { Log?.Invoke(this, $"HTTP/2 protocol error from {clientEndpoint}: {ex.Message}"); }
         catch (Exception ex) { Log?.Invoke(this, $"HTTP/2 unexpected error from {clientEndpoint}: {ex.GetType().Name}: {ex.Message}"); }
         finally

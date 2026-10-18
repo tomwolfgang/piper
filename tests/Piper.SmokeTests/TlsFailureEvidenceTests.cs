@@ -214,11 +214,11 @@ internal static class TlsFailureEvidenceTests
     private static AuthenticationException Alert(string name) =>
         new($"Authentication failed because the remote party sent a TLS alert: '{name}'.", new Win32Exception(unchecked((int)0x80090326)));
 
-    internal static SslClientAuthenticationOptions Client(string host, SslProtocols protocols, bool accept) => new()
+    internal static SslClientAuthenticationOptions Client(string host, SslProtocols protocols, bool accept, SslApplicationProtocol? alpn = null) => new()
     {
         TargetHost = host,
         EnabledSslProtocols = protocols,
-        ApplicationProtocols = [SslApplicationProtocol.Http11],
+        ApplicationProtocols = [alpn ?? SslApplicationProtocol.Http11],
         RemoteCertificateValidationCallback = (_, _, _, _) => accept,
     };
 

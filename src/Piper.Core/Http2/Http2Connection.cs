@@ -185,6 +185,21 @@ public sealed class Http2Connection(Stream stream, Func<HttpRequestData, Cancell
     /// taken in everything a peer sent while its writer was held.</summary>
     internal int PendingControlFrames => Volatile.Read(ref _pendingControlFrames);
 
+    /// <summary>True once the peer has opened a stream, whatever became of it. A connection that ends
+    /// with this false never carried a request.</summary>
+    internal bool OpenedStream => Volatile.Read(ref _highestStreamId) != 0;
+
+    private volatile bool _endedByPeer;
+    private IOException? _readFailure;
+
+    /// <summary>True when the reader loop ended because the peer closed the connection or the read
+    /// failed, as opposed to a protocol error, a stop or the idle watchdog.</summary>
+    internal bool EndedByPeer => _endedByPeer;
+
+    /// <summary>The IOException that ended the reader loop, if one did (a reset, a record the peer's
+    /// TLS stack would not let through); null for a clean close. Read after <see cref="RunAsync"/>.</summary>
+    internal IOException? ReadFailure => Volatile.Read(ref _readFailure);
+
     /// <summary>Whether something other than the reader has already decided to end the connection.</summary>
     internal bool IsClosing => Volatile.Read(ref _closeReason) != NoCloseReason;
 
@@ -425,7 +440,11 @@ public sealed class Http2Connection(Stream stream, Func<HttpRequestData, Cancell
                 }
 
                 var frame = await Http2FrameReader.ReadAsync(stream, _localSettings.MaxFrameSize, readCt).ConfigureAwait(false);
-                if (frame is null) return; // peer closed cleanly
+                if (frame is null)
+                {
+                    _endedByPeer = true; // peer closed cleanly
+                    return;
+                }
                 Volatile.Write(ref _lastActivityTicks, Environment.TickCount64);
                 DispatchFrame(frame.Value);
             }
@@ -440,7 +459,12 @@ public sealed class Http2Connection(Stream stream, Func<HttpRequestData, Cancell
                 return;
             }
             catch (OperationCanceledException) { return; }
-            catch (IOException) { return; } // includes EndOfStreamException
+            catch (IOException ex) // includes EndOfStreamException
+            {
+                Volatile.Write(ref _readFailure, ex);
+                _endedByPeer = true;
+                return;
+            }
         }
     }
 
