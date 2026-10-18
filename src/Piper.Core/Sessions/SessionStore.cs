@@ -225,6 +225,16 @@ public sealed class SessionStore
         }
     }
 
+    /// <summary>
+    /// True while the session is in the store: added, and not since trimmed for capacity, removed or
+    /// cleared. O(1). Lets code that keeps a reference to a row it updates later (the TLS failure
+    /// aggregator) tell that the row is gone and a fresh one is due, instead of updating it unseen.
+    /// </summary>
+    public bool IsRetained(Session session)
+    {
+        lock (_gate) return _countedBodyBytes.ContainsKey(session);
+    }
+
     public Session? FindById(int id)
     {
         lock (_gate)

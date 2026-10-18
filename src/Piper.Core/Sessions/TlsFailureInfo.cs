@@ -52,8 +52,15 @@ public sealed record TlsFailureInfo(
     /// <summary>The client's SNI when it is a plain host name (see <c>TlsFailureClassifier.SanitizeSni</c>), else null.</summary>
     public string? Sni { get; init; }
 
-    /// <summary>How many failures this evidence stands for. Always 1 until repeats are collapsed.</summary>
+    /// <summary>How many failures this evidence stands for: 1 for a fresh row, more once repeats from the same
+    /// process to the same host and port, with the same kind, are collapsed into it.</summary>
     public int Attempts { get; init; } = 1;
 
+    /// <summary>When the latest of those failures happened. The session's own start and completion stay
+    /// those of the first one.</summary>
     public DateTimeOffset LastSeen { get; init; }
+
+    /// <summary>True for the one row per process that counts failures the new-row limit kept from getting
+    /// rows of their own. It stands for many hosts and kinds, so its kind says nothing and its request has no host.</summary>
+    public bool IsOverflow { get; init; }
 }
