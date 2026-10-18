@@ -154,6 +154,7 @@ public sealed partial class MainForm : Form, IMessageFilter
             out _breakpointsLabel, out _sessionsLabel, out _selectedSessionDetailsLabel, out _zoomLabel);
         _captureStatusLabel.Click += (_, _) => ToggleCapture();
         _captureScopeLabel.Click += (_, _) => ShowCaptureScopeMenu();
+        var trustBar = BuildTrustUi(statusBar);
         ApplyCaptureScope();
         _rightTabs.AllowDrop = true;
         _rightTabs.DragEnter += OnSessionDragEnter;
@@ -161,6 +162,7 @@ public sealed partial class MainForm : Form, IMessageFilter
         _rightTabs.DragDrop += OnSessionDragDrop;
 
         Controls.Add(split);
+        Controls.Add(trustBar);
         Controls.Add(toolbar);
         Controls.Add(BuildMenu());
         Controls.Add(statusBar);
@@ -1181,6 +1183,10 @@ public sealed partial class MainForm : Form, IMessageFilter
         _sessionsLabel.Image = SessionsIcon;
         RefreshStatusColours();
 
+        // UpdateCaptureStatus returns early while a capture toggle is in progress, which left the
+        // label showing an icon that is disposed just below.
+        StatusImages.Retarget(_captureStatusLabel, (oldCaptureOn, CaptureOnIcon), (oldCaptureOff, CaptureOffIcon));
+
         oldCaptureOn.Dispose();
         oldCaptureOff.Dispose();
         oldScope.Dispose();
@@ -1195,6 +1201,7 @@ public sealed partial class MainForm : Form, IMessageFilter
     private void RefreshStatusColours()
     {
         UpdateCaptureStatus();
+        ApplyTrustState();
         _selectedSessionDetailsLabel.ForeColor = Palette.TextDim;
     }
 

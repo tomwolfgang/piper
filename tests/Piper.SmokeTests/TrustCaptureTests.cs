@@ -29,6 +29,14 @@ internal static class TrustCaptureTests
         runner.IsTrue(Text(HttpsState.DecryptingUntrusted).Contains("clients must trust it themselves", StringComparison.Ordinal),
             "decrypting without Windows trust says the clients carry the trust");
         runner.IsTrue(Text(HttpsState.Off).Contains("decryption off", StringComparison.Ordinal), "a switched-off option is reported as off");
+
+        var labels = Enum.GetValues<HttpsState>().Select(Strings.StatusBar.HttpsLabel).ToList();
+        runner.AreEqual(4, labels.Distinct().Count(), "the four HTTPS states read differently in the status bar");
+        runner.IsTrue(Strings.StatusBar.HttpsLabel(HttpsState.NotTrusted).Contains("Not decrypted", StringComparison.Ordinal), "the untrusted state says HTTPS is not decrypted");
+        runner.IsTrue(labels.Where((_, i) => (HttpsState)i is HttpsState.NotTrusted or HttpsState.Off).All(l => !l.Contains("Decrypting", StringComparison.Ordinal)),
+            "a state that tunnels HTTPS unread never says Decrypting");
+        runner.IsTrue(Strings.StatusBar.HttpsLabel(HttpsState.DecryptingUntrusted).Contains("clients must trust", StringComparison.Ordinal),
+            "decrypting without Windows trust says the clients carry the trust");
         return Task.CompletedTask;
     });
 
