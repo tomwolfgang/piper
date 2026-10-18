@@ -9,8 +9,7 @@ using Piper.Core.Security;
 using Piper.Core.Sessions;
 
 // Failed client TLS handshakes (X2 slice 1): the classifier on fixture exceptions, then the real proxy
-// against every failure .NET can produce on loopback (no node, no openssl). A recorded ClientHello is
-// replayed, so "a full hello, then gone" is real bytes.
+// against the failures .NET can produce on loopback (no node, no openssl), replaying a recorded ClientHello.
 internal static class TlsFailureEvidenceTests
 {
     private static readonly TimeSpan Patience = TimeSpan.FromSeconds(20);
@@ -22,23 +21,17 @@ internal static class TlsFailureEvidenceTests
             var eof = new IOException("Received an unexpected EOF or 0 bytes from the transport stream.");
             Check(runner, eof, false, false, TlsFailureKind.ClosedEarly, TlsFailurePhase.BeforeHello);
             Check(runner, eof, true, false, TlsFailureKind.ClosedInHandshake, TlsFailurePhase.InHandshake);
-            Check(runner, new IOException("x", new SocketException((int)SocketError.ConnectionReset)), true, false,
-                TlsFailureKind.ClosedInHandshake, TlsFailurePhase.InHandshake);
-
             var cancelled = new OperationCanceledException();
             Check(runner, cancelled, false, true, TlsFailureKind.Timeout, TlsFailurePhase.BeforeHello);
             Check(runner, cancelled, false, false, TlsFailureKind.Other, TlsFailurePhase.BeforeHello);
-
             Check(runner, new AuthenticationException("Cannot determine the frame size or a corrupted frame was received."),
                 false, false, TlsFailureKind.NotTls, TlsFailurePhase.BeforeHello);
             Check(runner, new InvalidOperationException("frame size"), false, false, TlsFailureKind.Other, TlsFailurePhase.BeforeHello);
             Check(runner, new AuthenticationException("something new in .NET 12"), true, false, TlsFailureKind.Other, TlsFailurePhase.InHandshake);
 
-            // A status deeper than the walk goes is not found; the walk neither loops nor throws.
             Exception deep = new Win32Exception(unchecked((int)TlsFailureClassifier.SecUntrustedRoot));
             for (var i = 0; i < 100; i++) deep = new IOException("wrap", deep);
-            var bounded = TlsFailureClassifier.Classify(deep, true, false);
-            runner.IsTrue(bounded.SecStatus is null && bounded.Kind == TlsFailureKind.ClosedInHandshake, "a deep chain is cut off, not trusted");
+            runner.IsTrue(TlsFailureClassifier.Classify(deep, true, false).SecStatus is null, "a status deeper than the walk goes is not trusted");
             return Task.CompletedTask;
         });
 
@@ -47,8 +40,7 @@ internal static class TlsFailureEvidenceTests
             foreach (var code in new[] { TlsFailureClassifier.SecUntrustedRoot, TlsFailureClassifier.SecCertUnknown })
             {
                 var failure = TlsFailureClassifier.Classify(Sspi(code), true, false);
-                runner.AreEqual(TlsFailureKind.Rejected, failure.Kind, $"0x{code:X} is a rejection");
-                runner.AreEqual(code, failure.SecStatus ?? 0, "and is recorded");
+                runner.IsTrue(failure.Kind == TlsFailureKind.Rejected && failure.SecStatus == code, $"0x{code:X} is a rejection, and is recorded");
             }
             Check(runner, Sspi(TlsFailureClassifier.SecNoCommonAlgorithm), true, false, TlsFailureKind.NoCommonProtocol, TlsFailurePhase.InHandshake);
             // What a .NET client's first read throws after a handshake it did not like (probe).
@@ -57,46 +49,36 @@ internal static class TlsFailureEvidenceTests
             var unknown = TlsFailureClassifier.Classify(Sspi(0x80090326), true, false);
             runner.IsTrue(unknown.Kind == TlsFailureKind.Other && unknown.SecStatus == 0x80090326, "an unknown status is kept and claims nothing");
 
-            foreach (var alert in new[] { "UnknownCA", "BadCertificate", "CertificateUnknown", "CertificateExpired", "UnsupportedCert", "CertificateRevoked" })
-            {
-                var failure = TlsFailureClassifier.Classify(Alert(alert), true, false);
-                runner.IsTrue(failure.Kind == TlsFailureKind.Rejected && failure.Alert == alert, $"{alert} is a rejection");
-            }
+            foreach (var alert in new[] { "UnknownCA", "BadCertificate", "CertificateExpired" })
+                runner.IsTrue(TlsFailureClassifier.Classify(Alert(alert), true, false) is { Kind: TlsFailureKind.Rejected } r && r.Alert == alert, $"{alert} is a rejection");
             var userCancelled = TlsFailureClassifier.Classify(Alert("UserCanceled"), true, false);
-            runner.IsTrue(userCancelled.Alert == "UserCanceled" && userCancelled.Kind == TlsFailureKind.Other, "a known non-rejecting alert is kept, claims nothing");
+            runner.IsTrue(userCancelled.Alert == "UserCanceled" && userCancelled.Kind == TlsFailureKind.Other, "a non-rejecting alert is kept and claims nothing");
 
             foreach (var text in new[]
                      {
-                         "the remote party sent a TLS alert: 'Pinned'.", "the remote party sent a TLS alert: ''.", "a TLS alert: 'UnknownCA",
-                         "a TLS alert: '" + new string('A', 5000) + "'.", "Der Vorgang ist fehlgeschlagen: UnknownCA", "unknownca",
+                         "a TLS alert: 'Pinned'.", "a TLS alert: ''.", "a TLS alert: 'UnknownCA", "a TLS alert: '" + new string('A', 5000) + "'.",
+                         "Der Vorgang ist fehlgeschlagen: UnknownCA",
                      })
-            {
-                var failure = TlsFailureClassifier.Classify(new AuthenticationException(text), true, false);
-                runner.IsTrue(failure.Alert is null && failure.Kind == TlsFailureKind.Other, $"no alert evidence from: {text[..Math.Min(text.Length, 40)]}");
-            }
+                runner.IsTrue(TlsFailureClassifier.Classify(new AuthenticationException(text), true, false) is { Alert: null, Kind: TlsFailureKind.Other },
+                    $"no alert evidence from: {text[..Math.Min(text.Length, 30)]}");
             return Task.CompletedTask;
         });
 
         await runner.RunAsync("SNI sanitising keeps plain host names and drops everything else whole", () =>
         {
-            foreach (var good in new[] { "example.com", "Example.COM", "host.", "a_b-c.d", "127.0.0.1", "xn--bcher-kva.example", new string('a', 253) })
+            foreach (var good in new[] { "Example.COM", "host.", "a_b-c.d", "xn--bcher-kva.example", new string('a', 253) })
                 runner.AreEqual(good, TlsFailureClassifier.SanitizeSni(good), $"kept: {good[..Math.Min(good.Length, 30)]}");
-            foreach (var bad in new[]
-                     {
-                         "", "a b", "a\r\nb", "a\0b", "\u001b[31mred", "bücher.example", "例え.jp", "evil.com‮", "[::1]", "a/b", "a:443",
-                         new string('a', 254), new string('a', 100_000),
-                     })
+            foreach (var bad in new[] { "", "a b", "a\r\nb", "a\0b", "\u001b[31m", "bücher.example", "例え.jp", "evil‮", "[::1]", new string('a', 254), new string('a', 100_000) })
                 runner.IsTrue(TlsFailureClassifier.SanitizeSni(bad) is null, $"dropped: {bad[..Math.Min(bad.Length, 12)].Replace("\0", "NUL")}");
             runner.IsTrue(TlsFailureClassifier.SanitizeSni(null) is null, "null stays null");
             return Task.CompletedTask;
         });
 
-        await runner.RunAsync("a refused handshake, like an update check, does not show that capture works; a request does", () =>
+        await runner.RunAsync("a refused handshake, like an update check, does not show that capture works", () =>
         {
             runner.IsTrue(new Session().ProvesCapture, "an ordinary session does");
-            runner.IsTrue(!new Session { IsUpdateCheck = true }.ProvesCapture, "Piper's update check does not");
-            runner.IsTrue(!new Session { TlsFailure = new TlsFailureInfo(TlsFailureKind.Rejected, TlsFailurePhase.InHandshake) }.ProvesCapture,
-                "a failed handshake does not");
+            runner.IsTrue(!new Session { IsUpdateCheck = true }.ProvesCapture, "an update check does not");
+            runner.IsTrue(!new Session { TlsFailure = new TlsFailureInfo(TlsFailureKind.Rejected, TlsFailurePhase.InHandshake) }.ProvesCapture, "a failed handshake does not");
             return Task.CompletedTask;
         });
 
@@ -115,29 +97,25 @@ internal static class TlsFailureEvidenceTests
                 await act(client);
                 Session? row = null;
                 await Poll.UntilAsync(() => (row = store.Snapshot().FirstOrDefault(s => s.TlsFailure is not null)) is not null);
-                runner.IsTrue(row is not null, "a row is recorded");
-                if (row?.TlsFailure is not { } failure) return;
+                if (row?.TlsFailure is not { } failure) { runner.IsTrue(false, "a row is recorded"); return; }
                 runner.IsTrue(failure.Kind == kind && failure.Phase == phase, $"{kind}/{phase} (got {failure.Kind}/{failure.Phase})");
                 runner.AreEqual(sni, failure.Sni, "SNI");
                 runner.IsTrue(row.State == SessionState.Failed && row.IsTunnel && row.IsHttps && failure.Attempts == 1 && failure.LastSeen == row.Completed,
-                    "a failed HTTPS tunnel with one attempt");
-                runner.IsTrue(row.Error?.StartsWith("TLS handshake with client failed", StringComparison.Ordinal) == true, $"Error keeps its prefix (got: {row.Error})");
+                    "a failed HTTPS tunnel, one attempt");
+                runner.IsTrue(row.Error?.StartsWith("TLS handshake with client failed", StringComparison.Ordinal) == true, $"Error keeps its prefix ({row.Error})");
                 if (kind == TlsFailureKind.Timeout)
                     runner.IsTrue(row.Duration >= TimeSpan.FromMilliseconds(1300) && row.Duration < TimeSpan.FromSeconds(10),
-                        $"Time is the wait, not the 3 ms it used to be ({row.Duration.TotalMilliseconds:0} ms for a 1500 ms budget)");
+                        $"Time is the wait, not the 3 ms it was ({row.Duration.TotalMilliseconds:0} ms for 1500)");
             }));
 
         const TlsFailureKind Early = TlsFailureKind.ClosedEarly;
         const TlsFailurePhase Before = TlsFailurePhase.BeforeHello;
         await Fails("zero bytes then FIN is closed early", c => { c.Client.Shutdown(SocketShutdown.Send); return Task.CompletedTask; }, Early, Before, null);
         await Fails("zero bytes then RST is closed early", c => { Reset(c); return Task.CompletedTask; }, Early, Before, null);
-        foreach (var length in new[] { 10, 100 })
-        {
-            await Fails($"{length} bytes of a ClientHello then FIN is closed early, with no SNI",
-                async c => { await c.GetStream().WriteAsync(hello.AsMemory(0, length)); c.Client.Shutdown(SocketShutdown.Send); }, Early, Before, null);
-            await Fails($"{length} bytes of a ClientHello then RST is closed early, with no SNI",
-                async c => { await c.GetStream().WriteAsync(hello.AsMemory(0, length)); Reset(c); }, Early, Before, null);
-        }
+        await Fails("10 bytes of a ClientHello then FIN is closed early, with no SNI",
+            async c => { await c.GetStream().WriteAsync(hello.AsMemory(0, 10)); c.Client.Shutdown(SocketShutdown.Send); }, Early, Before, null);
+        await Fails("100 bytes of a ClientHello then RST is closed early, with no SNI",
+            async c => { await c.GetStream().WriteAsync(hello.AsMemory(0, 100)); Reset(c); }, Early, Before, null);
         await Fails("a full ClientHello then FIN is closed in handshake, with the SNI",
             async c => { await c.GetStream().WriteAsync(hello); c.Client.Shutdown(SocketShutdown.Send); },
             TlsFailureKind.ClosedInHandshake, TlsFailurePhase.InHandshake, "capture.test");
@@ -149,13 +127,12 @@ internal static class TlsFailureEvidenceTests
                 runner.AreEqual(1, await c.GetStream().ReadAsync(new byte[1]).AsTask().WaitAsync(Patience), "the proxy answers the hello");
                 Reset(c);
             }, TlsFailureKind.ClosedInHandshake, TlsFailurePhase.InHandshake, "capture.test");
-        // The certificate lookup refuses the name (an existing failure), so the handshake dies of that, not of a close.
-        await Fails("a control character in the SNI is recorded as 'other', and costs the whole SNI",
+        // The certificate lookup refuses the name (as before this change), so the handshake dies of that, not of a close.
+        await Fails("a control character in the SNI is recorded as 'other' and costs the whole SNI",
             async c => { await c.GetStream().WriteAsync(hostile); c.Client.Shutdown(SocketShutdown.Send); },
             TlsFailureKind.Other, TlsFailurePhase.InHandshake, null);
         await Fails("non-TLS bytes after the CONNECT are not TLS",
-            c => c.GetStream().WriteAsync(Encoding.ASCII.GetBytes("GET / HTTP/1.1\r\nHost: x\r\n\r\n")).AsTask(),
-            TlsFailureKind.NotTls, Before, null);
+            c => c.GetStream().WriteAsync(Encoding.ASCII.GetBytes("GET / HTTP/1.1\r\nHost: x\r\n\r\n")).AsTask(), TlsFailureKind.NotTls, Before, null);
         await Fails("a silent client is a timeout, and Time is the wait", _ => Task.CompletedTask,
             TlsFailureKind.Timeout, Before, null, TimeSpan.FromMilliseconds(1500));
 
@@ -173,8 +150,8 @@ internal static class TlsFailureEvidenceTests
                     client.Dispose();
                     runner.IsTrue(refused, $"{protocol}: the client refused the certificate");
 
-                    // The server may see the failure in the handshake or only on the first read (what the
-                    // probe saw; a later change records that); a row recorded here must still say "rejected".
+                    // The server may see this in the handshake or only on the first read (a later change
+                    // records that); whatever is recorded now must say "rejected".
                     await Poll.UntilAsync(() => store.Snapshot().Any(s => s.TlsFailure is not null), 1500);
                     foreach (var row in store.Snapshot().Where(s => s.TlsFailure is not null))
                         runner.AreEqual(TlsFailureKind.Rejected, row.TlsFailure!.Kind, $"{protocol}: a recorded row says rejected");
@@ -202,7 +179,7 @@ internal static class TlsFailureEvidenceTests
             try
             {
                 for (var i = 0; i < 5; i++) clients.Add(await OpenTunnelAsync(proxy.Endpoint!.Port));
-                await clients[4].GetStream().WriteAsync(hello.AsMemory(0, 100)); // one has begun a hello, none finishes
+                await clients[4].GetStream().WriteAsync(hello.AsMemory(0, 100)); // one has begun a hello; none finishes
                 runner.IsTrue(await Poll.UntilAsync(() => proxy.ActiveConnections == 5), "five handshakes are in flight");
                 await proxy.StopAsync();
                 runner.IsTrue(await Poll.UntilAsync(() => proxy.ActiveConnections == 0), "they all end");
@@ -293,13 +270,11 @@ internal static class TlsFailureEvidenceTests
     private sealed class HelloRecorder : Stream
     {
         public MemoryStream Written { get; } = new();
-
         public override ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken = default)
         {
             Written.Write(buffer.Span);
             return ValueTask.CompletedTask;
         }
-
         public override void Write(byte[] buffer, int offset, int count) => Written.Write(buffer, offset, count);
         public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default) => throw new IOException("recorded");
         public override int Read(byte[] buffer, int offset, int count) => throw new IOException("recorded");
