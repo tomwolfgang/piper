@@ -165,7 +165,7 @@
 
   "certificates": {
     "startupTrustCaption": "Trust Piper certificate",
-    "startupTrustBody": "Piper's HTTPS inspection certificate is not trusted by Windows.\n\nWithout it Piper still captures plain HTTP and passes HTTPS through unread. Install certificate adds Piper's root certificate for this Windows user and restarts Piper, so HTTPS is decrypted from then on.\n\nThis is a security-sensitive change: anything with access to Piper's private key can impersonate HTTPS sites to this Windows account. Only continue on a machine you control.\n\nNot now asks again next time. Don't ask again stops this prompt; turn it back on under Tools > Configurations > HTTPS.",
+    "startupTrustBody": "Piper's HTTPS inspection certificate is not trusted by Windows.\n\nWithout it Piper still captures plain HTTP and passes HTTPS through unread. Install certificate adds Piper's root certificate for this Windows user and restarts Piper, so HTTPS is decrypted from then on.\n\nThis is a security-sensitive change: anything with access to Piper's private key can impersonate HTTPS sites to this Windows account. Only continue on a machine you control.\n\nNot now asks again next time. Don't ask again stops this prompt.",
     "startupTrustInstall": "Install certificate",
     "startupTrustNotNow": "Not now",
     "startupTrustDontAsk": "Don't ask again",
@@ -226,7 +226,7 @@
 
     "restoredLeftoverProxy": "Restored the system proxy that a previous session left pointing at {{endpoint}}.",
     "startupDecryptionOff": "Root certificate is not trusted; capture starts with HTTPS decryption off.",
-    "startupPromptOff": "Root certificate is not trusted and the startup prompt is turned off; HTTPS is not decrypted. Turn the prompt back on under Tools > Configurations > HTTPS.",
+    "startupPromptOff": "Root certificate is not trusted and the startup prompt is turned off; HTTPS is not decrypted. Trust the certificate under Tools > Configurations > HTTPS.",
     "dontAskAgainNotSaved": "Could not save Don't ask again; the startup prompt will come back next time.",
     "rootNowTrusted": "The Piper root certificate is now trusted; HTTPS decryption follows the Decrypt HTTPS setting.",
     "rootNoLongerTrusted": "The Piper root certificate is no longer trusted; HTTPS is passed through undecrypted.",

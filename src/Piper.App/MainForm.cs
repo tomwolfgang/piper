@@ -2080,7 +2080,7 @@ public sealed partial class MainForm : Form, IMessageFilter
 
     private void UpdateStatus()
     {
-        var https = ApplyTrustState(refreshInBackground: true);
+        var https = ApplyTrustState();
         _statusLabel.Text = _proxy.IsRunning
             ? Strings.StatusBar.Listening(_proxy.Endpoint, https)
             : Strings.StatusBar.NotCapturingStatus;
