@@ -119,7 +119,7 @@ internal static class TlsAfterHandshakeTests
                     await ssl.AuthenticateAsClientAsync(TlsFailureEvidenceTests.Client("h2close.test", SslProtocols.None, accept: true, SslApplicationProtocol.Http2));
                     runner.AreEqual("h2", ssl.NegotiatedApplicationProtocol.ToString(), "h2 was negotiated");
                     if (preface) await ssl.WriteAsync(H2Preface());
-                    client.Dispose();
+                    await TlsFailureEvidenceTests.CloseGracefullyAsync(client);
                     runner.IsTrue(await Poll.UntilAsync(() => store.Snapshot().Any(s => s.TlsFailure is not null)), $"preface={preface}: a row is recorded");
                     await Task.Delay(300);
                     var rows = Rows(store);
@@ -127,7 +127,7 @@ internal static class TlsAfterHandshakeTests
                     runner.IsTrue(rows[0].TlsFailure is { Kind: TlsFailureKind.ClosedAfterHandshake, Phase: TlsFailurePhase.AfterHandshake },
                         $"preface={preface}: closed after the handshake ({rows[0].TlsFailure!.Kind})");
                     runner.AreEqual("h2close.test", rows[0].TlsFailure!.Sni, $"preface={preface}: with the SNI");
-                });
+                }, WindowOpenWide);
             }
         });
 
