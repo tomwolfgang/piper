@@ -237,7 +237,7 @@
 
     "restoredLeftoverProxy": "Restored the system proxy that a previous session left pointing at {{endpoint}}.",
     "startupDecryptionOff": "Root certificate is not trusted; capture starts with HTTPS decryption off.",
-    "startupPromptOff": "Root certificate is not trusted and the startup prompt is turned off; HTTPS is not decrypted. Turn the prompt back on under Tools > Configurations > HTTPS.",
+    "startupPromptOff": "Root certificate is not trusted and the startup prompt is turned off; HTTPS is not decrypted. Turn the prompt back on, or trust the certificate, under Tools > Configurations > HTTPS.",
     "dontAskAgainNotSaved": "Could not save Don't ask again; the startup prompt will come back next time.",
     "rootNowTrusted": "The Piper root certificate is now trusted; HTTPS decryption follows the Decrypt HTTPS setting.",
     "rootNoLongerTrusted": "The Piper root certificate is no longer trusted; HTTPS is passed through undecrypted.",

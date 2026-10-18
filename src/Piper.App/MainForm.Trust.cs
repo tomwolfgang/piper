@@ -7,18 +7,19 @@ using Piper.Core.Security;
 namespace Piper.App;
 
 /// <summary>
-/// The HTTPS trust indicator: what the status bar and the warning bar say, and the startup prompt.
-/// Installing or removing the root is still done only by <c>TrustRootCertificate</c> and
-/// <c>UntrustRootCertificate</c>, each behind a confirmation; nothing here calls the trust store's
-/// write methods.
+/// What Piper does about the trust of its root: the cached trust read, applying it to the proxy and
+/// to the status bar and warning bar, and the startup prompt. Installing or removing the root is still done only by
+/// <c>TrustRootCertificate</c> and <c>UntrustRootCertificate</c>; nothing here calls the trust
+/// store's write methods.
 /// </summary>
 public sealed partial class MainForm
 {
     /// <summary>
-    /// How long a trust-store read is reused. The status bar asks every second; the Windows store is
-    /// read only this often, or at once after the user trusts or removes the root.
+    /// How long a trust-store read is reused. The status bar asks every second, so for now the store is
+    /// read only at startup, before capture starts, and after the user trusts or removes the root
+    /// (each calls Invalidate); a later change in this stack also notices changes made outside Piper.
     /// </summary>
-    private static readonly TimeSpan TrustCheckLifetime = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan TrustCheckLifetime = TimeSpan.MaxValue;
 
     private readonly TrustStateCache _trust;
     private ToolStripStatusLabel _httpsStatusLabel = null!;
@@ -55,18 +56,13 @@ public sealed partial class MainForm
     }
 
     /// <summary>
-    /// Brings the proxy and the indicator in line with the (cached) trust state and returns it: HTTPS
-    /// is decrypted only while the option is on and the root is trusted; otherwise it is tunnelled
-    /// unread rather than failing every client's handshake. The status timer passes
-    /// <paramref name="refreshInBackground"/> so an aged-out answer is re-read on a worker thread and
-    /// the UI thread never waits on the certificate store (antivirus or policy hooks can make it slow).
+    /// Brings the proxy and the indicator in line with the cached trust state and returns it: HTTPS is decrypted only
+    /// while the option is on and the root is trusted; otherwise it is tunnelled unread rather than
+    /// failing every client's handshake.
     /// </summary>
-    private HttpsState ApplyTrustState(bool refreshInBackground = false) =>
-        ApplyTrust(refreshInBackground ? _trust.ForDisplay(QueueTrustRead) : _trust.IsTrusted);
-
-    /// <summary>Applies a trust answer that has already been read. Never touches the certificate store.</summary>
-    private HttpsState ApplyTrust(bool trusted)
+    private HttpsState ApplyTrustState()
     {
+        var trusted = _trust.IsTrusted;
         _options.DecryptionSuspended = !trusted;
 
         if (_lastTrusted is { } before && before != trusted)
@@ -85,40 +81,6 @@ public sealed partial class MainForm
         _trustBar.Visible = _httpsState == HttpsState.NotTrusted;
         _trustBar.ApplyColours();
         return _httpsState;
-    }
-
-    private bool _trustReadQueued;
-    private long _trustReadRetryAt;
-
-    /// <summary>
-    /// Re-reads trust off the UI thread, then paints the answer it left in the cache. The UI thread
-    /// never reads the store here, so a failed read keeps the last answer on screen; it is retried
-    /// after one cache lifetime rather than every second.
-    /// </summary>
-    private void QueueTrustRead()
-    {
-        if (_trustReadQueued || Environment.TickCount64 < _trustReadRetryAt) return;
-        _trustReadQueued = true;
-
-        _ = Task.Run(() => _trust.TryRefresh()).ContinueWith(read =>
-        {
-            // A task that faulted with something TryRefresh does not handle is a failed read too.
-            var failed = !read.IsCompletedSuccessfully || !read.Result;
-            _ = read.Exception;
-            try
-            {
-                BeginInvoke(() =>
-                {
-                    _trustReadQueued = false;
-                    if (failed) _trustReadRetryAt = Environment.TickCount64 + (long)TrustCheckLifetime.TotalMilliseconds;
-                    if (_trust.Last is { } last) ApplyTrust(last);
-                });
-            }
-            catch (Exception ex) when (ex is InvalidOperationException or ObjectDisposedException)
-            {
-                // The window is closing; nothing is left to update.
-            }
-        }, TaskScheduler.Default);
     }
 
     /// <summary>

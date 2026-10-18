@@ -206,6 +206,32 @@ internal static class TrustStateTests
         racing = new TrustStateCache(() => { racing!.Invalidate(); return true; }, TimeSpan.FromSeconds(30), clock);
         _ = racing.IsTrusted;
         runner.IsTrue(racing.NeedsRead, "a read overtaken by Invalidate is not kept as fresh");
+
+        // A slow read that started before the user clicked Remove must not put the old answer back.
+        var store = true;
+        using var started = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        var calls = 0;
+        var slow = new TrustStateCache(() =>
+        {
+            if (Interlocked.Increment(ref calls) == 1)
+            {
+                var seen = Volatile.Read(ref store);
+                started.Set();
+                release.Wait(TimeSpan.FromSeconds(10));
+                return seen; // the answer as it was when this read began
+            }
+
+            return Volatile.Read(ref store);
+        }, TimeSpan.FromSeconds(30), clock);
+        var worker = Task.Run(() => slow.IsTrusted);
+        started.Wait(TimeSpan.FromSeconds(10));
+        Volatile.Write(ref store, false); // the user removes the root
+        slow.Invalidate();
+        runner.IsTrue(!slow.IsTrusted, "the read after the user's click sees the new state");
+        release.Set();
+        runner.IsTrue(worker.GetAwaiter().GetResult(), "the stale worker still returns what it read to its own caller");
+        runner.IsTrue(slow.Last == false && !slow.IsTrusted, "but it does not overwrite the newer answer, in Last or in the next read");
         return Task.CompletedTask;
     });
 

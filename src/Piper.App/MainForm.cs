@@ -1202,8 +1202,7 @@ public sealed partial class MainForm : Form, IMessageFilter
     private void RefreshStatusColours()
     {
         UpdateCaptureStatus();
-        // Repainting from the cached answer: this runs on the UI thread after every theme change.
-        ApplyTrustState(refreshInBackground: true);
+        ApplyTrustState();
         _selectedSessionDetailsLabel.ForeColor = Palette.TextDim;
     }
 
@@ -2094,7 +2093,7 @@ public sealed partial class MainForm : Form, IMessageFilter
 
     private void UpdateStatus()
     {
-        var https = ApplyTrustState(refreshInBackground: true);
+        var https = ApplyTrustState();
         _statusLabel.Text = _proxy.IsRunning
             ? Strings.StatusBar.Listening(_proxy.Endpoint, https)
             : Strings.StatusBar.NotCapturingStatus;
