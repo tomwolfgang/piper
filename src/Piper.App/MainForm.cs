@@ -511,7 +511,8 @@ public sealed partial class MainForm : Form, IMessageFilter
 
         if (!decision.Prompted)
         {
-            if (_options.DecryptHttps) AppendLog(Strings.Log.StartupPromptOff);
+            // Only when HTTPS really is passed through: with the opt-in on it is decrypted although Windows does not trust the root.
+            if (_options.DecryptHttps && !_options.DecryptWhenUntrusted) AppendLog(Strings.Log.StartupPromptOff);
             return true;
         }
 
