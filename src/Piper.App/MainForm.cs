@@ -517,8 +517,7 @@ public sealed partial class MainForm : Form, IMessageFilter
 
         if (decision.SuppressFuturePrompts)
         {
-            _options.AskToTrustCertificate = false;
-            ProxyConfigurationSettingsStore.Save(ProxyConfigurationSettings.From(_options));
+            PersistDontAskAgain();
         }
 
         if (!decision.InstallRequested)
