@@ -1672,13 +1672,14 @@ public sealed partial class MainForm : Form, IMessageFilter
 
     private void UntrustRootCertificate()
     {
-        var confirm = MessageBox.Show(this, Strings.Certificates.RemoveBody, Strings.Certificates.RemoveCaption,
-            MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2);
-        if (confirm != DialogResult.Yes) return;
-
         try
         {
-            var removed = TrustStore.Uninstall();
+            var removal = RootRemoval.RemoveIfConfirmed(
+                () => MessageBox.Show(this, Strings.Certificates.RemoveBody, Strings.Certificates.RemoveCaption,
+                    MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) == DialogResult.Yes,
+                TrustStore.Uninstall);
+            if (removal is not { } removed) return;
+
             RefreshTrustState();
             AppendLog(Strings.Log.RootsRemoved(removed));
             MessageBox.Show(this, Strings.Certificates.Removed(removed),
