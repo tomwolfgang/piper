@@ -525,8 +525,9 @@ public sealed partial class MainForm : Form, IMessageFilter
 
         if (!decision.InstallRequested)
         {
-            Analytics.Track(AnalyticsEvents.CertTrusted,
-                (AnalyticsProperties.Source, "startup"), (AnalyticsProperties.Result, "declined"));
+            // "suppressed" is Don't ask again, so permanent silencing can be told from putting it off.
+            Analytics.Track(AnalyticsEvents.CertTrusted, (AnalyticsProperties.Source, "startup"),
+                (AnalyticsProperties.Result, decision.SuppressFuturePrompts ? "suppressed" : "declined"));
             AppendLog(Strings.Log.StartupDecryptionOff);
             return true;
         }
@@ -1202,7 +1203,8 @@ public sealed partial class MainForm : Form, IMessageFilter
     private void RefreshStatusColours()
     {
         UpdateCaptureStatus();
-        ApplyTrustState();
+        // Repainting from the cached answer: this runs on the UI thread after every theme change.
+        ApplyTrustState(refreshInBackground: true);
         _selectedSessionDetailsLabel.ForeColor = Palette.TextDim;
     }
 
@@ -2093,7 +2095,7 @@ public sealed partial class MainForm : Form, IMessageFilter
 
     private void UpdateStatus()
     {
-        var https = ApplyTrustState();
+        var https = ApplyTrustState(refreshInBackground: true);
         _statusLabel.Text = _proxy.IsRunning
             ? Strings.StatusBar.Listening(_proxy.Endpoint, https)
             : Strings.StatusBar.NotCapturingStatus;
