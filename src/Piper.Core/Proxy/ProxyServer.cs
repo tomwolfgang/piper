@@ -866,13 +866,22 @@ public sealed class ProxyServer : IAsyncDisposable
     {
         using var handshakeBudget = CancellationTokenSource.CreateLinkedTokenSource(ct);
         handshakeBudget.CancelAfter(_options.TlsHandshakeTimeout);
+        var handshakeStarted = Stopwatch.GetTimestamp();
+        // The callback runs only once a whole ClientHello has arrived, which is what separates a client
+        // that left before TLS began from one that left during it. Two fields, nothing allocated.
+        var helloSeen = false;
+        string? clientSni = null;
         try
         {
             await ssl.AuthenticateAsServerAsync(new SslServerAuthenticationOptions
             {
                 // Honour SNI when the client sends it; fall back to the CONNECT authority.
                 ServerCertificateSelectionCallback = (_, sni) =>
-                    _ca.GetCertificateFor(string.IsNullOrEmpty(sni) ? host : sni),
+                {
+                    helloSeen = true;
+                    clientSni = sni;
+                    return _ca.GetCertificateFor(string.IsNullOrEmpty(sni) ? host : sni);
+                },
                 ClientCertificateRequired = false,
                 EnabledSslProtocols = SslProtocols.Tls12 | SslProtocols.Tls13,
                 CertificateRevocationCheckMode = System.Security.Cryptography.X509Certificates.X509RevocationMode.NoCheck,
@@ -886,23 +895,33 @@ public sealed class ProxyServer : IAsyncDisposable
         }
         catch (Exception ex)
         {
-            var timedOut = ex is OperationCanceledException && handshakeBudget.IsCancellationRequested && !ct.IsCancellationRequested;
-            // Typically an untrusted root or a pinned client. Record it so the cause is visible.
-            var failed = new Session
+            // A stop or restart cancels the run's token and aborts every handshake in flight. The
+            // client did nothing wrong, and a row for each would only be noise.
+            if (!ct.IsCancellationRequested)
             {
-                Request = connect,
-                IsTunnel = true,
-                IsHttps = true,
-                State = SessionState.Failed,
-                ClientEndpoint = clientEndpoint,
-                ProcessName = await processName.ConfigureAwait(false),
-                ServerEndpoint = $"{host}:{port}",
-                Error = timedOut
-                    ? $"TLS handshake with client failed: no handshake within {_options.TlsHandshakeTimeout.TotalSeconds:0.#}s"
-                    : $"TLS handshake with client failed: {Describe(ex)}",
-                Completed = DateTimeOffset.Now,
-            };
-            _store.Add(failed);
+                // Taken before the process lookup, so the row's Time is the handshake and not the lookup.
+                var completed = DateTimeOffset.Now;
+                var started = completed - Stopwatch.GetElapsedTime(handshakeStarted);
+                var timedOut = ex is OperationCanceledException && handshakeBudget.IsCancellationRequested;
+                // Typically an untrusted root or a pinned client. Record it so the cause is visible.
+                _store.Add(new Session(started)
+                {
+                    Request = connect,
+                    IsTunnel = true,
+                    IsHttps = true,
+                    State = SessionState.Failed,
+                    ClientEndpoint = clientEndpoint,
+                    ProcessName = await processName.ConfigureAwait(false),
+                    ServerEndpoint = $"{host}:{port}",
+                    Error = timedOut
+                        ? $"TLS handshake with client failed: no handshake within {_options.TlsHandshakeTimeout.TotalSeconds:0.#}s"
+                        : $"TLS handshake with client failed: {Describe(ex)}",
+                    TlsFailure = TlsFailureClassifier.Classify(ex, helloSeen, timedOut)
+                        with { Sni = TlsFailureClassifier.SanitizeSni(clientSni), LastSeen = completed },
+                    Completed = completed,
+                });
+            }
+
             await ssl.DisposeAsync().ConfigureAwait(false);
             return false;
         }

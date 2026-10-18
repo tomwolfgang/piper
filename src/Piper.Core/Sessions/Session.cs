@@ -27,10 +27,16 @@ public sealed class Session
 {
     private static int _counter;
 
-    public Session()
+    public Session() : this(DateTimeOffset.Now)
+    {
+    }
+
+    /// <summary>For a session recorded after the fact, so its start is when the work began and its
+    /// duration is not the time since it was recorded.</summary>
+    internal Session(DateTimeOffset started)
     {
         Id = Interlocked.Increment(ref _counter);
-        Started = DateTimeOffset.Now;
+        Started = started;
     }
 
     public int Id { get; }
@@ -75,6 +81,20 @@ public sealed class Session
 
     /// <summary>Populated when the exchange failed before a response was parsed.</summary>
     public string? Error { get; set; }
+
+    private TlsFailureInfo? _tlsFailure;
+
+    /// <summary>Why a client's TLS handshake with Piper failed; null for every other session. Written
+    /// before the session is added to the store, and replaced rather than edited afterwards.</summary>
+    public TlsFailureInfo? TlsFailure
+    {
+        get => Volatile.Read(ref _tlsFailure);
+        set => Volatile.Write(ref _tlsFailure, value);
+    }
+
+    /// <summary>True when this session shows that capture works. Piper's own update check does not,
+    /// and neither does a handshake the client refused: no request was ever seen.</summary>
+    public bool ProvesCapture => !IsUpdateCheck && TlsFailure is null;
 
     /// <summary>True for CONNECT tunnels we passed through without decrypting.</summary>
     public bool IsTunnel { get; set; }
