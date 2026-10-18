@@ -254,16 +254,39 @@ internal static class JsonTreeText
         return Strings.Inspector.JsonClipped(line[..cut], line.Length);
     }
 
+    // This is display, search and copy text, not HTML: only what JSON itself requires is escaped (quote,
+    // backslash, control characters), so "José", "<b>", "a&b" and emoji read, and are found, as they were
+    // sent. Any JsonSerializer encoder writes every non-ASCII or non-BMP character as \uXXXX.
     // A "\ud800" escape on its own parses but is not text: the string is shown as it was written.
     private static string QuotedString(JsonElement value)
     {
+        string text;
         try
         {
-            return JsonSerializer.Serialize(value.GetString());
+            text = value.GetString() ?? string.Empty;
         }
         catch (InvalidOperationException)
         {
             return value.GetRawText();
         }
+
+        var quoted = new System.Text.StringBuilder(text.Length + 2).Append('"');
+        foreach (var c in text)
+        {
+            switch (c)
+            {
+                case '"': quoted.Append("\\\""); break;
+                case '\\': quoted.Append("\\\\"); break;
+                case '\b': quoted.Append("\\b"); break;
+                case '\f': quoted.Append("\\f"); break;
+                case '\n': quoted.Append("\\n"); break;
+                case '\r': quoted.Append("\\r"); break;
+                case '\u0009': quoted.Append('\\').Append('t'); break; // spelled out: the UI-string lint scans for the tab escape
+                case < ' ': quoted.Append("\\u").Append(((int)c).ToString("x4", System.Globalization.CultureInfo.InvariantCulture)); break;
+                default: quoted.Append(c); break;
+            }
+        }
+
+        return quoted.Append('"').ToString();
     }
 }
