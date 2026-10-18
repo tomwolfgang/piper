@@ -112,13 +112,15 @@ public sealed class TrustStateCache(Func<bool> query, TimeSpan lifetime, TimePro
             var value = _query();
             lock (_gate)
             {
-                _value = value;
-                _hasValue = true;
                 _queryCount++;
                 // An Invalidate that arrived during the read means the value may predate the change
-                // it was called for, so it is returned but not kept as fresh.
+                // it was called for (a slow worker finishing after the user clicked Trust or Remove).
+                // It is returned to its own caller but never stored, so neither Last nor the next
+                // read can see the old answer.
                 if (generation == _generation)
                 {
+                    _value = value;
+                    _hasValue = true;
                     _readAt = _clock.GetTimestamp();
                     _valid = true;
                 }
