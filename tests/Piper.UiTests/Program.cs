@@ -49,8 +49,10 @@ internal static class Program
         RunTextBoxWordSelectionTest();
         RunTextWizardJwtMenuTest();
         ImageDecodingTests.Run(Check, PumpUntil);
+        InspectorSaveTests.Run(Check, PumpUntil);
         WebpViewTests.Run(Check, PumpUntil);
         WebpInspectorTests.Run(Check, PumpUntil);
+        JsonInspectorTests.Run(Check, PumpUntil);
         StatusImagesTests.Run(Check);
         TrustUiTests.Run(Check);
 

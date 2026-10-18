@@ -559,6 +559,11 @@
     "notAJsonContentType": "Response does not have a JSON content type.",
     "jsonSkipped": "[JSON parsing skipped because the content type does not match]",
     "notValidJson": "[not valid JSON: {{message}}]",
+    "jsonBuilding": "Parsing JSON...",
+    "jsonTooLarge": "[JSON over {{megabytes, N0}} MB is not shown as a tree - see the Body tab]",
+    "jsonOmitted_one": "... {{count, N0}} more entry is not shown",
+    "jsonOmitted_other": "... {{count, N0}} more entries are not shown",
+    "jsonClipped": "{{text}}... ({{count, N0}} characters)",
 
     "invalidHex": "invalid hex",
     "notFound": "not found",

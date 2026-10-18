@@ -764,6 +764,10 @@ internal static class Strings
         public static string NotAJsonContentType => I18n.T("inspector.notAJsonContentType");
         public static string JsonSkipped => I18n.T("inspector.jsonSkipped");
         public static string NotValidJson(string message) => I18n.T("inspector.notValidJson", ("message", message));
+        public static string JsonBuilding => I18n.T("inspector.jsonBuilding");
+        public static string JsonTooLarge(int megabytes) => I18n.T("inspector.jsonTooLarge", ("megabytes", megabytes));
+        public static string JsonOmitted(int count) => I18n.T("inspector.jsonOmitted", ("count", count));
+        public static string JsonClipped(string text, int count) => I18n.T("inspector.jsonClipped", ("text", text), ("count", count));
 
         private static string BinaryContentType => I18n.T("inspector.binaryContentTypeFallback");
 
