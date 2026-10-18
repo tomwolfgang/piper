@@ -199,12 +199,14 @@ public sealed class ProxyServer : IAsyncDisposable
             run = TakeRun();
         }
 
-        _tlsFailures.Stop(); // no announcement of a collapsed row may come after the stop
-
         // Outside the lock, and asynchronously: telling every connection to stop runs a callback
         // chain per connection, which must not be paid for by the thread that asked for the stop.
         StopListener(run.Listener);
         await EndRunAsync(run).ConfigureAwait(false);
+
+        // After the connections were told to stop, none of which records a failure once told, so no
+        // announcement of a collapsed row is left to come (bar one already past its check, within a process-name wait).
+        _tlsFailures.Stop();
 
         if (run.AcceptLoop is not null)
         {

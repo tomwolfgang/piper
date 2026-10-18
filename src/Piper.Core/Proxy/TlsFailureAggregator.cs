@@ -78,6 +78,8 @@ internal sealed class TlsFailureAggregator(SessionStore store, TimeProvider? tim
                 }
             }
 
+            if (counted is { Declined: true }) return; // the store would not take its row: counted, nothing else
+
             if (counted is not null)
             {
                 if (!added || store.IsRetained(counted.Row))
@@ -95,15 +97,20 @@ internal sealed class TlsFailureAggregator(SessionStore store, TimeProvider? tim
                 continue;
             }
 
+            // Not admitted (capture scope, filterset) is told by the store not holding the row. Such a key must not
+            // take the allowance again with every retry, or one excluded client would starve the in-scope ones.
+            var admitted = true;
             try
             {
                 store.Add(fresh!.Row);
+                admitted = store.IsRetained(fresh.Row);
             }
             finally
             {
                 lock (_gate)
                 {
                     fresh!.Added = true;
+                    if (!admitted) Decline(fresh);
                     // Failures counted while the row was being added were not announced.
                     schedule = fresh.Attempts > 1 && !fresh.AnnouncePending;
                     if (schedule) fresh.AnnouncePending = true;
@@ -129,6 +136,8 @@ internal sealed class TlsFailureAggregator(SessionStore store, TimeProvider? tim
 
         entry.Attempts++;
         entry.LastTicks = now;
+        if (entry.Declined) return true;
+
         // Replaced, never edited: the grid reads the record from another thread.
         entry.Row.TlsFailure = entry.Row.TlsFailure! with { Attempts = entry.Attempts, LastSeen = _time.GetLocalNow() };
         added = entry.Added;
@@ -162,10 +171,20 @@ internal sealed class TlsFailureAggregator(SessionStore store, TimeProvider? tim
         return true;
     }
 
+    /// <summary>Marks the key's row as refused by the store for the rest of its episode and gives back the allowance
+    /// it took, if that window is still the current one. Lock held.</summary>
+    private void Decline(Entry entry)
+    {
+        entry.Declined = true;
+        if (!_windowOpen || entry.WindowStart != _windowStart) return;
+        if (entry.Key.Overflow) _newOverflowRows--;
+        else _newRows--;
+    }
+
     private Entry Insert(Key key, Session row, long now)
     {
         if (_entries.Count >= MaxKeys) EvictLeastRecentlySeen();
-        var entry = new Entry(key, row, now);
+        var entry = new Entry(key, row, now) { WindowStart = _windowStart };
         _entries[key] = entry;
         return entry;
     }
@@ -262,7 +281,9 @@ internal sealed class TlsFailureAggregator(SessionStore store, TimeProvider? tim
         public long LastTicks { get; set; } = now;
         public long AnnouncedTicks { get; set; } = now;
         public int Attempts { get; set; } = 1;
+        public long WindowStart { get; set; }
         public bool Added { get; set; }
+        public bool Declined { get; set; }
         public bool AnnouncePending { get; set; }
     }
 }
