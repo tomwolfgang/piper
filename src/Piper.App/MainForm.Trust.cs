@@ -88,8 +88,9 @@ public sealed partial class MainForm
         return _httpsState;
     }
 
-    private bool _trustReadQueued;
-    private long _trustReadRetryAt;
+    // One read at a time; a read that never comes back, or whose result could not be handed to the UI,
+    // is abandoned after a few cache lifetimes so it cannot switch the refresh off for the session.
+    private readonly TrustReadGate _trustReadGate = new(TrustCheckLifetime, TimeSpan.FromTicks(TrustCheckLifetime.Ticks * 4));
 
     /// <summary>
     /// Re-reads trust off the UI thread, then paints the answer it left in the cache. The UI thread
@@ -98,8 +99,8 @@ public sealed partial class MainForm
     /// </summary>
     private void QueueTrustRead()
     {
-        if (_trustReadQueued || Environment.TickCount64 < _trustReadRetryAt) return;
-        _trustReadQueued = true;
+        var id = _trustReadGate.TryBegin(Environment.TickCount64);
+        if (id == 0) return;
 
         _ = Task.Run(() => _trust.TryRefresh()).ContinueWith(read =>
         {
@@ -110,14 +111,14 @@ public sealed partial class MainForm
             {
                 BeginInvoke(() =>
                 {
-                    _trustReadQueued = false;
-                    if (failed) _trustReadRetryAt = Environment.TickCount64 + (long)TrustCheckLifetime.TotalMilliseconds;
+                    _trustReadGate.End(id, failed, Environment.TickCount64);
                     if (_trust.Last is { } last) ApplyTrust(last);
                 });
             }
             catch (Exception ex) when (ex is InvalidOperationException or ObjectDisposedException)
             {
-                // The window is closing; nothing is left to update.
+                // No handle yet, being recreated, or the window is closing: let the next tick start a new read.
+                _trustReadGate.Abort(id);
             }
         }, TaskScheduler.Default);
     }
