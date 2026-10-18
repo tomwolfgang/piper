@@ -195,6 +195,19 @@ public sealed class ProxyOptions
     /// <summary>When set, replaces the User-Agent of every request forwarded by the running proxy.</summary>
     public string? GlobalUserAgent { get; set; }
 
+    /// <summary>
+    /// Record a client that completes the TLS handshake and then closes the connection, within
+    /// <see cref="ClosedAfterHandshakeWindow"/>, before sending any request. Low confidence by nature: a
+    /// browser's speculative preconnect looks identical, so this is the switch to turn that class off.
+    /// A client that shows it refused the certificate (an alert or SChannel status) is recorded whatever
+    /// this says.
+    /// </summary>
+    public bool RecordClosedAfterHandshake { get; set; } = true;
+
+    /// <summary>How long after the handshake a request-less close still counts as "closed right after
+    /// it". Past this the client was holding the connection on purpose, and nothing is recorded.</summary>
+    public TimeSpan ClosedAfterHandshakeWindow { get; set; } = TimeSpan.FromSeconds(2);
+
     /// <summary>Offer HTTP/2 via ALPN on the browser-facing side of a decrypted tunnel. Defaults
     /// on: browsers already negotiate h2 with virtually every real site today, so silently
     /// forcing HTTP/1.1 through the proxy is itself the anomaly for a tool whose purpose is
