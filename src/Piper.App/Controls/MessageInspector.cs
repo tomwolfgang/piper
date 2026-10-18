@@ -55,21 +55,34 @@ public sealed class MessageInspector : UserControl
     private HttpMessage? _renderedJson;
     private HttpRequestData? _renderedWebForms;
     private readonly Func<WebView2, Task>? _startWebpView;
+    private readonly Func<string?, string?>? _chooseImageSavePath;
     private WebpView? _webpView;
     private HttpMessage? _renderedImage;
     private HttpMessage? _renderedVideo;
     private HttpMessage? _droppedImage;
     private HttpMessage? _droppedVideo;
     private string? _videoFilePath;
-    private readonly List<TreeNode> _jsonMatches = [];
+    // A node's tree path (child index at each level) is kept for a match, because a match in a
+    // collapsed branch has no TreeNode until the path to it is expanded.
+    private readonly List<int[]> _jsonMatches = [];
+    private JsonTreeSource? _jsonSource;
+    private CancellationTokenSource? _jsonBuild;
+    private CancellationTokenSource? _jsonSearching;
+    private static readonly object JsonPlaceholder = new();
+
+    // Parses queue behind this, so a run of selections cannot have many multi-MB parses going at once.
+    private static readonly SemaphoreSlim JsonBuildGate = new(2);
     private readonly List<(string Name, string Value)> _headers = [];
     private int _jsonMatchIndex = -1;
     private int _webFormsTabIndex = -1;
 
     /// <param name="startWebpView">Starts the WebP preview's WebView2; a test seam, null for the real one.</param>
-    public MessageInspector(string caption, bool showImageViewer = false, bool showWebForms = false, Func<WebView2, Task>? startWebpView = null)
+    /// <param name="chooseImageSavePath">Replaces the Save image dialog: gets the requested format (null for any) and returns the file to write, or null to cancel. A test seam, null for the real dialog.</param>
+    public MessageInspector(string caption, bool showImageViewer = false, bool showWebForms = false, Func<WebView2, Task>? startWebpView = null,
+        Func<string?, string?>? chooseImageSavePath = null)
     {
         _startWebpView = startWebpView;
+        _chooseImageSavePath = chooseImageSavePath;
         _showImageViewer = showImageViewer;
         _showWebForms = showWebForms;
         _summary = new TextBox
@@ -242,6 +255,7 @@ public sealed class MessageInspector : UserControl
             Font = Palette.Mono,
         };
         _jsonTree.NodeMouseClick += OnJsonNodeMouseClick;
+        _jsonTree.BeforeExpand += (_, e) => { if (e.Node is { } node) ShowJsonChildren(node); };
         _jsonTree.ContextMenuStrip = BuildJsonMenu();
 
         _jsonTypeStatus = new Label
@@ -658,22 +672,19 @@ public sealed class MessageInspector : UserControl
     {
         if (_message is null || _imageView?.Image is null) return;
 
-        using var dialog = new SaveFileDialog
-        {
-            Title = Strings.Inspector.SaveImageCaption,
-            Filter = Strings.Inspector.SaveImageFilter,
-            FilterIndex = requestedFormat == "jpg" ? 2 : 1,
-            FileName = Strings.Inspector.SaveImageFileName(requestedFormat ?? "png"),
-        };
-        if (dialog.ShowDialog(this) != DialogResult.OK) return;
+        // The image on screen is the dropped response when one was dropped on the tab, not the selected
+        // session's. It is taken now: the dialog is modal, but selecting another session while it is open
+        // must not change what the user asked to save.
+        var source = _droppedImage ?? _message;
+        var path = ChooseImageSavePath(requestedFormat);
+        if (path is null) return;
 
-        var format = Path.GetExtension(dialog.FileName).TrimStart('.').ToLowerInvariant();
+        var format = Path.GetExtension(path).TrimStart('.').ToLowerInvariant();
         if (format is not ("png" or "jpg" or "jpeg")) format = requestedFormat ?? "png";
 
-        var path = dialog.FileName;
         try
         {
-            var body = _message.DecodedBody;
+            var body = source.DecodedBody;
 
             // The guard, decoding and re-encoding take up to seconds for a large image, so they run off
             // the UI thread and into a buffer: a timeout or failure never leaves a half-written file behind.
@@ -699,6 +710,20 @@ public sealed class MessageInspector : UserControl
                 MessageBox.Show(this, Strings.Inspector.SaveImageFailed(ex.Message),
                     Strings.App.Name, MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
+    }
+
+    private string? ChooseImageSavePath(string? requestedFormat)
+    {
+        if (_chooseImageSavePath is { } choose) return choose(requestedFormat);
+
+        using var dialog = new SaveFileDialog
+        {
+            Title = Strings.Inspector.SaveImageCaption,
+            Filter = Strings.Inspector.SaveImageFilter,
+            FilterIndex = requestedFormat == "jpg" ? 2 : 1,
+            FileName = Strings.Inspector.SaveImageFileName(requestedFormat ?? "png"),
+        };
+        return dialog.ShowDialog(this) == DialogResult.OK ? dialog.FileName : null;
     }
 
     // The encoded bytes are null when the guard refused the body, and for a WebP, which GDI+ cannot encode.
@@ -745,7 +770,12 @@ public sealed class MessageInspector : UserControl
 
     protected override void Dispose(bool disposing)
     {
-        if (disposing) CancelImageDecoding();
+        if (disposing)
+        {
+            CancelImageDecoding();
+            CancelJsonWork();
+        }
+
         base.Dispose(disposing);
     }
 
@@ -819,12 +849,13 @@ public sealed class MessageInspector : UserControl
         if (e.Button == MouseButtons.Right) _jsonTree.SelectedNode = e.Node;
     }
 
-    private JsonNodeValue? SelectedJsonValue => _jsonTree.SelectedNode?.Tag as JsonNodeValue;
+    private JsonNodeRef? SelectedJsonValue => _jsonTree.SelectedNode?.Tag as JsonNodeRef;
 
     private void CopySelectedJson(bool valueOnly)
     {
         if (SelectedJsonValue is not { } value) return;
-        ClipboardText.TrySet(valueOnly ? value.RawValue : _jsonTree.SelectedNode?.Text ?? string.Empty);
+        // Not the node's text: a long value is clipped there.
+        if ((valueOnly ? value.RawValue : value.PairText) is { } text) ClipboardText.TrySet(text);
     }
 
     public void SetMessage(HttpMessage? message, string summary)
@@ -938,14 +969,13 @@ public sealed class MessageInspector : UserControl
         _renderedWebForms = null;
         if (preserveJsonView) return;
 
+        CancelJsonWork();
         _jsonTree.Nodes.Clear();
         _jsonMatchCount.Text = string.Empty;
         _jsonTypeNotice.Visible = false;
         _jsonForcePanel.Visible = false;
         _jsonTypeStatus.Text = string.Empty;
         _renderedJson = null;
-        _jsonMatches.Clear();
-        _jsonMatchIndex = -1;
     }
 
     private void RenderSelectedTab()
@@ -1389,6 +1419,7 @@ public sealed class MessageInspector : UserControl
 
     private void RenderJson(HttpMessage message, bool force = false)
     {
+        CancelJsonWork();
         _jsonTree.BeginUpdate();
         try
         {
@@ -1412,25 +1443,70 @@ public sealed class MessageInspector : UserControl
                 return;
             }
 
-            var decodedBody = message.DecodedBody;
-            if (!force && !ContentCodec.LooksTextual(message.ContentType, decodedBody))
-            {
-                _jsonTree.Nodes.Add(Strings.Inspector.BinaryJsonBody(message.Body.Length, message.ContentType));
-                return;
-            }
+            _jsonTree.Nodes.Add(Strings.Inspector.JsonBuilding);
+        }
+        finally
+        {
+            _jsonTree.EndUpdate();
+        }
 
+        // Decoding, parsing and searching a body the sender chose the size of happen off the UI thread.
+        // The result is shown only if this is still the tree wanted when it arrives.
+        var build = _jsonBuild = new CancellationTokenSource();
+        _ = ShowJsonAsync(message, force, build);
+    }
+
+    private async Task ShowJsonAsync(HttpMessage message, bool force, CancellationTokenSource build)
+    {
+        JsonTreeSource? source = null;
+        string? failure = null;
+        try
+        {
+            await JsonBuildGate.WaitAsync(build.Token);
             try
             {
-                using var document = JsonDocument.Parse(message.BodyAsText(decodedBody));
-                var root = CreateJsonNode("root", document.RootElement);
-                _jsonTree.Nodes.Add(root);
+                (source, failure) = await Task.Run(() => BuildJsonTree(message, force, build.Token), build.Token);
+            }
+            finally
+            {
+                JsonBuildGate.Release();
+            }
+        }
+        catch (OperationCanceledException) when (build.IsCancellationRequested)
+        {
+            build.Dispose();
+            return; // another message was selected, or the view was cleared
+        }
+        catch (Exception ex)
+        {
+            failure = Strings.Inspector.NotValidJson(ex.Message);
+        }
+
+        build.Dispose();
+        if (!ReferenceEquals(_jsonBuild, build) || IsDisposed)
+        {
+            source?.Retire();
+            return;
+        }
+
+        _jsonBuild = null;
+        _jsonTree.BeginUpdate();
+        try
+        {
+            _jsonTree.Nodes.Clear();
+            if (source?.Root() is { } root)
+            {
+                _jsonSource = source;
+                var node = CreateJsonNode(source, root);
+                _jsonTree.Nodes.Add(node);
                 // Keep the top-level shape visible, while avoiding an overwhelming expansion
                 // of every nested object and array in large responses.
-                root.Expand();
+                ShowJsonChildren(node);
+                node.Expand();
             }
-            catch (Exception ex) when (ex is JsonException or DecoderFallbackException)
+            else
             {
-                _jsonTree.Nodes.Add(Strings.Inspector.NotValidJson(ex.Message));
+                _jsonTree.Nodes.Add(failure ?? Strings.Inspector.NotValidJson(string.Empty));
             }
         }
         finally
@@ -1439,6 +1515,50 @@ public sealed class MessageInspector : UserControl
         }
 
         FindJsonMatches();
+    }
+
+    // The worker half: a tree to show, or the text that says why there is none.
+    private static (JsonTreeSource? Source, string? Failure) BuildJsonTree(HttpMessage message, bool force, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var decodedBody = message.DecodedBody;
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!force && !ContentCodec.LooksTextual(message.ContentType, decodedBody))
+                return (null, Strings.Inspector.BinaryJsonBody(message.Body.Length, message.ContentType));
+
+            var limits = JsonTreeLimits.Default;
+            if (decodedBody.Length > limits.MaxChars)
+                return (null, Strings.Inspector.JsonTooLarge(limits.MaxChars / (1024 * 1024)));
+
+            var source = JsonTreeSource.Parse(message.BodyAsText(decodedBody), limits);
+            if (cancellationToken.IsCancellationRequested)
+            {
+                source.Retire();
+                cancellationToken.ThrowIfCancellationRequested();
+            }
+
+            return (source, null);
+        }
+        catch (Exception ex) when (ex is JsonException or DecoderFallbackException)
+        {
+            return (null, Strings.Inspector.NotValidJson(ex.Message));
+        }
+    }
+
+    // Stops the build and search of the tree on show and lets go of its document.
+    private void CancelJsonWork()
+    {
+        var build = _jsonBuild;
+        _jsonBuild = null;
+        build?.Cancel();
+        var search = _jsonSearching;
+        _jsonSearching = null;
+        search?.Cancel();
+        _jsonMatches.Clear();
+        _jsonMatchIndex = -1;
+        _jsonSource?.Retire();
+        _jsonSource = null;
     }
 
     private void TryRenderJson()
@@ -1462,40 +1582,27 @@ public sealed class MessageInspector : UserControl
         _renderedVideo = _message;
     }
 
-    private static TreeNode CreateJsonNode(string name, JsonElement value)
+    // A node that can expand starts with one placeholder child, so the tree draws its expander;
+    // ShowJsonChildren swaps in the real children the first time it opens.
+    private static TreeNode CreateJsonNode(JsonTreeSource source, JsonTreeChild child)
     {
-        var node = new TreeNode(FormatJsonValue(name, value))
-        {
-            Tag = new JsonNodeValue(name, value.GetRawText(),
-                value.ValueKind == JsonValueKind.String ? value.GetString() : null),
-        };
-
-        switch (value.ValueKind)
-        {
-            case JsonValueKind.Object:
-                foreach (var property in value.EnumerateObject())
-                    node.Nodes.Add(CreateJsonNode(property.Name, property.Value));
-                break;
-            case JsonValueKind.Array:
-                var index = 0;
-                foreach (var item in value.EnumerateArray())
-                    node.Nodes.Add(CreateJsonNode($"[{index++}]", item));
-                break;
-        }
-
+        var node = new TreeNode(child.Text) { Tag = new JsonNodeRef(source, child.Name, child.Value) };
+        if (child.HasChildren) node.Nodes.Add(new TreeNode { Tag = JsonPlaceholder });
         return node;
     }
 
-    private static string FormatJsonValue(string name, JsonElement value) => value.ValueKind switch
+    private static void ShowJsonChildren(TreeNode node)
     {
-        JsonValueKind.Object => $"{name}: {{ }}",
-        JsonValueKind.Array => $"{name}: [ ]",
-        JsonValueKind.String => $"{name}: {JsonSerializer.Serialize(value.GetString())}",
-        JsonValueKind.Number => $"{name}: {value.GetRawText()}",
-        JsonValueKind.True or JsonValueKind.False => $"{name}: {value.GetRawText()}",
-        JsonValueKind.Null => $"{name}: null",
-        _ => $"{name}: {value.GetRawText()}",
-    };
+        if (node.Nodes is not [{ Tag: var placeholder }] || !ReferenceEquals(placeholder, JsonPlaceholder)
+            || node.Tag is not JsonNodeRef parent
+            || parent.Source.Children(parent.Value) is not { } level) return;
+
+        var children = new TreeNode[level.Children.Count + (level.Omitted > 0 ? 1 : 0)];
+        for (var i = 0; i < level.Children.Count; i++) children[i] = CreateJsonNode(parent.Source, level.Children[i]);
+        if (level.Omitted > 0) children[^1] = new TreeNode(Strings.Inspector.JsonOmitted(level.Omitted));
+        node.Nodes.Clear();
+        node.Nodes.AddRange(children);
+    }
 
     private void OnJsonSearchKeyDown(object? sender, KeyEventArgs e)
     {
@@ -1562,30 +1669,48 @@ public sealed class MessageInspector : UserControl
         return true;
     }
 
+    // Looks through the whole document, not only the nodes made so far, on a worker thread: each
+    // keystroke replaces the search before it. Only what the tree can show is searched.
     private void FindJsonMatches()
     {
+        var previous = _jsonSearching;
+        _jsonSearching = null;
+        previous?.Cancel();
         _jsonMatches.Clear();
         _jsonMatchIndex = -1;
 
         var query = _jsonSearch.Text.Trim();
-        if (query.Length == 0 || _jsonTree.Nodes.Count == 0)
+        if (query.Length == 0 || _jsonSource is not { } source)
         {
             _jsonMatchCount.Text = string.Empty;
             return;
         }
 
-        foreach (TreeNode root in _jsonTree.Nodes)
-            FindJsonMatches(root, query);
-
-        // The singular is the catalogue's _one form now, so the count is all this has to pass.
-        _jsonMatchCount.Text = Strings.Inspector.MatchCount(_jsonMatches.Count);
-        if (_jsonMatches.Count > 0) SelectJsonMatch(1);
+        var search = _jsonSearching = new CancellationTokenSource();
+        _ = SearchJsonAsync(source, query, search);
     }
 
-    private void FindJsonMatches(TreeNode node, string query)
+    private async Task SearchJsonAsync(JsonTreeSource source, string query, CancellationTokenSource search)
     {
-        if (node.Text.Contains(query, StringComparison.OrdinalIgnoreCase)) _jsonMatches.Add(node);
-        foreach (TreeNode child in node.Nodes) FindJsonMatches(child, query);
+        try
+        {
+            var matches = await Task.Run(() => source.Search(query, search.Token), search.Token);
+            if (search.IsCancellationRequested || matches is null || IsDisposed) return;
+
+            _jsonMatches.AddRange(matches);
+            // The singular is the catalogue's _one form now, so the count is all this has to pass.
+            _jsonMatchCount.Text = Strings.Inspector.MatchCount(_jsonMatches.Count);
+            if (_jsonMatches.Count > 0) SelectJsonMatch(1);
+        }
+        catch (OperationCanceledException) when (search.IsCancellationRequested)
+        {
+            // A newer search, another message or the view closing took over.
+        }
+        finally
+        {
+            if (ReferenceEquals(_jsonSearching, search)) _jsonSearching = null;
+            search.Dispose();
+        }
     }
 
     private void SelectJsonMatch(int direction)
@@ -1593,11 +1718,27 @@ public sealed class MessageInspector : UserControl
         if (_jsonMatches.Count == 0) return;
 
         _jsonMatchIndex = (_jsonMatchIndex + direction + _jsonMatches.Count) % _jsonMatches.Count;
-        var match = _jsonMatches[_jsonMatchIndex];
-        for (var parent = match.Parent; parent is not null; parent = parent.Parent) parent.Expand();
+        if (JsonNodeAt(_jsonMatches[_jsonMatchIndex]) is not { } match) return;
         _jsonTree.SelectedNode = match;
         match.EnsureVisible();
         _jsonMatchCount.Text = Strings.Inspector.MatchPosition(_jsonMatchIndex + 1, _jsonMatches.Count);
+    }
+
+    // Opens the way down the path, making the nodes on it. A node the tree cannot show (past its caps)
+    // ends the walk, and the deepest node that is shown stands in for the match.
+    private TreeNode? JsonNodeAt(int[] path)
+    {
+        if (_jsonTree.Nodes is not [{ Tag: JsonNodeRef } node, ..]) return null;
+
+        foreach (var index in path)
+        {
+            ShowJsonChildren(node);
+            node.Expand();
+            if (index >= node.Nodes.Count || node.Nodes[index].Tag is not JsonNodeRef) break;
+            node = node.Nodes[index];
+        }
+
+        return node;
     }
 
     /// <summary>Routes the standard Find shortcut to the search field for the active inspector tab.</summary>
