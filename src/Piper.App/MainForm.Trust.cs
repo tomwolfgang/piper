@@ -74,4 +74,24 @@ public sealed partial class MainForm
             : pressed == dontAskAgain ? TrustPromptChoice.DontAskAgain
             : TrustPromptChoice.NotNow;
     }
+
+    /// <summary>
+    /// Saves Don't ask again. The settings store is best-effort and swallows I/O failures, so this
+    /// reads the file back: when it did not stick the user is told the prompt will return.
+    /// </summary>
+    private void PersistDontAskAgain()
+    {
+        _options.AskToTrustCertificate = false;
+        try
+        {
+            ProxyConfigurationSettingsStore.Save(ProxyConfigurationSettings.From(_options));
+            if (ProxyConfigurationSettingsStore.Load() is { AskToTrustCertificate: false }) return;
+        }
+        catch (Exception ex) when (ex is NotSupportedException or ArgumentException)
+        {
+            // A profile path the store cannot use; reported below like any other failure to save.
+        }
+
+        AppendLog(Strings.Log.DontAskAgainNotSaved);
+    }
 }
