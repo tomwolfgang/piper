@@ -15,6 +15,100 @@ internal static class TrustCaptureTests
     {
         await RunStatusTextAsync(runner);
         await RunSuspendedProxyAsync(runner);
+        await RunDisplayReadAsync(runner);
+        await RunConcurrentCacheAsync(runner);
+        await RunUnwritableSettingsAsync(runner);
+    }
+
+    private static Task RunDisplayReadAsync(TestRunner runner) => runner.RunAsync("a repaint after the cache expired never reads the store on the calling thread", () =>
+    {
+        var reads = 0;
+        var trusted = true;
+        var clock = new FakeClock();
+        var cache = new TrustStateCache(() => { reads++; return trusted; }, TimeSpan.FromSeconds(30), clock);
+        var queued = 0;
+
+        runner.IsTrue(cache.ForDisplay(() => queued++), "the first answer has to be read");
+        runner.AreEqual(1, reads, "and that one read happened");
+
+        clock.Advance(TimeSpan.FromSeconds(31));
+        trusted = false;
+        var shown = cache.ForDisplay(() => queued++);
+        runner.IsTrue(shown, "after expiry the repaint shows the last answer");
+        runner.AreEqual(1, reads, "without reading the store");
+        runner.AreEqual(1, queued, "and asks for the refresh to happen elsewhere");
+
+        runner.IsTrue(cache.TryRefresh(), "the worker's read succeeds");
+        runner.IsTrue(!cache.ForDisplay(() => queued++) && queued == 1, "then the repaint shows the fresh answer and queues nothing");
+
+        // A worker read that fails keeps the last answer, does not throw, and does not poison the cache.
+        clock.Advance(TimeSpan.FromSeconds(31));
+        var failing = new TrustStateCache(() => throw new System.Security.Cryptography.CryptographicException("store unavailable"), TimeSpan.FromSeconds(30), clock);
+        runner.IsTrue(!failing.TryRefresh() && failing.Last is null, "a failed first read reports failure and leaves no answer");
+        var fails = false;
+        var flaky = new TrustStateCache(() => fails ? throw new UnauthorizedAccessException() : true, TimeSpan.FromSeconds(30), clock);
+        runner.IsTrue(flaky.TryRefresh() && flaky.Last == true, "a good read is kept");
+        clock.Advance(TimeSpan.FromSeconds(31));
+        fails = true;
+        runner.IsTrue(!flaky.TryRefresh(), "a read that then fails reports failure");
+        runner.IsTrue(flaky.Last == true && flaky.NeedsRead, "the last answer is kept and a retry is still due");
+        var calling = 0;
+        runner.IsTrue(flaky.ForDisplay(() => calling++) && calling == 1, "a repaint still shows it and does not read");
+        return Task.CompletedTask;
+    });
+
+    private static Task RunConcurrentCacheAsync(TestRunner runner) => runner.RunAsync("the trust cache is safe when a worker reads while the UI thread invalidates", async () =>
+    {
+        var trusted = true;
+        var cache = new TrustStateCache(() => Volatile.Read(ref trusted), TimeSpan.FromMilliseconds(1));
+        using var stop = new CancellationTokenSource();
+        var failures = 0;
+        Task Loop(Action body) => Task.Run(() =>
+        {
+            try { while (!stop.IsCancellationRequested) body(); }
+            catch (Exception) { Interlocked.Increment(ref failures); }
+        });
+
+        var workers = new[]
+        {
+            Loop(() => _ = cache.IsTrusted), Loop(() => _ = cache.IsTrusted),
+            Loop(cache.Invalidate), Loop(() => { _ = cache.Last; _ = cache.NeedsRead; }),
+        };
+        await Task.Delay(300);
+        stop.Cancel();
+        await Task.WhenAll(workers);
+        runner.AreEqual(0, failures, "no thread failed while reading, invalidating and peeking concurrently");
+
+        Volatile.Write(ref trusted, false);
+        cache.Invalidate();
+        runner.IsTrue(!cache.IsTrusted, "after the storm an invalidate still makes the next read see the change");
+    });
+
+    private static Task RunUnwritableSettingsAsync(TestRunner runner) => runner.RunAsync("a settings file that cannot be written is skipped, not thrown, and reads back as not saved", () =>
+    {
+        var blocker = Path.Combine(Path.GetTempPath(), $"piper-trust-blocker-{Guid.NewGuid():N}");
+        File.WriteAllText(blocker, "a file where the settings folder should be");
+        try
+        {
+            var path = Path.Combine(blocker, "configuration.json");
+            ProxyConfigurationSettingsStore.Save(new ProxyConfigurationSettings { AskToTrustCertificate = false }, path);
+            runner.IsTrue(ProxyConfigurationSettingsStore.Load(path) is null,
+                "Save swallowed the failure, so the caller has to read back to know it did not stick");
+        }
+        finally
+        {
+            File.Delete(blocker);
+        }
+
+        return Task.CompletedTask;
+    });
+
+    private sealed class FakeClock : TimeProvider
+    {
+        private long _ticks;
+        public override long TimestampFrequency => TimeSpan.TicksPerSecond;
+        public override long GetTimestamp() => _ticks;
+        public void Advance(TimeSpan by) => _ticks += by.Ticks;
     }
 
     private static Task RunStatusTextAsync(TestRunner runner) => runner.RunAsync("the status text only says decryption is on while HTTPS is really decrypted", () =>
