@@ -6,12 +6,10 @@ using Piper.Core.Sessions;
 namespace Piper.Core.Proxy;
 
 /// <summary>
-/// Turns the exception a client handshake died with into <see cref="TlsFailureInfo"/>. Pure: it reads
-/// only the exception and two flags, so it is cheap, runs on the failure path alone, and is tested
-/// with fixture exceptions. The client's TLS alert is not observable through a public API; the two
-/// indirect signals used are the inner SChannel error code and, on the TLS 1.3 path, an alert name in
-/// the exception text. Anything it does not recognise is <see cref="TlsFailureKind.Other"/> (or a
-/// plain close), never a stronger claim.
+/// Turns the exception a client handshake died with into <see cref="TlsFailureInfo"/>. Pure, and run on the
+/// failure path alone. The client's TLS alert is not observable through a public API; the indirect signals
+/// are the inner SChannel code and, on the TLS 1.3 path, an alert name in the exception text. Anything not
+/// recognised is <see cref="TlsFailureKind.Other"/> or a plain close, never a stronger claim.
 /// </summary>
 internal static class TlsFailureClassifier
 {

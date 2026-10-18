@@ -1,21 +1,16 @@
 namespace Piper.Core.Sessions;
 
-/// <summary>
-/// What Piper could observe about a failed TLS handshake with a client. The wording any screen gives
-/// a kind states the observed fact only: a client that dropped the connection is "closed", never
-/// "pinning", because the server side of the handshake cannot tell a pin from an untrusted root.
-/// </summary>
+/// <summary>What Piper could observe about a failed client TLS handshake. Any wording for a kind states
+/// the observed fact only: never "pinning", which the server side cannot tell from an untrusted root.</summary>
 public enum TlsFailureKind
 {
-    /// <summary>The client refused Piper's certificate: a rejecting TLS alert or a rejecting SChannel
-    /// status. The cause (untrusted root, private trust store, pin) is not known.</summary>
+    /// <summary>The client refused Piper's certificate (rejecting alert or SChannel status); the cause is unknown.</summary>
     Rejected,
 
     /// <summary>A full ClientHello arrived, then the client closed with no alert evidence.</summary>
     ClosedInHandshake,
 
-    /// <summary>The handshake completed and the client closed before any request. Reserved for the
-    /// post-handshake check; the handshake classifier never produces it.</summary>
+    /// <summary>Handshake completed, client closed before any request. Reserved for the post-handshake check.</summary>
     ClosedAfterHandshake,
 
     /// <summary>The client closed before a ClientHello was complete. It never saw Piper's certificate.</summary>
@@ -42,11 +37,8 @@ public enum TlsFailurePhase
     AfterHandshake,
 }
 
-/// <summary>
-/// Immutable evidence for a client handshake that failed, stored on <see cref="Session.TlsFailure"/>.
-/// Replaced, never edited, when more is learned. Holds only closed values, a number and a sanitised
-/// SNI: nothing here is captured traffic.
-/// </summary>
+/// <summary>Immutable evidence for a failed client handshake, on <see cref="Session.TlsFailure"/>; replaced,
+/// never edited. Only closed values, numbers and a sanitised SNI: nothing here is captured traffic.</summary>
 /// <param name="Kind">The classification.</param>
 /// <param name="Phase">How far the connection got.</param>
 /// <param name="Alert">A TLS alert name from the closed list the classifier knows, or null.</param>
