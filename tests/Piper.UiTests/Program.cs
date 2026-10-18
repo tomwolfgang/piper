@@ -49,8 +49,12 @@ internal static class Program
         RunTextBoxWordSelectionTest();
         RunTextWizardJwtMenuTest();
         ImageDecodingTests.Run(Check, PumpUntil);
+        InspectorSaveTests.Run(Check, PumpUntil);
         WebpViewTests.Run(Check, PumpUntil);
         WebpInspectorTests.Run(Check, PumpUntil);
+        JsonInspectorTests.Run(Check, PumpUntil);
+        StatusImagesTests.Run(Check);
+        TrustUiTests.Run(Check);
 
         Run("clearing a scrolled grid shows the next rows from the top", (store, grid, list) =>
         {

@@ -107,7 +107,7 @@ public sealed class ProxyServer : IAsyncDisposable
             if (previous is { Cts: not null }) _ = Task.Run(() => EndRunAsync(previous));
         }
 
-        Log?.Invoke(this, $"Listening on {Endpoint}. HTTPS decryption {(_options.DecryptHttps ? "enabled" : "disabled")}.");
+        Log?.Invoke(this, $"Listening on {Endpoint}. HTTPS decryption {(_options.DecryptHttps && !_options.DecryptionSuspended ? "enabled" : "disabled")}.");
     }
 
     /// <summary>Binds the listener and starts the accept loop. Called with <c>_runLock</c> held.</summary>

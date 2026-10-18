@@ -1,4 +1,5 @@
 using Piper.Core.Proxy;
+using Piper.Core.Security;
 using Piper.Core.Sessions;
 
 namespace Piper.App;
@@ -190,9 +191,34 @@ internal static class Strings
 
         public static string FilterTimedOutSuffix => I18n.T("statusBar.filterTimedOutSuffix");
 
-        public static string Listening(object? endpoint, bool decryptHttps) =>
+        public static string Listening(object? endpoint, HttpsState https) =>
             I18n.T("statusBar.listening", ("endpoint", endpoint),
-                ("state", decryptHttps ? I18n.T("statusBar.httpsOn") : I18n.T("statusBar.httpsOff")));
+                ("state", https switch
+                {
+                    HttpsState.Decrypting => I18n.T("statusBar.httpsOn"),
+                    HttpsState.DecryptingUntrusted => I18n.T("statusBar.httpsDecryptingUntrusted"),
+                    HttpsState.NotTrusted => I18n.T("statusBar.httpsNotTrusted"),
+                    _ => I18n.T("statusBar.httpsOff"),
+                }));
+
+        public static string HttpsLabel(HttpsState https) => https switch
+        {
+            HttpsState.Decrypting => I18n.T("statusBar.httpsDecrypting"),
+            HttpsState.DecryptingUntrusted => I18n.T("statusBar.httpsDecryptingNoTrust"),
+            HttpsState.NotTrusted => I18n.T("statusBar.httpsNotDecrypted"),
+            _ => I18n.T("statusBar.httpsDecryptionOff"),
+        };
+
+        public static string HttpsTooltip(HttpsState https) => https switch
+        {
+            HttpsState.Decrypting => I18n.T("statusBar.httpsDecryptingTooltip"),
+            HttpsState.DecryptingUntrusted => I18n.T("statusBar.httpsDecryptingNoTrustTooltip"),
+            HttpsState.NotTrusted => I18n.T("statusBar.httpsNotDecryptedTooltip"),
+            _ => I18n.T("statusBar.httpsDecryptionOffTooltip"),
+        };
+
+        public static string TrustBarMessage => I18n.T("statusBar.trustBarMessage");
+        public static string TrustBarButton => I18n.T("statusBar.trustBarButton");
 
         public static string Sessions(int total) => I18n.T("statusBar.sessions", ("count", total));
 
@@ -256,6 +282,9 @@ internal static class Strings
     {
         public static string StartupTrustCaption => I18n.T("certificates.startupTrustCaption");
         public static string StartupTrustBody => I18n.T("certificates.startupTrustBody");
+        public static string StartupTrustInstall => I18n.T("certificates.startupTrustInstall");
+        public static string StartupTrustNotNow => I18n.T("certificates.startupTrustNotNow");
+        public static string StartupTrustDontAsk => I18n.T("certificates.startupTrustDontAsk");
 
         public static string StartupInstallFailed(string message) =>
             I18n.T("certificates.startupInstallFailed", ("message", message));
@@ -265,6 +294,9 @@ internal static class Strings
 
         public static string TrustBody(string privateKeyPath, string? thumbprint) =>
             I18n.T("certificates.trustBody", ("privateKeyPath", privateKeyPath), ("thumbprint", thumbprint));
+
+        public static string RemoveCaption => I18n.T("certificates.removeCaption");
+        public static string RemoveBody => I18n.T("certificates.removeBody");
 
         public static string Removed(int count) => I18n.T("certificates.removed", ("count", count));
 
@@ -325,7 +357,11 @@ internal static class Strings
 
         public static string RestoredLeftoverProxy(string endpoint) =>
             I18n.T("log.restoredLeftoverProxy", ("endpoint", endpoint));
-        public static string StartupCaptureOff => I18n.T("log.startupCaptureOff");
+        public static string StartupDecryptionOff => I18n.T("log.startupDecryptionOff");
+        public static string DontAskAgainNotSaved => I18n.T("log.dontAskAgainNotSaved");
+        public static string StartupPromptOff => I18n.T("log.startupPromptOff");
+        public static string RootNowTrusted => I18n.T("log.rootNowTrusted");
+        public static string RootNoLongerTrusted => I18n.T("log.rootNoLongerTrusted");
         public static string RootTrusted(string? thumbprint) => I18n.T("log.rootTrusted", ("thumbprint", thumbprint));
         public static string TrustRootFailed(string message) => I18n.T("log.trustRootFailed", ("message", message));
         public static string TrustingRootFailed(string message) => I18n.T("log.trustingRootFailed", ("message", message));
@@ -735,6 +771,10 @@ internal static class Strings
         public static string NotAJsonContentType => I18n.T("inspector.notAJsonContentType");
         public static string JsonSkipped => I18n.T("inspector.jsonSkipped");
         public static string NotValidJson(string message) => I18n.T("inspector.notValidJson", ("message", message));
+        public static string JsonBuilding => I18n.T("inspector.jsonBuilding");
+        public static string JsonTooLarge(int megabytes) => I18n.T("inspector.jsonTooLarge", ("megabytes", megabytes));
+        public static string JsonOmitted(int count) => I18n.T("inspector.jsonOmitted", ("count", count));
+        public static string JsonClipped(string text, int count) => I18n.T("inspector.jsonClipped", ("text", text), ("count", count));
 
         private static string BinaryContentType => I18n.T("inspector.binaryContentTypeFallback");
 
@@ -1063,6 +1103,10 @@ internal static class Strings
 
         public static string DecryptHttps => I18n.T("configurations.decryptHttps");
         public static string DecryptHttpsNote => I18n.T("configurations.decryptHttpsNote");
+        public static string DecryptWhenUntrusted => I18n.T("configurations.decryptWhenUntrusted");
+        public static string DecryptWhenUntrustedNote => I18n.T("configurations.decryptWhenUntrustedNote");
+        public static string AskToTrust => I18n.T("configurations.askToTrust");
+        public static string AskToTrustNote => I18n.T("configurations.askToTrustNote");
         public static string Http2Downstream => I18n.T("configurations.http2Downstream");
         public static string Http2DownstreamNote => I18n.T("configurations.http2DownstreamNote");
         public static string Http2Upstream => I18n.T("configurations.http2Upstream");
@@ -1077,6 +1121,10 @@ internal static class Strings
         public static string RemoveTrustedRoot => I18n.T("configurations.removeTrustedRoot");
         public static string ExportRoot => I18n.T("configurations.exportRoot");
         public static string OpenCertificateFolder => I18n.T("configurations.openCertificateFolder");
+        public static string CertificateTrusted => I18n.T("configurations.certificateTrusted");
+        public static string CertificateNotTrusted => I18n.T("configurations.certificateNotTrusted");
+        public static string CertificateNotTrustedDecrypting => I18n.T("configurations.certificateNotTrustedDecrypting");
+        public static string CertificateActionsNote => I18n.T("configurations.certificateActionsNote");
     }
 
     public static class Hosts

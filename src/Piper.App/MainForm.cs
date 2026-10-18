@@ -13,7 +13,7 @@ using Piper.Core.Telemetry;
 
 namespace Piper.App;
 
-public sealed class MainForm : Form, IMessageFilter
+public sealed partial class MainForm : Form, IMessageFilter
 {
     private readonly SessionStore _store = new();
     private bool _reportedFirstSession;
@@ -101,6 +101,7 @@ public sealed class MainForm : Form, IMessageFilter
         catch (Exception) { /* fall back to the WinForms default icon */ }
 
         _ca = CertificateAuthority.LoadOrCreate();
+        _trust = new TrustStateCache(() => TrustStore.IsTrusted(_ca.RootCertificate), TrustCheckLifetime);
         _proxy = new ProxyServer(_options, _ca, _store);
         _executor = new RequestExecutor(_options, _store);
         // Update traffic is still recorded in the shared store, but it must not inherit mutable
@@ -153,6 +154,7 @@ public sealed class MainForm : Form, IMessageFilter
             out _breakpointsLabel, out _sessionsLabel, out _selectedSessionDetailsLabel, out _zoomLabel);
         _captureStatusLabel.Click += (_, _) => ToggleCapture();
         _captureScopeLabel.Click += (_, _) => ShowCaptureScopeMenu();
+        var trustBar = BuildTrustUi(statusBar);
         ApplyCaptureScope();
         _rightTabs.AllowDrop = true;
         _rightTabs.DragEnter += OnSessionDragEnter;
@@ -160,6 +162,7 @@ public sealed class MainForm : Form, IMessageFilter
         _rightTabs.DragDrop += OnSessionDragDrop;
 
         Controls.Add(split);
+        Controls.Add(trustBar);
         Controls.Add(toolbar);
         Controls.Add(BuildMenu());
         Controls.Add(statusBar);
@@ -287,7 +290,7 @@ public sealed class MainForm : Form, IMessageFilter
         // "drag and drop does nothing" report can be read.
         if (IsElevated()) AppendLog(Strings.Log.RunningElevated);
         AppendLog(Strings.Log.RootCaPath(_ca.RootPfxPath));
-        AppendLog(TrustStore.IsTrusted(_ca.RootCertificate)
+        AppendLog(_trust.IsTrusted
             ? Strings.Log.RootCaTrusted
             : Strings.Log.RootCaNotTrusted);
         // The toggle persists across restarts, so say so on every start rather than leaving a
@@ -414,14 +417,14 @@ public sealed class MainForm : Form, IMessageFilter
 
         AskAnalyticsConsentIfNeeded();
 
-        if (!EnsureTrustedRootForStartup())
+        if (!EnsureTrustedRootForStartup(out var startCapture))
         {
             UpdateCaptureStatus();
             QueueStartupUpdateCheck();
             return;
         }
 
-        if (_captureEnabledOnStartup)
+        if (startCapture)
         {
             StartCapture();
         }
@@ -480,12 +483,15 @@ public sealed class MainForm : Form, IMessageFilter
     }
 
     /// <summary>
-    /// Gives the user an explicit startup choice before enabling capture. Trust installation
-    /// changes Windows' certificate store, so it must never happen silently.
+    /// Gives the user an explicit startup choice about trusting the root. Trust installation changes
+    /// Windows' certificate store, so it must never happen silently. Whatever the answer, capture
+    /// still starts (HTTPS is then simply not decrypted); this returns false only when Piper is
+    /// restarting after the user installed the root.
     /// </summary>
-    private bool EnsureTrustedRootForStartup()
+    private bool EnsureTrustedRootForStartup(out bool startCapture)
     {
-        if (TrustStore.IsTrusted(_ca.RootCertificate))
+        startCapture = _captureEnabledOnStartup;
+        if (_trust.IsTrusted)
         {
             // Without this a returning user's run looks, in the funnel, like one that skipped the
             // certificate step - which is also what the run after a successful trust's restart is.
@@ -494,22 +500,36 @@ public sealed class MainForm : Form, IMessageFilter
             return true;
         }
 
-        // Worth a line of its own: this dialog is modal, so while it is up the main window is
-        // disabled and refuses every drop. That reads as "drag and drop is broken" to a user who
-        // has not noticed the prompt, and it is what a fresh install shows on first run.
-        AppendLog(Strings.Log.ShowingTrustPrompt);
+        var decision = TrustPolicy.DecideStartup(_options.DecryptHttps, trusted: false,
+            _options.AskToTrustCertificate, _options.DecryptWhenUntrusted, _captureEnabledOnStartup, () =>
+            {
+                // Worth a line of its own: this dialog is modal, so while it is up the main window is
+                // disabled and refuses every drop. That reads as "drag and drop is broken" to a user who
+                // has not noticed the prompt, and it is what a fresh install shows on first run.
+                AppendLog(Strings.Log.ShowingTrustPrompt);
+                return ShowTrustPrompt();
+            });
+        startCapture = decision.StartCapture;
 
-        var answer = MessageBox.Show(this,
-            Strings.Certificates.StartupTrustBody,
-            Strings.Certificates.StartupTrustCaption,
-            MessageBoxButtons.OKCancel, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2);
-
-        if (answer != DialogResult.OK)
+        if (!decision.Prompted)
         {
-            Analytics.Track(AnalyticsEvents.CertTrusted,
-                (AnalyticsProperties.Source, "startup"), (AnalyticsProperties.Result, "declined"));
-            AppendLog(Strings.Log.StartupCaptureOff);
-            return false;
+            // Only when HTTPS really is passed through: with the opt-in on it is decrypted although Windows does not trust the root.
+            if (_options.DecryptHttps && !_options.DecryptWhenUntrusted) AppendLog(Strings.Log.StartupPromptOff);
+            return true;
+        }
+
+        if (decision.SuppressFuturePrompts)
+        {
+            PersistDontAskAgain();
+        }
+
+        if (!decision.InstallRequested)
+        {
+            // "suppressed" is Don't ask again, so permanent silencing can be told from putting it off.
+            Analytics.Track(AnalyticsEvents.CertTrusted, (AnalyticsProperties.Source, "startup"),
+                (AnalyticsProperties.Result, decision.SuppressFuturePrompts ? "suppressed" : "declined"));
+            AppendLog(Strings.Log.StartupDecryptionOff);
+            return true;
         }
 
         try
@@ -525,8 +545,10 @@ public sealed class MainForm : Form, IMessageFilter
             MessageBox.Show(this,
                 Strings.Certificates.StartupInstallFailed(ex.Message),
                 Strings.App.Name, MessageBoxButtons.OK, MessageBoxIcon.Error);
-            return false;
+            return true;
         }
+
+        _trust.Invalidate();
 
         // Outside the try above, because the certificate is already in the store by this point.
         // Reporting failing here must not be reported to the user as the trust install failing, and
@@ -559,7 +581,7 @@ public sealed class MainForm : Form, IMessageFilter
             MessageBox.Show(this,
                 Strings.Certificates.StartupInstallFailed(ex.Message),
                 Strings.App.Name, MessageBoxButtons.OK, MessageBoxIcon.Error);
-            return false;
+            return true;
         }
     }
 
@@ -886,12 +908,13 @@ public sealed class MainForm : Form, IMessageFilter
         SetGlobalUserAgent(string.IsNullOrWhiteSpace(value.Text) ? null : value.Text.Trim(), Strings.UserAgents.CustomName);
     }
 
-    private void ShowConfigurations()
+    private void ShowConfigurations(bool httpsTab = false)
     {
         using var dialog = new ConfigurationsDialog(_options, _captureEnabledOnStartup, _captureScope.ToString(),
             FontScale.WheelEnabled, Analytics.IsEnabled,
             TrustRootCertificate, UntrustRootCertificate, ExportRootCertificate, OpenCertificateFolder,
-            OpenAnalyticsFolder);
+            OpenAnalyticsFolder, () => _trust.IsTrusted);
+        if (httpsTab) dialog.SelectHttpsTab();
         if (dialog.ShowDialog(this) != DialogResult.OK) return;
 
         dialog.ApplyTo(_options);
@@ -1162,6 +1185,10 @@ public sealed class MainForm : Form, IMessageFilter
         _sessionsLabel.Image = SessionsIcon;
         RefreshStatusColours();
 
+        // UpdateCaptureStatus returns early while a capture toggle is in progress, which left the
+        // label showing an icon that is disposed just below.
+        StatusImages.Retarget(_captureStatusLabel, (oldCaptureOn, CaptureOnIcon), (oldCaptureOff, CaptureOffIcon));
+
         oldCaptureOn.Dispose();
         oldCaptureOff.Dispose();
         oldScope.Dispose();
@@ -1176,6 +1203,8 @@ public sealed class MainForm : Form, IMessageFilter
     private void RefreshStatusColours()
     {
         UpdateCaptureStatus();
+        // Repainting from the cached answer: this runs on the UI thread after every theme change.
+        ApplyTrustState(refreshInBackground: true);
         _selectedSessionDetailsLabel.ForeColor = Palette.TextDim;
     }
 
@@ -1411,6 +1440,8 @@ public sealed class MainForm : Form, IMessageFilter
 
     private void StartCapture()
     {
+        // Whether HTTPS is decrypted is settled before the first connection, not after it fails.
+        RefreshTrustState();
         try
         {
             _proxy.Start();
@@ -1601,7 +1632,9 @@ public sealed class MainForm : Form, IMessageFilter
 
     private void TrustRootCertificate()
     {
-        if (TrustStore.IsTrusted(_ca.RootCertificate))
+        // A user action, so ask the store rather than trust the cached read.
+        _trust.Invalidate();
+        if (_trust.IsTrusted)
         {
             MessageBox.Show(this, Strings.Certificates.AlreadyTrusted,
                 Strings.App.Name, MessageBoxButtons.OK, MessageBoxIcon.Information);
@@ -1623,6 +1656,7 @@ public sealed class MainForm : Form, IMessageFilter
         try
         {
             TrustStore.Install(_ca.RootCertificate);
+            RefreshTrustState();
             Analytics.Track(AnalyticsEvents.CertTrusted,
                 (AnalyticsProperties.Source, "manual"), (AnalyticsProperties.Result, "ok"));
             AppendLog(Strings.Log.RootTrusted(_ca.RootCertificate.Thumbprint));
@@ -1641,7 +1675,13 @@ public sealed class MainForm : Form, IMessageFilter
     {
         try
         {
-            var removed = TrustStore.Uninstall();
+            var removal = RootRemoval.RemoveIfConfirmed(
+                () => MessageBox.Show(this, Strings.Certificates.RemoveBody, Strings.Certificates.RemoveCaption,
+                    MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) == DialogResult.Yes,
+                TrustStore.Uninstall);
+            if (removal is not { } removed) return;
+
+            RefreshTrustState();
             AppendLog(Strings.Log.RootsRemoved(removed));
             MessageBox.Show(this, Strings.Certificates.Removed(removed),
                 Strings.App.Name, MessageBoxButtons.OK, MessageBoxIcon.Information);
@@ -2055,8 +2095,9 @@ public sealed class MainForm : Form, IMessageFilter
 
     private void UpdateStatus()
     {
+        var https = ApplyTrustState(refreshInBackground: true);
         _statusLabel.Text = _proxy.IsRunning
-            ? Strings.StatusBar.Listening(_proxy.Endpoint, _options.DecryptHttps)
+            ? Strings.StatusBar.Listening(_proxy.Endpoint, https)
             : Strings.StatusBar.NotCapturingStatus;
         if (_admissionQuery is { RegexTimedOut: true })
         {
