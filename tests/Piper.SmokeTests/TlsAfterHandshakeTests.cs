@@ -86,6 +86,70 @@ internal static class TlsAfterHandshakeTests
             }
         });
 
+        await runner.RunAsync("a .NET client that rejects the certificate over HTTP/2 (TLS 1.2 and 1.3) is recorded once, as rejected (1.3: or a bare close)", async () =>
+        {
+            foreach (var protocol in protocols)
+            {
+                await TlsFailureEvidenceTests.WithProxyAsync(ca, null, async (port, store) =>
+                {
+                    using var client = await TlsFailureEvidenceTests.OpenTunnelAsync(port);
+                    using var ssl = new SslStream(client.GetStream());
+                    try { await ssl.AuthenticateAsClientAsync(TlsFailureEvidenceTests.Client("h2reject.test", protocol, accept: false, SslApplicationProtocol.Http2)); }
+                    catch (Exception ex) when (ex is AuthenticationException or IOException) { }
+                    await TlsFailureEvidenceTests.CloseGracefullyAsync(client);
+                    runner.IsTrue(await Poll.UntilAsync(() => store.Snapshot().Any(s => s.TlsFailure is not null)), $"{protocol}: a row is recorded");
+                    await Task.Delay(300);
+                    var rows = Rows(store);
+                    runner.AreEqual(1, rows.Length, $"{protocol}: once");
+                    var kind = rows[0].TlsFailure!.Kind; // TLS 1.3: the alert races the client's reset, see TlsFailureEvidenceTests
+                    runner.IsTrue(kind == TlsFailureKind.Rejected || (protocol == SslProtocols.Tls13 && kind == TlsFailureKind.ClosedAfterHandshake),
+                        $"{protocol}: rejected, or on 1.3 a reset with no evidence (got {kind})");
+                });
+            }
+        });
+
+        await runner.RunAsync("an HTTP/2 client that completes the handshake and closes: before the preface, or after SETTINGS with no stream", async () =>
+        {
+            foreach (var preface in new[] { false, true })
+            {
+                await TlsFailureEvidenceTests.WithProxyAsync(ca, null, async (port, store) =>
+                {
+                    using var client = await TlsFailureEvidenceTests.OpenTunnelAsync(port);
+                    using var ssl = new SslStream(client.GetStream());
+                    await ssl.AuthenticateAsClientAsync(TlsFailureEvidenceTests.Client("h2close.test", SslProtocols.None, accept: true, SslApplicationProtocol.Http2));
+                    runner.AreEqual("h2", ssl.NegotiatedApplicationProtocol.ToString(), "h2 was negotiated");
+                    if (preface) await ssl.WriteAsync(H2Preface());
+                    await TlsFailureEvidenceTests.CloseGracefullyAsync(client);
+                    runner.IsTrue(await Poll.UntilAsync(() => store.Snapshot().Any(s => s.TlsFailure is not null)), $"preface={preface}: a row is recorded");
+                    await Task.Delay(300);
+                    var rows = Rows(store);
+                    runner.AreEqual(1, rows.Length, $"preface={preface}: once");
+                    runner.IsTrue(rows[0].TlsFailure is { Kind: TlsFailureKind.ClosedAfterHandshake, Phase: TlsFailurePhase.AfterHandshake },
+                        $"preface={preface}: closed after the handshake ({rows[0].TlsFailure!.Kind})");
+                    runner.AreEqual("h2close.test", rows[0].TlsFailure!.Sni, $"preface={preface}: with the SNI");
+                }, WindowOpenWide);
+            }
+        });
+
+        await runner.RunAsync("an HTTP/2 client that sends a request and then closes leaves no TLS failure row", async () =>
+        {
+            SessionStore? seen = null;
+            await TlsFailureEvidenceTests.WithProxyAsync(ca, null, async (port, store) =>
+            {
+                seen = store;
+                using var client = await TlsFailureEvidenceTests.OpenTunnelAsync(port);
+                using var ssl = new SslStream(client.GetStream());
+                await ssl.AuthenticateAsClientAsync(TlsFailureEvidenceTests.Client("h2served.test", SslProtocols.None, accept: true, SslApplicationProtocol.Http2));
+                // GET https://127.0.0.1:9/x on stream 1: indexed :method GET and :scheme https, :path and :authority as literals.
+                byte[] headers = [0x82, 0x87, 0x44, 0x02, .. "/x"u8, 0x41, 0x0b, .. "127.0.0.1:9"u8];
+                byte[] frame = [0, 0, (byte)headers.Length, 0x01, 0x05, 0, 0, 0, 1, .. headers];
+                await ssl.WriteAsync(H2Preface().Concat(frame).ToArray());
+                runner.IsTrue(await Poll.UntilAsync(() => store.Snapshot().Any(Answered)), "the request is answered");
+                client.Dispose();
+            }, WindowOpenWide);
+            runner.AreEqual(0, Rows(seen!).Length, "the close after the request is not a failure");
+        });
+
         await runner.RunAsync("a close within the window is switchable off, and one after it is not recorded; a refusal is recorded either way", async () =>
         {
             await TlsFailureEvidenceTests.WithProxyAsync(ca, null, async (port, store) =>
@@ -189,4 +253,7 @@ internal static class TlsAfterHandshakeTests
     private static bool Answered(Session session) => session is { IsAutoResponded: true, State: SessionState.Complete };
 
     private static Session[] Rows(SessionStore store) => store.Snapshot().Where(s => s.TlsFailure is not null).ToArray();
+
+    /// <summary>The connection preface and an empty SETTINGS frame.</summary>
+    private static byte[] H2Preface() => [.. "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"u8, 0, 0, 0, 0x04, 0, 0, 0, 0, 0];
 }
