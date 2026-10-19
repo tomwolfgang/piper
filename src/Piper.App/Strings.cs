@@ -641,6 +641,7 @@ internal static class Strings
         public static string ResponseSummary(string startLine) => I18n.T("inspector.responseSummary", ("startLine", startLine));
         public static string ResponseFailed(string? error, string hint) =>
             I18n.T("inspector.responseFailed", ("error", error), ("hint", hint));
+        public static string ResponseTlsFailed(string reason) => I18n.T("inspector.responseTlsFailed", ("reason", reason));
         public static string ResponseTunnel => I18n.T("inspector.responseTunnel");
         public static string ResponseWaiting => I18n.T("inspector.responseWaiting");
         public static string ResponseReceiving(string startLine, string progress) =>
@@ -794,6 +795,90 @@ internal static class Strings
     public static class CertificateHint
     {
         public static string VerifyOriginCertificates => I18n.T("certificateHint.verifyOriginCertificates");
+    }
+
+    /// <summary>The wording for a failed client TLS handshake. States what Piper observed: it never says "pinning".</summary>
+    public static class TlsFailure
+    {
+        public static string Result => I18n.T("tlsFailure.result");
+
+        /// <summary>The reason for a kind, as a Path cell shows it; <paramref name="alert"/> only adds to a refusal.</summary>
+        public static string Reason(TlsFailureKind kind, string? alert) => kind switch
+        {
+            TlsFailureKind.Rejected when alert is not null => I18n.T("tlsFailure.reasonRejectedAlert", ("alert", alert)),
+            TlsFailureKind.Rejected => I18n.T("tlsFailure.reasonRejected"),
+            TlsFailureKind.ClosedInHandshake => I18n.T("tlsFailure.reasonClosed"),
+            TlsFailureKind.ClosedAfterHandshake => I18n.T("tlsFailure.reasonAfterHandshake"),
+            TlsFailureKind.ClosedEarly => I18n.T("tlsFailure.reasonEarly"),
+            TlsFailureKind.Timeout => I18n.T("tlsFailure.reasonTimeout"),
+            TlsFailureKind.NoCommonProtocol => I18n.T("tlsFailure.reasonProtocol"),
+            TlsFailureKind.NotTls => I18n.T("tlsFailure.reasonNotTls"),
+            _ => I18n.T("tlsFailure.reasonOther"),
+        };
+
+        public static string PathLabel(string reason, int count) => I18n.T("tlsFailure.path", ("reason", reason), ("count", count));
+        public static string Overflow(int count) => I18n.T("tlsFailure.overflow", ("count", count));
+
+        public static string PanelApp => I18n.T("tlsFailure.panelApp");
+        public static string PanelHost => I18n.T("tlsFailure.panelHost");
+        public static string PanelSni => I18n.T("tlsFailure.panelSni");
+        public static string PanelAttempts => I18n.T("tlsFailure.panelAttempts");
+        public static string PanelLastAttempt => I18n.T("tlsFailure.panelLastAttempt");
+        public static string PanelPhase => I18n.T("tlsFailure.panelPhase");
+        public static string PanelAlert => I18n.T("tlsFailure.panelAlert");
+        public static string PanelSecurityStatus => I18n.T("tlsFailure.panelSecurityStatus");
+        public static string PanelObserved => I18n.T("tlsFailure.panelObserved");
+        public static string PanelUnknown => I18n.T("tlsFailure.panelUnknown");
+        public static string PanelNext => I18n.T("tlsFailure.panelNext");
+        public static string AttemptsValue(int count) => I18n.T("tlsFailure.attemptsValue", ("count", count));
+        public static string LastAttemptValue(DateTimeOffset time) => I18n.T("tlsFailure.lastAttemptValue", ("time", time));
+        public static string SecurityStatusValue(uint code) => I18n.T("tlsFailure.securityStatusValue", ("code", code));
+
+        public static string Phase(TlsFailurePhase phase) => phase switch
+        {
+            TlsFailurePhase.BeforeHello => I18n.T("tlsFailure.phaseBeforeHello"),
+            TlsFailurePhase.InHandshake => I18n.T("tlsFailure.phaseInHandshake"),
+            _ => I18n.T("tlsFailure.phaseAfterHandshake"),
+        };
+
+        /// <summary>What Piper observed, for a kind; <paramref name="overflow"/> is the row that counts the failures without a row.</summary>
+        public static string Observed(TlsFailureKind kind, bool overflow) => overflow ? I18n.T("tlsFailure.observedOverflow") : kind switch
+        {
+            TlsFailureKind.Rejected => I18n.T("tlsFailure.observedRejected"),
+            TlsFailureKind.ClosedInHandshake => I18n.T("tlsFailure.observedClosed"),
+            TlsFailureKind.ClosedAfterHandshake => I18n.T("tlsFailure.observedAfterHandshake"),
+            TlsFailureKind.ClosedEarly => I18n.T("tlsFailure.observedEarly"),
+            TlsFailureKind.Timeout => I18n.T("tlsFailure.observedTimeout"),
+            TlsFailureKind.NoCommonProtocol => I18n.T("tlsFailure.observedProtocol"),
+            TlsFailureKind.NotTls => I18n.T("tlsFailure.observedNotTls"),
+            _ => I18n.T("tlsFailure.observedOther"),
+        };
+
+        /// <summary>What Piper cannot tell, for a kind.</summary>
+        public static string Unknown(TlsFailureKind kind, bool overflow) => overflow ? I18n.T("tlsFailure.unknownOverflow") : kind switch
+        {
+            TlsFailureKind.Rejected => I18n.T("tlsFailure.unknownRejected"),
+            TlsFailureKind.ClosedInHandshake => I18n.T("tlsFailure.unknownClosed"),
+            TlsFailureKind.ClosedAfterHandshake => I18n.T("tlsFailure.unknownAfterHandshake"),
+            TlsFailureKind.ClosedEarly => I18n.T("tlsFailure.unknownEarly"),
+            TlsFailureKind.Timeout => I18n.T("tlsFailure.unknownTimeout"),
+            TlsFailureKind.NoCommonProtocol => I18n.T("tlsFailure.unknownProtocol"),
+            TlsFailureKind.NotTls => I18n.T("tlsFailure.unknownNotTls"),
+            _ => I18n.T("tlsFailure.unknownOther"),
+        };
+
+        /// <summary>The next step, for a kind.</summary>
+        public static string Next(TlsFailureKind kind, bool overflow) => overflow ? I18n.T("tlsFailure.nextOverflow") : kind switch
+        {
+            TlsFailureKind.Rejected => I18n.T("tlsFailure.nextRejected"),
+            TlsFailureKind.ClosedInHandshake => I18n.T("tlsFailure.nextClosed"),
+            TlsFailureKind.ClosedAfterHandshake => I18n.T("tlsFailure.nextAfterHandshake"),
+            TlsFailureKind.ClosedEarly => I18n.T("tlsFailure.nextEarly"),
+            TlsFailureKind.Timeout => I18n.T("tlsFailure.nextTimeout"),
+            TlsFailureKind.NoCommonProtocol => I18n.T("tlsFailure.nextProtocol"),
+            TlsFailureKind.NotTls => I18n.T("tlsFailure.nextNotTls"),
+            _ => I18n.T("tlsFailure.nextOther"),
+        };
     }
 
     // --------------------------------------------------------------------- composer
@@ -1108,6 +1193,8 @@ internal static class Strings
         public static string DecryptHttpsNote => I18n.T("configurations.decryptHttpsNote");
         public static string DecryptWhenUntrusted => I18n.T("configurations.decryptWhenUntrusted");
         public static string DecryptWhenUntrustedNote => I18n.T("configurations.decryptWhenUntrustedNote");
+        public static string RecordClosedAfterHandshake => I18n.T("configurations.recordClosedAfterHandshake");
+        public static string RecordClosedAfterHandshakeNote => I18n.T("configurations.recordClosedAfterHandshakeNote");
         public static string AskToTrust => I18n.T("configurations.askToTrust");
         public static string AskToTrustNote => I18n.T("configurations.askToTrustNote");
         public static string Http2Downstream => I18n.T("configurations.http2Downstream");

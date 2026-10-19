@@ -30,6 +30,7 @@ public enum SearchOutcome
 /// <item><c>status:2xx</c>, <c>status:&gt;=400</c>, <c>status:200..299</c></item>
 /// <item><c>size:&gt;100kb</c>, <c>dur:&gt;500</c> (ms)</item>
 /// <item><c>is:https is:json -is:tunnel</c></item>
+/// <item><c>is:tlsfail</c>, <c>handshake:rejected|closed</c> - failed client TLS handshakes, by what Piper observed</item>
 /// <item><c>-host:cdn.example.com</c> - negation</item>
 /// <item><c>domain:example.com</c> - that host and its subdomains, never a lookalike</item>
 /// <item><c>stat:200</c> - an unrecognised field is searched literally, not ignored</item>
@@ -342,6 +343,7 @@ public sealed class SearchQuery
             "id" => NumericField(token, s => s.Id, ParsePlain),
 
             "is" or "has" => CompileIs(token.Value),
+            "handshake" => CompileHandshake(token),
 
             // Not a field we know. Search the term literally rather than discarding it: dropping it
             // used to leave a one-term query with no predicates at all, and a query with no
@@ -668,6 +670,7 @@ public sealed class SearchQuery
         "captured" => s => !s.IsComposed,
         "auto" or "autoresponder" or "faked" => s => s.IsAutoResponded,
         "error" or "failed" => s => s.State == SessionState.Failed || s.StatusCode >= 400,
+        "tlsfail" or "handshake" => s => s.TlsFailure is not null,
         "complete" or "done" => s => s.State == SessionState.Complete,
         "pending" or "inflight" => s => s.State is SessionState.Pending or SessionState.SendingRequest or SessionState.AwaitingResponse or SessionState.ReceivingBody,
         "redirect" => s => s.StatusCode is >= 300 and < 400,
@@ -683,6 +686,42 @@ public sealed class SearchQuery
         "body" => s => s.ResponseSize > 0,
         _ => throw new ArgumentException($"unknown 'is:' value '{value}'"),
     };
+
+    /// <summary>
+    /// <c>handshake:rejected|closed</c>: the failed client handshakes of those kinds. There is deliberately
+    /// no "pinning" value: Piper sees that a client refused its certificate, never why. The row that counts
+    /// failures with no row of their own stands for many kinds, so no kind selects it; <c>is:tlsfail</c> does.
+    /// </summary>
+    private static Func<Session, bool> CompileHandshake(Token token)
+    {
+        if (token.IsRegex) throw new ArgumentException("'handshake:' takes a kind, not a regular expression");
+
+        var kinds = new List<TlsFailureKind>();
+        foreach (var key in token.Value.Split('|', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            var found = Array.FindIndex(HandshakeKinds, kind => string.Equals(kind.Key, key, StringComparison.OrdinalIgnoreCase));
+            if (found < 0) throw new ArgumentException($"unknown 'handshake:' value '{key}'");
+            kinds.Add(HandshakeKinds[found].Kind);
+        }
+        if (kinds.Count == 0) throw new ArgumentException("missing handshake kind");
+
+        return s => s.TlsFailure is { IsOverflow: false } failure && kinds.Contains(failure.Kind);
+    }
+
+    private static readonly (string Key, TlsFailureKind Kind)[] HandshakeKinds =
+    [
+        ("rejected", TlsFailureKind.Rejected),
+        ("closed", TlsFailureKind.ClosedInHandshake),
+        ("afterhello", TlsFailureKind.ClosedAfterHandshake),
+        ("early", TlsFailureKind.ClosedEarly),
+        ("timeout", TlsFailureKind.Timeout),
+        ("protocol", TlsFailureKind.NoCommonProtocol),
+        ("nottls", TlsFailureKind.NotTls),
+        ("other", TlsFailureKind.Other),
+    ];
+
+    /// <summary>The values <c>handshake:</c> accepts, for autocomplete and the documentation check.</summary>
+    public static readonly string[] HandshakeValues = [.. HandshakeKinds.Select(kind => "handshake:" + kind.Key)];
 
     private static Regex BuildRegex(string pattern) =>
         new(pattern, RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, TimeSpan.FromMilliseconds(250));
@@ -745,13 +784,13 @@ public sealed class SearchQuery
         "method:", "host:", "domain:", "path:", "query:", "url:", "status:", "ct:",
         "header:", "reqheader:", "respheader:",
         "req:", "resp:", "body:",
-        "size:", "reqsize:", "dur:", "id:", "error:", "is:",
+        "size:", "reqsize:", "dur:", "id:", "error:", "is:", "handshake:",
     ];
 
     public static readonly string[] IsValues =
     [
         "is:https", "is:http", "is:tunnel", "is:composed", "is:captured", "is:auto", "is:error",
         "is:complete", "is:pending", "is:redirect", "is:ok", "is:json", "is:xml",
-        "is:html", "is:image", "is:script", "is:css", "is:slow", "is:cached", "is:body",
+        "is:html", "is:image", "is:script", "is:css", "is:slow", "is:cached", "is:body", "is:tlsfail",
     ];
 }
