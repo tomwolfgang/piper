@@ -65,6 +65,7 @@ public sealed class SessionListView : UserControl
     private Func<Session, bool>? _visibilityFilter;
     private Func<Session, bool>? _filtersetFilter;
     private Func<Session, bool>? _sessionHiddenHostsFilter;
+    private bool _hiddenHostsFilterChanged;
     private bool _autoScroll = true;
 
     // Null keeps the store's own order, which is what the grid has always shown. A header click
@@ -339,6 +340,7 @@ public sealed class SessionListView : UserControl
         set
         {
             _sessionHiddenHostsFilter = value;
+            _hiddenHostsFilterChanged = true;
             Rebuild();
         }
     }
@@ -716,6 +718,8 @@ public sealed class SessionListView : UserControl
         var anchor = previousTop >= 0 && previousTop < _visible.Count ? _visible[previousTop] : null;
         var filterChanged = _filterChanged;
         _filterChanged = false;
+        var hiddenHostsFilterChanged = _hiddenHostsFilterChanged;
+        _hiddenHostsFilterChanged = false;
         _store.CopyTo(_visible);
         PruneMarks(_visible);
         ApplyVisibilityFiltersInPlace();
@@ -728,6 +732,18 @@ public sealed class SessionListView : UserControl
         }
         if (_sortColumn is { } sortColumn)
             SessionSort.Sort(_visible, sortColumn, _sortDescending);
+
+        var selectedSessionWasHidden = false;
+        if (hiddenHostsFilterChanged && previousIds is { Count: > 0 })
+        {
+            selectedSessionWasHidden = true;
+            foreach (var session in _visible)
+            {
+                if (!previousIds.Contains(session.Id)) continue;
+                selectedSessionWasHidden = false;
+                break;
+            }
+        }
 
         _list.BeginUpdate();
         try
@@ -765,7 +781,9 @@ public sealed class SessionListView : UserControl
             // since reselecting rows can drag the view toward them.
             if (following)
             {
-                _list.EnsureVisible(_visible.Count - 1);
+                // Hiding the selected host is an explicit change of view, not new traffic to follow.
+                // Start the remaining rows at the top instead of leaving a short list at its old tail.
+                _list.EnsureVisible(selectedSessionWasHidden ? 0 : _visible.Count - 1);
             }
             else if (_visible.Count > 0)
             {
