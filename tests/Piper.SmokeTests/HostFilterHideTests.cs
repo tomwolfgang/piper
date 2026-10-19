@@ -9,6 +9,40 @@ internal static class HostFilterHideTests
 {
     public static async Task RunAsync(TestRunner runner)
     {
+        await runner.RunAsync("showing a hidden host again unticks only the entry that names it", () =>
+        {
+            var settings = new FilterSettings();
+            runner.IsTrue(settings.HideHost("api.example.com"), "setup: the host is hidden");
+            runner.IsTrue(settings.UnhideHost(" API.example.com "), "unhiding reports a change");
+            runner.IsTrue(!settings.Hosts[0].Enabled, "its entry is unticked");
+            runner.AreEqual(1, settings.Hosts.Count, "and kept, one click from hiding it again");
+            runner.IsTrue(!settings.Hides("api.example.com"), "the filterset no longer hides it");
+            runner.IsTrue(!settings.UnhideHost("api.example.com"), "a second unhide changes nothing");
+
+            // A broader pattern is the user's own entry, not one a hide added.
+            var wildcard = new FilterSettings
+            {
+                HostsMode = 1,
+                Hosts = [new HostFilterEntry { Pattern = "*.example.com", Enabled = true }],
+            };
+            runner.IsTrue(!wildcard.UnhideHost("api.example.com"), "a covering wildcard is left alone");
+            runner.IsTrue(wildcard.Hosts[0].Enabled, "and stays ticked");
+
+            // Show-only lists, blanks, nulls and hand-edited junk change nothing and do not throw.
+            var showOnly = new FilterSettings
+            {
+                HostsMode = 0,
+                Hosts = [new HostFilterEntry { Pattern = "api.example.com", Enabled = true }],
+            };
+            runner.IsTrue(!showOnly.UnhideHost("api.example.com"), "a show-only entry is not a hide");
+            runner.IsTrue(showOnly.Hosts[0].Enabled, "and stays ticked");
+            var junk = new FilterSettings { HostsMode = 1, Hosts = null!, };
+            runner.IsTrue(!junk.UnhideHost("api.example.com"), "a null list changes nothing");
+            runner.IsTrue(!settings.UnhideHost(null), "a null host changes nothing");
+            runner.IsTrue(!settings.UnhideHost("   "), "a blank host changes nothing");
+            return Task.CompletedTask;
+        });
+
         await runner.RunAsync("hiding a host is recorded in the persisted Hosts list", () =>
         {
             // An untouched filterset starts in show-only mode with nothing listed, which filters

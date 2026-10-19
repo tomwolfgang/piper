@@ -81,6 +81,29 @@ public sealed class FilterSettings
                 && HostFilterTerm.Covers(entry.Pattern, host));
     }
 
+    /// <summary>
+    /// Undoes <see cref="HideHost"/>: unticks the hide-mode entry naming exactly
+    /// <paramref name="host"/>, keeping it in the list so it is one click to hide again. A broader
+    /// pattern that also covers the host is the user's own entry, not one a hide added, so it is
+    /// left alone. Returns whether anything changed.
+    /// </summary>
+    public bool UnhideHost(string? host)
+    {
+        var pattern = host?.Trim();
+        if (HostsMode != 1 || string.IsNullOrEmpty(pattern)) return false;
+
+        var entries = (Hosts ?? []).Where(entry => !string.IsNullOrWhiteSpace(entry?.Pattern)).ToList();
+        var changed = false;
+        foreach (var entry in entries.Where(entry =>
+                     entry.Enabled && string.Equals(entry.Pattern.Trim(), pattern, StringComparison.OrdinalIgnoreCase)))
+        {
+            entry.Enabled = false;
+            changed = true;
+        }
+
+        return changed && Commit(entries);
+    }
+
     private bool Commit(List<HostFilterEntry> entries)
     {
         Hosts = entries;

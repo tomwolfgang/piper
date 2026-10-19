@@ -412,7 +412,9 @@ internal static class Strings
             I18n.T("log.hideHostShowOnlyConflict", ("host", host));
         public static string HideHostSwitchedToHideMode => I18n.T("log.hideHostSwitchedToHideMode");
         public static string HideHostAdded(string host) => I18n.T("log.hideHostAdded", ("host", host));
-        public static string SessionHiddenHostsShown => I18n.T("log.sessionHiddenHostsShown");
+        public static string HiddenShown(string value) => I18n.T("log.hiddenShown", ("value", value));
+        public static string HiddenHostShownUnticked(string host) => I18n.T("log.hiddenHostShownUnticked", ("host", host));
+        public static string AllHiddenShown => I18n.T("log.allHiddenShown");
         public static string HostPatternsIgnored(int count) => I18n.T("log.hostPatternsIgnored", ("count", count));
 
         public static string ShowingTrustPrompt => I18n.T("log.showingTrustPrompt");
@@ -582,8 +584,12 @@ internal static class Strings
         public static string ClearFindMarks => I18n.T("sessionList.clearFindMarks");
         public static string FilterSessions => I18n.T("sessionList.filterSessions");
         public static string FilterToThisHost => I18n.T("sessionList.filterToThisHost");
-        public static string HideThisHost => I18n.T("sessionList.hideThisHost");
-        public static string ShowHiddenHosts => I18n.T("sessionList.showHiddenHosts");
+        public static string HideMenu => I18n.T("sessionList.hideMenu");
+        public static string HiddenHost(string value) => I18n.T("sessionList.hiddenHost", ("value", value));
+        public static string HiddenProcess(string value) => I18n.T("sessionList.hiddenProcess", ("value", value));
+        public static string HiddenContentType(string value) => I18n.T("sessionList.hiddenContentType", ("value", value));
+        public static string ShowHiddenMenu(int count) => I18n.T("sessionList.showHiddenMenu", ("count", count));
+        public static string ShowAllHidden => I18n.T("sessionList.showAllHidden");
         public static string FollowTail => I18n.T("sessionList.followTail");
         public static string FollowTailTooltip => I18n.T("sessionList.followTailTooltip");
         public static string SendUrlToTextWizard => I18n.T("sessionList.sendUrlToTextWizard");
