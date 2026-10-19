@@ -584,6 +584,7 @@ internal static class Strings
         public static string ClearFindMarks => I18n.T("sessionList.clearFindMarks");
         public static string FilterSessions => I18n.T("sessionList.filterSessions");
         public static string FilterToThisHost => I18n.T("sessionList.filterToThisHost");
+        public static string HideHost(string value) => I18n.T("sessionList.hideHost", ("value", value));
         public static string HideMenu => I18n.T("sessionList.hideMenu");
         public static string HiddenHost(string value) => I18n.T("sessionList.hiddenHost", ("value", value));
         public static string HiddenProcess(string value) => I18n.T("sessionList.hiddenProcess", ("value", value));

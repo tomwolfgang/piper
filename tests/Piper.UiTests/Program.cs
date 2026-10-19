@@ -124,29 +124,35 @@ internal static class Program
                 session.ProcessName = i % 2 == 0 ? "game" : "brow&ser";
                 if (i % 5 == 0) session.Response!.Headers.Add("Content-Type", "image/png; q=1");
             }
-            string? shownHost = null;
+            string? shownHost = null, hiddenHost = null;
             var showAll = 0;
             grid.ShowHiddenHostRequested += (_, host) => shownHost = host;
             grid.ShowAllHiddenRequested += (_, _) => showAll++;
+            grid.HideHostRequested += (_, host) => hiddenHost = host;
 
-            // Row 0: game, image/png.
+            // Row 0: game, image/png. The host is a one-click item of its own beside "Hide by".
             var hide = OpenSubmenu(list, 0, SessionListView.HideMenuName);
-            Check(hide.DropDownItems.Count == 3 && hide.DropDownItems[1].Text!.EndsWith("game", StringComparison.Ordinal)
-                && hide.DropDownItems[2].Text!.EndsWith("image/png", StringComparison.Ordinal),
-                $"Hide offers the row's host, process and media type ({string.Join(" | ", hide.DropDownItems.Cast<ToolStripItem>().Select(item => item.Text))})");
-            hide.DropDownItems[1].PerformClick();
+            var hideHost = list.ContextMenuStrip!.Items[SessionListView.HideHostItemName]!;
+            Check(hideHost.Enabled && hideHost.Text!.EndsWith(RareHost, StringComparison.Ordinal),
+                $"Hide host names the row's host ({hideHost.Text})");
+            hideHost.PerformClick();
+            Check(hiddenHost == RareHost, "Hide host asks the form to hide the row's host");
+            Check(hide.DropDownItems.Count == 2 && hide.DropDownItems[0].Text!.EndsWith("game", StringComparison.Ordinal)
+                && hide.DropDownItems[1].Text!.EndsWith("image/png", StringComparison.Ordinal),
+                $"Hide by offers the row's process and media type ({string.Join(" | ", hide.DropDownItems.Cast<ToolStripItem>().Select(item => item.Text))})");
+            hide.DropDownItems[0].PerformClick();
             list.ContextMenuStrip!.Close();
             PumpUntil(() => list.VirtualListSize == 15);
             Check(list.VirtualListSize == 15, $"the process's rows are hidden (got {list.VirtualListSize})");
 
             // Row 0 is now item 1: brow&ser, no content type.
             hide = OpenSubmenu(list, 0, SessionListView.HideMenuName);
-            Check(hide.DropDownItems[1].Text!.EndsWith("brow&&ser", StringComparison.Ordinal), "a captured '&' is not taken as a mnemonic");
-            Check(!hide.DropDownItems[2].Enabled, "a row with no content type cannot hide one");
+            Check(hide.DropDownItems[0].Text!.EndsWith("brow&&ser", StringComparison.Ordinal), "a captured '&' is not taken as a mnemonic");
+            Check(!hide.DropDownItems[1].Enabled, "a row with no content type cannot hide one");
             list.ContextMenuStrip!.Close();
 
             hide = OpenSubmenu(list, 2, SessionListView.HideMenuName); // item 5: image/png
-            hide.DropDownItems[2].PerformClick();
+            hide.DropDownItems[1].PerformClick();
             list.ContextMenuStrip!.Close();
             PumpUntil(() => list.VirtualListSize == 12);
             Check(list.VirtualListSize == 12, $"the media type's rows are hidden too (got {list.VirtualListSize})");

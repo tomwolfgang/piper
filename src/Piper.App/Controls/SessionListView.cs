@@ -1269,7 +1269,13 @@ public sealed class SessionListView : UserControl
             if (SelectedSession is { } session) FilterText = $"host:{session.Host}";
         });
         // Fiddler's "Filter Now": hide what this row has, and list what is hidden so each is one click
-        // to show again. Both are filled as the menu opens, from the row and the current hides.
+        // to show again. All are filled as the menu opens, from the row and the current hides. The
+        // host, the common case, is one click; the rarer criteria sit in "Hide by".
+        var hideHost = new ToolStripMenuItem(string.Empty, null, (_, _) =>
+        {
+            if (SelectedSession is { } session) HideHostRequested?.Invoke(this, session.Host);
+        }) { Name = HideHostItemName };
+        menu.Items.Add(hideHost);
         var hide = new ToolStripMenuItem(Strings.SessionList.HideMenu) { Name = HideMenuName };
         hide.DropDownItems.Add(new ToolStripMenuItem()); // a placeholder, so the submenu arrow shows
         menu.Items.Add(hide);
@@ -1291,7 +1297,7 @@ public sealed class SessionListView : UserControl
             resend.Enabled = SelectedSession is { IsTunnel: false, Request: not null };
             copyAs.Enabled = resend.Enabled;
             clearMarks.Enabled = _marks.Count > 0;
-            FillHideMenu(hide);
+            FillHideMenu(hideHost, hide);
             FillShowHiddenMenu(showHidden);
             autoResponder.Enabled = SelectedSession is { IsTunnel: false, Request.Url: not null };
         };
@@ -1299,24 +1305,26 @@ public sealed class SessionListView : UserControl
         _list.ContextMenuStrip = menu;
     }
 
-    /// <summary>The context menu's Hide submenu, named so a test can find it.</summary>
+    /// <summary>The context menu's "Hide host" item, named so a test can find it.</summary>
+    public const string HideHostItemName = "hideHostItem";
+
+    /// <summary>The context menu's "Hide by" submenu, named so a test can find it.</summary>
     public const string HideMenuName = "hideMenu";
 
     /// <summary>The context menu's "Show hidden" submenu, named so a test can find it.</summary>
     public const string ShowHiddenMenuName = "showHiddenMenu";
 
-    private void FillHideMenu(ToolStripMenuItem hide)
+    private void FillHideMenu(ToolStripMenuItem hideHost, ToolStripMenuItem hide)
     {
         hide.DropDownItems.Clear();
         var session = SelectedSession;
+        var full = HiddenCount >= MaxHides;
+        // The form refuses a host that is not filterable, so offer only what it will accept.
+        hideHost.Text = Strings.SessionList.HideHost(MenuText(session?.Host ?? string.Empty));
+        hideHost.Enabled = session is not null && !full && HostFilterTerm.IsFilterableHost(session.Host);
         hide.Enabled = session is not null;
         if (session is null) return;
 
-        var full = HiddenCount >= MaxHides;
-        // The form refuses a host that is not filterable, so offer only what it will accept.
-        AddMenuItem(hide, Strings.SessionList.HiddenHost(MenuText(session.Host)),
-            !full && HostFilterTerm.IsFilterableHost(session.Host),
-            () => HideHostRequested?.Invoke(this, session.Host));
         AddMenuItem(hide, Strings.SessionList.HiddenProcess(MenuText(session.ProcessName)),
             !full && session.ProcessName.Trim().Length > 0,
             () => HideProcess(session.ProcessName));
