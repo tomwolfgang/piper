@@ -162,7 +162,7 @@ internal static class TlsScenarios
     }
 
     /// <summary>Median of five 1 KB echoes through a relay, straight to the origin's tunnel port.</summary>
-    private static async Task<double> MeasureRoundTripAsync(int port, CancellationToken ct)
+    internal static async Task<double> MeasureRoundTripAsync(int port, CancellationToken ct)
     {
         var samples = new List<double>();
         for (var i = 0; i < 5; i++)

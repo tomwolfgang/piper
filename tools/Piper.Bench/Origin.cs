@@ -18,7 +18,7 @@ namespace Piper.Bench;
 /// What the proxy talks to, on loopback and in the driver's process: a Kestrel HTTP/1.1 origin and a
 /// raw TCP server for CONNECT tunnels. Every size a client can ask for is clamped.
 ///
-/// HTTP: <c>/small</c> (256 B), <c>/hdr</c> (40 response headers), <c>/big?mb=N</c> and
+/// HTTP: <c>/small</c> (256 B), <c>/kb?n=N</c> (N KB, 1 to 1024), <c>/hdr</c> (40 response headers), <c>/big?mb=N</c> and
 /// <c>/bigchunked?mb=N</c> (N MB, with a Content-Length or chunked), <c>/up</c> (counts the request body).
 /// Tunnel: the first byte of the first <see cref="PayloadBytes"/> bytes picks the mode, <c>P</c> echoes a
 /// payload, <c>D</c> sends <see cref="TunnelMegabytes"/> MB, <c>U</c> receives until the client half-closes.
@@ -59,6 +59,9 @@ internal sealed class Origin : IAsyncDisposable
     /// <summary>HTTPS (HTTP/1.1 and HTTP/2) with a throwaway self-signed certificate.</summary>
     public int TlsPort { get; private set; }
     public int TunnelPort { get; private set; }
+
+    /// <summary>The SHA-1 hash of the TLS certificate, so a client that goes straight to the origin can pin it.</summary>
+    public string CertificateHash => _certificate.GetCertHashString();
 
     /// <summary>Distinct connections the origin has accepted since <see cref="ResetConnectionCount"/>.</summary>
     public int ConnectionCount { get { lock (_connectionIds) return _connectionIds.Count; } }
@@ -136,6 +139,16 @@ internal sealed class Origin : IAsyncDisposable
                 response.ContentLength = 512;
                 await response.Body.WriteAsync(new byte[512], context.RequestAborted).ConfigureAwait(false);
                 break;
+            case "/kb":
+            {
+                if (!int.TryParse(context.Request.Query["n"], out var kb) || kb < 1 || kb > 1024) { response.StatusCode = 400; break; }
+                var total = kb * 1024;
+                response.ContentType = "application/octet-stream";
+                response.ContentLength = total;
+                for (var sent = 0; sent < total; sent += Chunk.Length)
+                    await response.Body.WriteAsync(Chunk.AsMemory(0, Math.Min(Chunk.Length, total - sent)), context.RequestAborted).ConfigureAwait(false);
+                break;
+            }
             case "/big" or "/bigchunked":
             {
                 if (!int.TryParse(context.Request.Query["mb"], out var mb) || mb < 1 || mb > MaxMegabytes) { response.StatusCode = 400; break; }

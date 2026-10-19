@@ -29,14 +29,20 @@ internal sealed class LatencyRelay : IAsyncDisposable
     private readonly TcpListener _listener = new(IPAddress.Loopback, 0);
     private readonly int _targetPort;
     private readonly long _delayTicks;
+    private readonly long _connectTicks;
+    private int _accepted;
     private readonly CancellationTokenSource _stop = new();
     private readonly Task _accepting;
     private readonly List<Task> _relays = [];
 
-    public LatencyRelay(int targetPort, TimeSpan oneWay)
+    /// <param name="connectRoundTrip">Also charge each new connection the round trip of its TCP handshake, which
+    /// loopback completes at once: the first bytes the dialling side sends wait one extra round trip. For the
+    /// client-speaks-first protocols measured here (TLS, HTTP) the arrival times are those of a real handshake.</param>
+    public LatencyRelay(int targetPort, TimeSpan oneWay, bool connectRoundTrip = false)
     {
         _targetPort = targetPort;
         _delayTicks = (long)(oneWay.TotalSeconds * Stopwatch.Frequency);
+        _connectTicks = connectRoundTrip ? 2 * _delayTicks : 0;
         timeBeginPeriod(1);
         try
         {
@@ -54,6 +60,9 @@ internal sealed class LatencyRelay : IAsyncDisposable
 
     public int Port { get; }
 
+    /// <summary>Connections accepted so far.</summary>
+    public int Accepted => Volatile.Read(ref _accepted);
+
     private async Task AcceptAsync()
     {
         while (!_stop.IsCancellationRequested)
@@ -61,6 +70,7 @@ internal sealed class LatencyRelay : IAsyncDisposable
             TcpClient client;
             try { client = await _listener.AcceptTcpClientAsync(_stop.Token).ConfigureAwait(false); }
             catch (Exception ex) when (ex is OperationCanceledException or ObjectDisposedException or SocketException) { return; }
+            Interlocked.Increment(ref _accepted);
             lock (_relays)
             {
                 _relays.RemoveAll(t => t.IsCompleted);
@@ -80,8 +90,8 @@ internal sealed class LatencyRelay : IAsyncDisposable
         {
             cts = CancellationTokenSource.CreateLinkedTokenSource(_stop.Token); // inside the try: DisposeAsync may have won the race
             await far.ConnectAsync(IPAddress.Loopback, _targetPort, cts.Token).ConfigureAwait(false);
-            up = PumpAsync(near.Client, far.Client, cts.Token);
-            down = PumpAsync(far.Client, near.Client, cts.Token);
+            up = PumpAsync(near.Client, far.Client, _connectTicks, cts.Token);
+            down = PumpAsync(far.Client, near.Client, 0, cts.Token);
             // A pump that ends cleanly has passed the end of its stream on (a half-close): the other direction
             // goes on until it ends too, so the response to a request followed by a FIN still arrives. A pump
             // that fails (a reset, a cancellation) ends the connection.
@@ -110,8 +120,9 @@ internal sealed class LatencyRelay : IAsyncDisposable
 
     private static bool IsOver(Exception ex) => ex is OperationCanceledException or IOException or SocketException or ObjectDisposedException or ChannelClosedException;
 
-    private async Task PumpAsync(Socket from, Socket to, CancellationToken ct)
+    private async Task PumpAsync(Socket from, Socket to, long firstExtraTicks, CancellationToken ct)
     {
+        var extra = firstExtraTicks; // only the first chunk waits for it; the rest queue behind that one
         var queue = Channel.CreateBounded<(long At, byte[] Data, int Length)>(new BoundedChannelOptions(MaxChunks) { SingleReader = true, SingleWriter = true });
         var writer = Task.Run(async () =>
         {
@@ -154,7 +165,9 @@ internal sealed class LatencyRelay : IAsyncDisposable
                     ArrayPool<byte>.Shared.Return(buffer);
                     break;
                 }
-                try { await queue.Writer.WriteAsync((Stopwatch.GetTimestamp(), buffer, read), ct).ConfigureAwait(false); }
+                var at = Stopwatch.GetTimestamp() + extra;
+                extra = 0;
+                try { await queue.Writer.WriteAsync((at, buffer, read), ct).ConfigureAwait(false); }
                 catch
                 {
                     ArrayPool<byte>.Shared.Return(buffer); // cancelled or the writer is gone: the chunk was never queued
