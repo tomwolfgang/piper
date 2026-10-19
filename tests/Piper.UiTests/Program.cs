@@ -72,6 +72,9 @@ internal static class Program
         JsonInspectorTests.Run(Check, PumpUntil);
         StatusImagesTests.Run(Check);
         TrustUiTests.Run(Check);
+        TlsFailureUiTests.Run(Check, PumpUntil);
+        TlsFailureInspectorUiTests.Run(Check, PumpUntil);
+        TlsFailureSettingUiTests.Run(Check);
 
         Run("clearing a scrolled grid shows the next rows from the top", (store, grid, list) =>
         {

@@ -72,6 +72,7 @@ public sealed class MessageInspector : UserControl
     // Parses queue behind this, so a run of selections cannot have many multi-MB parses going at once.
     private static readonly SemaphoreSlim JsonBuildGate = new(2);
     private readonly List<(string Name, string Value)> _headers = [];
+    private bool _showingNotes;
     private int _jsonMatchIndex = -1;
     private int _webFormsTabIndex = -1;
 
@@ -858,8 +859,33 @@ public sealed class MessageInspector : UserControl
         if ((valueOnly ? value.RawValue : value.PairText) is { } text) ClipboardText.TrySet(text);
     }
 
+    /// <summary>
+    /// Shows name and value rows in the Headers tab in place of a message: what is known about an exchange
+    /// that has none, such as a failed TLS handshake. Rows that have not changed are left alone, so a count
+    /// that moves does not reset the list under the cursor.
+    /// </summary>
+    public void SetNotes(string summary, IReadOnlyList<(string Name, string Value)> rows)
+    {
+        if (_message is not null) SetMessage(null, summary);
+        else _summary.Text = summary;
+
+        if (_showingNotes && _headers.SequenceEqual(rows)) return;
+        _headers.Clear();
+        _headers.AddRange(rows);
+        _showingNotes = true;
+        RenderHeaders();
+    }
+
     public void SetMessage(HttpMessage? message, string summary)
     {
+        // Rows that were notes about a failure are not this message's headers.
+        if (_showingNotes)
+        {
+            _showingNotes = false;
+            _headers.Clear();
+            RenderHeaders();
+        }
+
         // Session-list refreshes deliberately preserve their selection, but WinForms still
         // raises SelectedIndexChanged while doing so. Re-rendering a multi-MB body on every
         // refresh both wastes time and visibly resets the editor's paint/scroll state.
