@@ -13,8 +13,8 @@ internal static class TextBoxWordSelection
 {
     private static readonly ConditionalWeakTable<TextBox, SelectionState> States = [];
 
-    // Rooted for the process lifetime: the native control keeps calling it until its handle dies.
-    private static readonly EditWordBreakProc WordBreak = BreakWords;
+    /// <summary>Maximum UTF-16 code units examined to keep a drag-time text-element scan bounded.</summary>
+    private const int MaxTextElementScan = 4096;
 
     /// <summary>
     /// Enables the selection behavior once for a text box.
@@ -28,13 +28,17 @@ internal static class TextBoxWordSelection
     private sealed class SelectionState : NativeWindow
     {
         private const int EmSetSel = 0x00B1;
-        private const int EmSetWordBreakProc = 0x00D0;
+        private const int EmLineScroll = 0x00B6;
+        private const int WmMouseMove = 0x0200;
         private const int WmLButtonDown = 0x0201;
+        private const int WmLButtonUp = 0x0202;
         private const int WmLButtonDoubleClick = 0x0203;
+        private const int WmCaptureChanged = 0x0215;
         private const int WmKeyDown = 0x0100;
         private const int WmKeyUp = 0x0101;
 
         private readonly TextBox _textBox;
+        private readonly System.Windows.Forms.Timer _dragScrollTimer;
         private string? _cachedText;
         private int _lastMouseDownCaret = -1;
         private int _anchor;
@@ -43,18 +47,26 @@ internal static class TextBoxWordSelection
         private int _selectionLength;
         private bool _selectionIsOurs;
         private bool _settingSelection;
-        private bool _dragByWords;
+        private bool _characterDragActive;
+        private int _dragWordStart;
+        private int _dragWordEnd;
+        private int _dragReference;
+        private Point _dragLocation;
 
         public SelectionState(TextBox textBox)
         {
             _textBox = textBox;
+            _dragScrollTimer = new System.Windows.Forms.Timer { Interval = 50 };
+            _dragScrollTimer.Tick += OnDragScrollTimerTick;
             textBox.HandleCreated += OnHandleCreated;
             textBox.HandleDestroyed += OnHandleDestroyed;
             textBox.TextChanged += (_, _) =>
             {
                 _cachedText = null;
                 _selectionIsOurs = false;
+                EndCharacterDrag(releaseCapture: true);
             };
+            textBox.Disposed += (_, _) => _dragScrollTimer.Dispose();
             if (textBox.IsHandleCreated) Attach();
         }
 
@@ -63,12 +75,6 @@ internal static class TextBoxWordSelection
         private void Attach()
         {
             AssignHandle(_textBox.Handle);
-            // The native drag that follows a double-click extends by the control's own words. A
-            // wrapping box would also lay out its lines with the proc, so it keeps the native words;
-            // changing WordWrap recreates the handle, which comes back through here.
-            _dragByWords = !(_textBox.Multiline && _textBox.WordWrap);
-            if (!_dragByWords) return;
-            SendMessage(_textBox.Handle, EmSetWordBreakProc, 0, Marshal.GetFunctionPointerForDelegate(WordBreak));
         }
 
         private void OnHandleDestroyed(object? sender, EventArgs e)
@@ -76,6 +82,7 @@ internal static class TextBoxWordSelection
             _cachedText = null;
             _lastMouseDownCaret = -1;
             _selectionIsOurs = false;
+            EndCharacterDrag(releaseCapture: false);
             ReleaseHandle();
         }
 
@@ -86,6 +93,7 @@ internal static class TextBoxWordSelection
             if (m.Msg == WmLButtonDown)
             {
                 _selectionIsOurs = false;
+                EndCharacterDrag(releaseCapture: true);
                 base.WndProc(ref m);
                 // The native first click positions a full-width caret. EM_CHARFROMPOS, which
                 // GetCharIndexFromPosition uses, exposes only its low 16 index bits.
@@ -98,15 +106,49 @@ internal static class TextBoxWordSelection
             {
                 var position = m.LParam.ToInt64();
                 var location = new Point(unchecked((short)position), unchecked((short)(position >> 16)));
-                // The native handler starts the held drag, which extends by the word-break proc
-                // above; ours then selects the exact word as before. Without the proc the native
-                // drag would anchor on its own space-delimited word, so the message stays ours.
-                if (_dragByWords) base.WndProc(ref m);
-                else m.Result = 0;
-                SelectWordAt(location);
+                // The native edit control would enter its word-drag mode here. Keep the exact URI
+                // component selection, but use a captured character drag so extending it does not
+                // snap each additional character to a whole word.
+                m.Result = 0;
+                if (SelectWordAt(location))
+                {
+                    _dragWordStart = _selectionStart;
+                    _dragWordEnd = _selectionStart + _selectionLength;
+                    _dragReference = _lastMouseDownCaret >= 0 ? _lastMouseDownCaret : _dragWordStart;
+                    _dragLocation = location;
+                    _characterDragActive = true;
+                    SetCapture(_textBox.Handle);
+                }
                 _lastMouseDownCaret = -1;
                 return;
             }
+
+            if (m.Msg == WmMouseMove && _characterDragActive)
+            {
+                if ((m.WParam.ToInt64() & 1) != 0)
+                {
+                    var position = m.LParam.ToInt64();
+                    _dragLocation = new Point(unchecked((short)position), unchecked((short)(position >> 16)));
+                    ExtendCharacterSelection(_dragLocation);
+                    UpdateDragScrollTimer();
+                    return;
+                }
+                EndCharacterDrag(releaseCapture: true);
+                base.WndProc(ref m);
+                return;
+            }
+
+            if (m.Msg == WmLButtonUp && _characterDragActive)
+            {
+                var position = m.LParam.ToInt64();
+                _dragLocation = new Point(unchecked((short)position), unchecked((short)(position >> 16)));
+                ExtendCharacterSelection(_dragLocation);
+                EndCharacterDrag(releaseCapture: true);
+                base.WndProc(ref m);
+                return;
+            }
+
+            if (m.Msg == WmCaptureChanged) EndCharacterDrag(releaseCapture: false);
 
             // On bidirectional Windows installations, the native edit control treats Ctrl+Shift
             // itself as a reading-order shortcut. Keep the modifier state for other shortcuts but
@@ -148,21 +190,12 @@ internal static class TextBoxWordSelection
         private static bool IsModifierKey(Keys key) => key is Keys.ControlKey or Keys.LControlKey
             or Keys.RControlKey or Keys.ShiftKey or Keys.LShiftKey or Keys.RShiftKey;
 
-        private void SelectWordAt(Point location)
+        private bool SelectWordAt(Point location)
         {
             var text = CurrentText;
-            if (!_textBox.ClientRectangle.Contains(location)) return;
-            var index = _textBox.GetCharIndexFromPosition(location);
-            if (_lastMouseDownCaret >= 0)
-            {
-                // Reconstruct the index nearest the first click's 32-bit caret. The two clicks
-                // are within the system's double-click rectangle, even across a 64K boundary.
-                long fullIndex = ((long)_lastMouseDownCaret & ~0xffffL) | ((long)index & 0xffff);
-                if (fullIndex - _lastMouseDownCaret > 32_768) fullIndex -= 65_536;
-                if (_lastMouseDownCaret - fullIndex > 32_768) fullIndex += 65_536;
-                index = (int)Math.Clamp(fullIndex, 0, text.Length);
-            }
-            if ((uint)index >= (uint)text.Length) return;
+            if (!_textBox.ClientRectangle.Contains(location)) return false;
+            var index = CharacterIndexAt(location, _lastMouseDownCaret, text.Length);
+            if ((uint)index >= (uint)text.Length) return false;
 
             var start = ScalarStart(text, index);
             var end = NextScalarEnd(text, start);
@@ -178,6 +211,84 @@ internal static class TextBoxWordSelection
             }
 
             Select(start, end);
+            return true;
+        }
+
+        private void ExtendCharacterSelection(Point location)
+        {
+            var text = CurrentText;
+            ScrollToward(location);
+            var index = CharacterIndexAt(ClampToClient(location), _dragReference, text.Length);
+            _dragReference = index;
+            if (index <= _dragWordStart)
+            {
+                Select(_dragWordEnd, TextElementStart(text, index));
+            }
+            else if (index >= _dragWordEnd)
+            {
+                Select(_dragWordStart, TextElementEnd(text, index));
+            }
+            else
+            {
+                Select(_dragWordStart, _dragWordEnd);
+            }
+        }
+
+        private void OnDragScrollTimerTick(object? sender, EventArgs e)
+        {
+            if (!_characterDragActive || !IsOutsideClient(_dragLocation))
+            {
+                _dragScrollTimer.Stop();
+                return;
+            }
+            ExtendCharacterSelection(_dragLocation);
+        }
+
+        private void UpdateDragScrollTimer()
+        {
+            if (IsOutsideClient(_dragLocation)) _dragScrollTimer.Start();
+            else _dragScrollTimer.Stop();
+        }
+
+        private void EndCharacterDrag(bool releaseCapture)
+        {
+            var wasActive = _characterDragActive;
+            _characterDragActive = false;
+            _dragScrollTimer.Stop();
+            if (releaseCapture && wasActive) ReleaseCapture();
+        }
+
+        private bool IsOutsideClient(Point location) => !_textBox.ClientRectangle.Contains(location);
+
+        private Point ClampToClient(Point location)
+        {
+            var client = _textBox.ClientRectangle;
+            return new Point(
+                Math.Clamp(location.X, client.Left, Math.Max(client.Left, client.Right - 1)),
+                Math.Clamp(location.Y, client.Top, Math.Max(client.Top, client.Bottom - 1)));
+        }
+
+        private void ScrollToward(Point location)
+        {
+            var client = _textBox.ClientRectangle;
+            var horizontal = _textBox.Multiline && _textBox.WordWrap ? 0
+                : location.X < client.Left ? -1 : location.X >= client.Right ? 1 : 0;
+            var vertical = location.Y < client.Top ? -1 : location.Y >= client.Bottom ? 1 : 0;
+            if (horizontal != 0 || vertical != 0)
+                SendMessage(_textBox.Handle, EmLineScroll, horizontal, vertical);
+        }
+
+        private int CharacterIndexAt(Point location, int reference, int textLength)
+        {
+            var index = _textBox.GetCharIndexFromPosition(location);
+            if (reference < 0 || index < 0) return Math.Clamp(index, 0, textLength);
+
+            // EM_CHARFROMPOS, which GetCharIndexFromPosition uses, exposes only the low 16 index
+            // bits. Reconstruct the nearby 32-bit index for long single-line text boxes.
+            long fullIndex = ((long)reference & ~0xffffL) | ((long)index & 0xffff);
+            if (fullIndex - reference > 32_768) fullIndex -= 65_536;
+            if (reference - fullIndex > 32_768) fullIndex += 65_536;
+            return (int)Math.Clamp(fullIndex, 0, textLength);
         }
 
         private void MoveWord(Keys direction, bool extendSelection)
@@ -231,51 +342,6 @@ internal static class TextBoxWordSelection
         }
     }
 
-    private delegate int EditWordBreakProc(nint text, int index, int length, int code);
-
-    private const int WbLeft = 0, WbRight = 1, WbIsDelimiter = 2;
-
-    /// <summary>How far one word-break call looks either side of its index.</summary>
-    private const int MaxWordBreakScan = 4096;
-
-    private static int BreakWords(nint buffer, int index, int length, int code)
-    {
-        if (buffer == 0 || length <= 0) return 0;
-        index = Math.Clamp(index, 0, length);
-        // The buffer can be a whole response body on one line, and the text is attacker-controlled,
-        // so each call copies only a bounded window around the index. A word longer than the window
-        // ends at the window's edge.
-        var offset = Math.Max(0, index - MaxWordBreakScan);
-        length = Math.Min(length, index + MaxWordBreakScan) - offset;
-        var text = Marshal.PtrToStringUni(buffer + offset * sizeof(char), length);
-        var result = BreakWords(text, index - offset, length, code);
-        return code is WbLeft or WbRight ? offset + result : result;
-    }
-
-    private static int BreakWords(string text, int index, int length, int code)
-    {
-        switch (code)
-        {
-            case WbLeft:
-                return FindPreviousWordBoundary(text, index);
-            case WbRight:
-                index = index < length ? ScalarStart(text, index) : index;
-                if (index < length && IsWordScalar(text, index))
-                {
-                    while (index < length && IsWordScalar(text, index)) index = NextScalarEnd(text, index);
-                }
-                else
-                {
-                    while (index < length && !IsWordScalar(text, index)) index = NextScalarEnd(text, index);
-                }
-                return index;
-            case WbIsDelimiter:
-                return index < length && !IsWordScalar(text, ScalarStart(text, index)) ? 1 : 0;
-            default:
-                return 0;
-        }
-    }
-
     private static int FindPreviousWordBoundary(string text, int index)
     {
         while (index > 0)
@@ -316,6 +382,33 @@ internal static class TextBoxWordSelection
         return start;
     }
 
+    private static int TextElementStart(string text, int index)
+    {
+        if (index == 0 || index == text.Length) return index;
+        var start = ScalarStart(text, index);
+        var lowerBound = Math.Max(0, start - MaxTextElementScan);
+        while (start > lowerBound && IsCombiningMark(text, start))
+        {
+            var previous = PreviousScalarStart(text, start);
+            if (previous < lowerBound) break;
+            start = previous;
+        }
+        return start;
+    }
+
+    private static int TextElementEnd(string text, int index)
+    {
+        if (index >= text.Length) return text.Length;
+        var start = TextElementStart(text, index);
+        var length = Math.Min(MaxTextElementScan, text.Length - start);
+        if (length < text.Length - start && char.IsHighSurrogate(text[start + length - 1])
+            && char.IsLowSurrogate(text[start + length]))
+        {
+            length--;
+        }
+        return start + StringInfo.GetNextTextElementLength(text.AsSpan(start, length));
+    }
+
     private static bool IsWordScalar(string text, int index) => text[index] == '_' ||
         Rune.TryGetRuneAt(text, index, out var rune) &&
         (Rune.IsLetterOrDigit(rune) || IsCombiningMark(Rune.GetUnicodeCategory(rune)));
@@ -328,4 +421,11 @@ internal static class TextBoxWordSelection
 
     [DllImport("user32.dll")]
     private static extern nint SendMessage(nint hwnd, int message, nint wParam, nint lParam);
+
+    [DllImport("user32.dll")]
+    private static extern nint SetCapture(nint hwnd);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool ReleaseCapture();
 }
