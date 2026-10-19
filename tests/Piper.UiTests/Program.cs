@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using System.Reflection;
 using Piper.App;
 using Piper.App.Controls;
 using Piper.App.Theme;
@@ -40,14 +41,25 @@ internal static class Program
     [DllImport("user32.dll", EntryPoint = "GetWindowLongW")]
     private static extern int GetWindowLong(nint hwnd, int index);
 
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool IsWindowVisible(nint hwnd);
+
     [STAThread]
-    private static int Main()
+    private static int Main(string[] args)
     {
         Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
         InstallWinFormsContext();
 
+        if (args is ["--composer-history"])
+        {
+            RunComposerHistoryTooltipTest();
+            return _failures == 0 ? 0 : 1;
+        }
+
         RunTextBoxWordSelectionTest();
         RunTextWizardJwtMenuTest();
+        RunComposerHistoryTooltipTest();
         ImageDecodingTests.Run(Check, PumpUntil);
         InspectorSaveTests.Run(Check, PumpUntil);
         WebpViewTests.Run(Check, PumpUntil);
@@ -308,6 +320,221 @@ internal static class Program
         textBox.SelectedText = "tea";
         Check(textBox.Text == "GET /v1/tea/path HTTP/1.1", "editing a combined word leaves no detached mark");
         form.Close();
+    }
+
+    private static void RunComposerHistoryTooltipTest()
+    {
+        Console.WriteLine("== a truncated Composer history row shows its full text on hover");
+
+        using var form = new Form
+        {
+            Width = 360,
+            Height = 420,
+            ShowInTaskbar = false,
+            StartPosition = FormStartPosition.Manual,
+            Location = new Point(0, 0),
+        };
+        var history = new ComposerHistoryTree { Dock = DockStyle.Fill };
+        form.Controls.Add(history);
+        Palette.Apply(form);
+        form.Show();
+
+        var target = "/" + new string('a', 100);
+        var request = new HttpRequestData
+        {
+            Method = "GET",
+            Url = new Uri("https://history-tooltip.test" + target),
+            RequestTarget = target,
+        };
+        var sessions = new[]
+        {
+            new Session
+            {
+                IsComposed = true,
+                Request = request,
+                Response = new HttpResponseData { StatusCode = 200 },
+                State = SessionState.Complete,
+                Completed = DateTimeOffset.Now,
+            },
+            new Session
+            {
+                IsComposed = true,
+                Request = new HttpRequestData
+                {
+                    Method = request.Method,
+                    Url = request.Url,
+                    RequestTarget = request.RequestTarget,
+                },
+                Response = new HttpResponseData { StatusCode = 200 },
+                State = SessionState.Complete,
+                Completed = DateTimeOffset.Now,
+            },
+        };
+        history.SetHistory(sessions);
+
+        // The tree normally opens host groups folded. Open this one so the repeated request's
+        // count badge consumes some of the target's horizontal space.
+        PrivateField<HashSet<string>>(history, "_collapsedHosts").Clear();
+        history.Rebuild();
+
+        var list = PrivateField<ListView>(history, "_list");
+        PumpUntil(() => list.VirtualListSize == 2);
+        var requestBounds = list.GetItemRect(1, ItemBoundsPortion.Entire);
+
+        // The previous fixed 64px reserve missed this narrow range: the repeat count squeezes
+        // the target into an ellipsis while the method-and-target label still fits that estimate.
+        int WidthOf(string text) => TextRenderer.MeasureText(text, Palette.Mono, Size.Empty,
+            TextFormatFlags.SingleLine | TextFormatFlags.NoPadding).Width;
+        var right = requestBounds.Right - 4;
+        right -= WidthOf("200") + 8;
+        right -= WidthOf("×2") + 8;
+        var targetAvailable = right - (requestBounds.X + 2 + 14 + 14) - WidthOf("OPTIONS ");
+        var previousEstimate = list.Columns[0].Width - 2 - 14 - 14 - 64;
+        target = Enumerable.Range(1, 100)
+            .Select(length => "/" + new string('a', length))
+            .FirstOrDefault(candidate => WidthOf(candidate) > targetAvailable
+                && WidthOf("GET " + candidate) <= previousEstimate);
+        if (target is null)
+        {
+            Check(false, "setup: a target fits the old estimate but is ellipsized in the request row");
+            return;
+        }
+
+        foreach (var session in sessions)
+        {
+            session.Request!.Url = new Uri("https://history-tooltip.test" + target);
+            session.Request.RequestTarget = target;
+        }
+        history.SetHistory(sessions);
+        history.Rebuild();
+        PumpUntil(() => list.VirtualListSize == 2);
+        requestBounds = list.GetItemRect(1, ItemBoundsPortion.Entire);
+        var row = PrivateField<IReadOnlyList<ComposerRow>>(history, "_rows")[1];
+        Check(InvokePrivate<bool>(history, "IsLabelTruncated", 1, row),
+            "setup: the request target is ellipsized");
+        var hover = new Point(requestBounds.Left + Math.Min(100, requestBounds.Width / 2),
+            Math.Min(requestBounds.Top + requestBounds.Height / 2, list.ClientSize.Height - 1));
+        Check(InvokePrivate<int>(history, "IndexAt", hover) == 1,
+            "setup: the hover point belongs to the request row");
+        // Storing tooltip text is not enough: WinForms can accept SetToolTip without ever
+        // opening a popup. Dispatch the list's mouse events and inspect the native window.
+        var rowToolTip = PrivateField<ToolTip>(history, "_rowToolTip");
+        var tooltipWindow = PrivateField<NativeWindow>(rowToolTip, "_window");
+        // Shorten the delay for this test while still running the real WinForms timer and popup.
+        rowToolTip.InitialDelay = 1;
+        PrivateField<System.Windows.Forms.Timer>(history, "_rowHoverTimer").Interval = 10;
+        form.Activate();
+        for (var attempt = 0; attempt < 3; attempt++)
+        {
+            InvokePrivate(list, "OnMouseMove", new MouseEventArgs(MouseButtons.None, 0, hover.X, hover.Y, 0));
+            PumpUntil(() => IsWindowVisible(tooltipWindow.Handle));
+            Check(IsWindowVisible(tooltipWindow.Handle),
+                $"the tooltip popup is visible on hover #{attempt + 1}");
+            Check(rowToolTip.GetToolTip(history)?.Contains(target, StringComparison.Ordinal) == true,
+                "the visible tooltip contains the full request target");
+            InvokePrivate(list, "OnMouseMove", new MouseEventArgs(MouseButtons.None, 0, 100, list.ClientSize.Height - 4, 0));
+            Check(!IsWindowVisible(tooltipWindow.Handle), "the popup hides over blank list space");
+        }
+
+        // Exercise adjacent truncated rows and scrolling with the pointer stationary. The popup
+        // must follow the new row even though the mouse never left the ListView.
+        var scrolledSessions = Enumerable.Range(0, 20)
+            .Select(index => new Session
+            {
+                IsComposed = true,
+                Request = new HttpRequestData
+                {
+                    Method = "GET",
+                    Url = new Uri($"https://history-tooltip.test/request-{index}/" + new string('b', 80) + "?x=1&y=2"),
+                    RequestTarget = $"/request-{index}/" + new string('b', 80) + "?x=1&y=2",
+                },
+                Response = new HttpResponseData { StatusCode = 200 },
+                State = SessionState.Complete,
+                Completed = DateTimeOffset.Now,
+            })
+            .ToArray();
+        history.SetHistory(scrolledSessions);
+        history.Rebuild();
+        const int scrolledRequestIndex = 15;
+        list.EnsureVisible(scrolledRequestIndex);
+        PumpUntil(() =>
+        {
+            var bounds = list.GetItemRect(scrolledRequestIndex, ItemBoundsPortion.Entire);
+            return bounds.Top < list.ClientSize.Height && bounds.Bottom > 0;
+        });
+        var scrolledBounds = list.GetItemRect(scrolledRequestIndex, ItemBoundsPortion.Entire);
+        var scrolledHover = new Point(scrolledBounds.Left + Math.Min(100, scrolledBounds.Width / 2),
+            Math.Clamp(scrolledBounds.Top + scrolledBounds.Height / 2, 0, list.ClientSize.Height - 1));
+        Check(InvokePrivate<int>(history, "IndexAt", scrolledHover) == scrolledRequestIndex,
+            "the hover point resolves the visible request after scrolling a virtual list");
+        InvokePrivate(list, "OnMouseMove", new MouseEventArgs(MouseButtons.None, 0, scrolledHover.X, scrolledHover.Y, 0));
+        PumpUntil(() => IsWindowVisible(tooltipWindow.Handle));
+        Check(IsWindowVisible(tooltipWindow.Handle) && rowToolTip.GetToolTip(history) == list.Items[scrolledRequestIndex].Text,
+            "the visible tooltip shows the full text of a scrolled request, including query ampersands");
+
+        var adjacentBounds = list.GetItemRect(scrolledRequestIndex - 1, ItemBoundsPortion.Entire);
+        var adjacentHover = new Point(scrolledHover.X, adjacentBounds.Top + adjacentBounds.Height / 2);
+        InvokePrivate(list, "OnMouseMove", new MouseEventArgs(MouseButtons.None, 0, adjacentHover.X, adjacentHover.Y, 0));
+        Check(!IsWindowVisible(tooltipWindow.Handle), "changing rows hides the old tooltip immediately");
+        PumpUntil(() => IsWindowVisible(tooltipWindow.Handle));
+        Check(IsWindowVisible(tooltipWindow.Handle) && rowToolTip.GetToolTip(history) == list.Items[scrolledRequestIndex - 1].Text,
+            "moving directly to the next truncated row shows its own tooltip");
+
+        list.EnsureVisible(list.VirtualListSize - 1);
+        var afterScroll = InvokePrivate<int>(history, "IndexAt", adjacentHover);
+        Check(afterScroll >= 0 && afterScroll != scrolledRequestIndex - 1,
+            "setup: scrolling changes the row under the stationary pointer");
+        PumpUntil(() => afterScroll >= 0 && IsWindowVisible(tooltipWindow.Handle)
+            && rowToolTip.GetToolTip(history) == list.Items[afterScroll].Text);
+        Check(afterScroll >= 0 && IsWindowVisible(tooltipWindow.Handle)
+            && rowToolTip.GetToolTip(history) == list.Items[afterScroll].Text,
+            "scrolling updates the visible popup without another mouse move");
+
+        InvokePrivate(list, "OnMouseLeave", EventArgs.Empty);
+        Check(!IsWindowVisible(tooltipWindow.Handle), "leaving the list hides the popup");
+
+        // A click dismisses the tip, but releasing the mouse while remaining on that row must
+        // allow another hover. No additional MouseMove is required after selecting an item.
+        InvokePrivate(list, "OnMouseDown", new MouseEventArgs(MouseButtons.Left, 1, adjacentHover.X, adjacentHover.Y, 0));
+        InvokePrivate(list, "OnMouseUp", new MouseEventArgs(MouseButtons.Left, 1, adjacentHover.X, adjacentHover.Y, 0));
+        PumpUntil(() => IsWindowVisible(tooltipWindow.Handle));
+        Check(afterScroll >= 0 && IsWindowVisible(tooltipWindow.Handle)
+            && rowToolTip.GetToolTip(history) == list.Items[afterScroll].Text,
+            "a tooltip can appear again after clicking the same row");
+
+        history.SetHistory([new Session
+        {
+            Request = new HttpRequestData { Method = "GET", Url = new Uri("https://history-tooltip.test/ok"), RequestTarget = "/ok" },
+        }]);
+        list.EnsureVisible(1);
+        var shortBounds = list.GetItemRect(1, ItemBoundsPortion.Entire);
+        InvokePrivate(list, "OnMouseMove", new MouseEventArgs(MouseButtons.None, 0, 100, shortBounds.Top + shortBounds.Height / 2, 0));
+        PumpFor(100);
+        Check(!IsWindowVisible(tooltipWindow.Handle), "a request that fits does not show a tooltip");
+        form.Close();
+    }
+
+    private static T PrivateField<T>(object target, string name) where T : class
+    {
+        var field = target.GetType().GetField(name, BindingFlags.Instance | BindingFlags.NonPublic);
+        return field?.GetValue(target) as T
+            ?? throw new InvalidOperationException($"Missing {name} on {target.GetType().Name}.");
+    }
+
+    private static void InvokePrivate(object target, string name, params object?[] arguments)
+    {
+        var method = target.GetType().GetMethod(name, BindingFlags.Instance | BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException($"Missing {name} on {target.GetType().Name}.");
+        method.Invoke(target, arguments);
+    }
+
+    private static T InvokePrivate<T>(object target, string name, params object?[] arguments)
+    {
+        var method = target.GetType().GetMethod(name, BindingFlags.Instance | BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException($"Missing {name} on {target.GetType().Name}.");
+        return method.Invoke(target, arguments) is T value
+            ? value
+            : throw new InvalidOperationException($"{name} on {target.GetType().Name} did not return {typeof(T).Name}.");
     }
 
     private static void PressDirectionShortcut(TextBox textBox, Keys secondModifier)

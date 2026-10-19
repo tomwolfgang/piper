@@ -48,6 +48,21 @@ internal static class ComposerHistoryViewTests
         runner.IsTrue(!collapsed.Single(row => row.Host == "api.example.test").Expanded,
                 "the collapsed host reports itself folded");
 
+        // History starts folded; explicitly opened hosts are the only exception kept in view
+        // state. This keeps a large restored history scannable when the Composer first opens.
+        var initiallyCollapsed = ComposerHistoryView.InitiallyCollapsedHosts(history);
+        var initiallyFolded = ComposerHistoryView.Build(history, SearchQuery.Empty, initiallyCollapsed, null);
+        runner.AreEqual(3, initiallyFolded.Count(row => row.Kind == ComposerRowKind.Host),
+            "the initial folded state keeps every host header");
+        runner.IsTrue(initiallyFolded.Where(row => row.Kind == ComposerRowKind.Host).All(row => !row.Expanded),
+            "every host starts folded");
+
+        var reopenedHost = new HashSet<string> { "other.example.test" };
+        var foldedExceptOpened = ComposerHistoryView.Build(history, SearchQuery.Empty,
+            ComposerHistoryView.InitiallyCollapsedHosts(history, reopenedHost), null);
+        runner.IsTrue(foldedExceptOpened.Single(row => row.Kind == ComposerRowKind.Host && row.Host == "other.example.test").Expanded,
+            "an explicitly opened host is restored expanded");
+
         // Expanding a repeat row lists the individual sends beneath it.
         var expanded = ComposerHistoryView.Build(history, SearchQuery.Empty, null,
             new HashSet<string> { ComposerHistoryView.ExpandKey("api.example.test", "GET /user") });
@@ -165,8 +180,8 @@ internal static class ComposerHistoryViewTests
         var path = Path.Combine(Path.GetTempPath(), $"piper-composer-view-{Guid.NewGuid():N}.json");
         try
         {
-            ComposerViewStateStore.Save(new ComposerViewState { CollapsedHosts = [host] }, path);
-            var restored = ComposerViewStateStore.Load(path).CollapsedHosts;
+            ComposerViewStateStore.Save(new ComposerViewState { ExpandedHosts = [host] }, path);
+            var restored = ComposerViewStateStore.Load(path).ExpandedHosts;
             return restored.Count == 1 ? restored[0] : string.Empty;
         }
         finally

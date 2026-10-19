@@ -28,19 +28,27 @@ public sealed class ComposerHistoryTree : UserControl
     private readonly SolidBrush _selectionBrush = new(Palette.Selection);
     private readonly SolidBrush _glyphBrush = new(Palette.TextDim);
 
-    // Shared by the search box's grammar examples (which need longer than the 5s default to read)
-    // and the truncated-row tooltip, which simply stays up as long as the hover.
+    // Search help uses the normal control tooltip. Rows need their own tracking popup: changing
+    // SetToolTip text on a ListView does not reliably show it as the pointer moves between rows.
     private readonly ToolTip _toolTip = new() { AutoPopDelay = 30000 };
+    private readonly ToolTip _rowToolTip = new() { InitialDelay = 400, UseAnimation = false, UseFading = false };
+    private readonly System.Windows.Forms.Timer _rowHoverTimer = new() { Interval = 100 };
+    private int _hoveredRow = -1;
+    private Point _hoverLocation;
     private string? _toolTipText;
+    private long _hoverStarted;
+    private bool _rowToolTipShown;
 
     private IReadOnlyList<Session> _history = [];
     private IReadOnlyList<ComposerRow> _rows = [];
 
-    // Collapsed hosts persist; expanded repeat-rows deliberately do not. Folding a noisy host away
-    // is a standing preference, but drilling into one endpoint's individual sends is a momentary
-    // act that should not still be open days later.
-    private readonly HashSet<string> _collapsedHosts;
+    // Host groups start folded. Remembering only the groups the user opens keeps that default even
+    // when a history has more hosts than the bounded view-state file can store. Expanded repeat
+    // rows deliberately do not persist: drilling into individual sends is momentary.
+    private readonly HashSet<string> _collapsedHosts = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _expandedHosts;
     private readonly HashSet<string> _expandedRequests = new(StringComparer.Ordinal);
+    private bool _initialHistorySet;
 
     // Build force-expands every host while a search is active, so the collapsed set and what the
     // pane shows disagree for as long as the query stands.
@@ -57,8 +65,8 @@ public sealed class ComposerHistoryTree : UserControl
 
     public ComposerHistoryTree()
     {
-        _collapsedHosts = new HashSet<string>(
-            ComposerViewStateStore.Load().CollapsedHosts, StringComparer.OrdinalIgnoreCase);
+        var viewState = ComposerViewStateStore.Load();
+        _expandedHosts = new HashSet<string>(viewState.ExpandedHosts, StringComparer.OrdinalIgnoreCase);
 
         _searchBox = new TextBox
         {
@@ -102,11 +110,15 @@ public sealed class ComposerHistoryTree : UserControl
         _list.DrawSubItem += OnDrawSubItem;
         _list.MouseDown += OnMouseDown;
         _list.MouseMove += OnListMouseMove;
-        _list.MouseLeave += (_, _) => SetRowToolTip(null);
+        _list.MouseUp += OnListMouseMove;
+        _list.MouseLeave += (_, _) => HideRowToolTip();
         _list.DoubleClick += OnDoubleClick;
         _list.KeyDown += OnListKeyDown;
         _list.Resize += (_, _) => FitColumn();
         _list.ContextMenuStrip = BuildMenu();
+        _rowHoverTimer.Tick += OnRowHoverTimerTick;
+        _list.VisibleChanged += (_, _) => HideRowToolTip();
+        _list.HandleDestroyed += (_, _) => HideRowToolTip();
 
         var pane = new Panel { Dock = DockStyle.Fill, Padding = new Padding(4) };
         pane.Controls.Add(_list);
@@ -133,6 +145,11 @@ public sealed class ComposerHistoryTree : UserControl
     public void SetHistory(IReadOnlyList<Session> history)
     {
         _history = history ?? [];
+        if (!_initialHistorySet)
+        {
+            _collapsedHosts.UnionWith(ComposerHistoryView.InitiallyCollapsedHosts(_history, _expandedHosts));
+            _initialHistorySet = true;
+        }
         Rebuild();
     }
 
@@ -146,6 +163,7 @@ public sealed class ComposerHistoryTree : UserControl
     /// <summary>Re-flattens the tree from the current history, query, and expansion state.</summary>
     public void Rebuild()
     {
+        HideRowToolTip();
         var query = SearchQuery.Parse(_searchBox.Text);
         _searchBox.ForeColor = query.Warnings.Count > 0 ? Palette.StatusClientError : Palette.Text;
 
@@ -178,6 +196,7 @@ public sealed class ComposerHistoryTree : UserControl
 
     private void FitColumn()
     {
+        HideRowToolTip();
         if (_list.Columns.Count == 0) return;
         _list.Columns[0].Width = Math.Max(80, _list.ClientSize.Width - 2);
     }
@@ -326,20 +345,39 @@ public sealed class ComposerHistoryTree : UserControl
     {
         if (string.IsNullOrEmpty(text)) return right;
 
-        var width = TextRenderer.MeasureText(graphics, text, Palette.Mono, Size.Empty,
-            TextFormatFlags.SingleLine | TextFormatFlags.NoPadding).Width;
+        var width = TextWidth(text, Palette.Mono);
         TextRenderer.DrawText(graphics, text, Palette.Mono,
             new Rectangle(right - width, bounds.Y, width, bounds.Height), colour,
             TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
         return right - width - 8;
     }
 
+    /// <summary>Measures text exactly as the row painter does, without the usual GDI padding.</summary>
+    private static int TextWidth(string text, Font font) => TextRenderer.MeasureText(text, font, Size.Empty,
+        TextFormatFlags.SingleLine | TextFormatFlags.NoPadding).Width;
+
+    /// <summary>Calculates the edge left by the status and repeat-count fields.</summary>
+    private static int LabelRightEdge(ComposerRow row, Rectangle bounds)
+    {
+        var right = bounds.Right - 4;
+        if (row.Kind == ComposerRowKind.Host) return ReserveRight($"({row.Count:N0})", right);
+
+        right = ReserveRight(row.Session.StatusText, right);
+        return row.Kind == ComposerRowKind.Request && row.Count > 1
+            ? ReserveRight($"×{row.Count:N0}", right)
+            : right;
+    }
+
+    private static int ReserveRight(string text, int right) => string.IsNullOrEmpty(text)
+        ? right
+        : right - TextWidth(text, Palette.Mono) - 8;
+
     // ------------------------------------------------------------------- input
 
     private void OnMouseDown(object? sender, MouseEventArgs e)
     {
-        var item = _list.GetItemAt(e.X, e.Y);
-        var index = item is not null && item.Index >= 0 && item.Index < _rows.Count ? item.Index : -1;
+        HideRowToolTip();
+        var index = IndexAt(e.Location);
         if (index < 0) return;
 
         if (e.Button == MouseButtons.Right)
@@ -348,9 +386,9 @@ public sealed class ComposerHistoryTree : UserControl
             if (!_list.SelectedIndices.Contains(index))
             {
                 _list.SelectedIndices.Clear();
-                item!.Selected = true;
+                _list.SelectedIndices.Add(index);
             }
-            item!.Focused = true;
+            _list.Items[index].Focused = true;
             return;
         }
 
@@ -375,6 +413,7 @@ public sealed class ComposerHistoryTree : UserControl
 
     private void OnListKeyDown(object? sender, KeyEventArgs e)
     {
+        HideRowToolTip();
         if (e.Control && e.KeyCode == Keys.F)
         {
             FocusSearch();
@@ -450,29 +489,74 @@ public sealed class ComposerHistoryTree : UserControl
 
     private void OnListMouseMove(object? sender, MouseEventArgs e)
     {
-        var index = IndexAt(e.Location);
-        if (index < 0)
+        _hoverLocation = e.Location;
+        UpdateRowToolTip(_hoverLocation);
+        _rowHoverTimer.Start();
+    }
+
+    private void UpdateRowToolTip(Point location)
+    {
+        var index = MouseButtons == MouseButtons.None ? IndexAt(location) : -1;
+        var text = index >= 0 && IsLabelTruncated(index, _rows[index]) ? LabelFor(_rows[index]) : null;
+        if (text is null)
         {
-            SetRowToolTip(null);
+            HideRowToolTip(stopTracking: false);
             return;
         }
 
-        var row = _rows[index];
-        var label = LabelFor(row);
-        // Approximate: the reserve matches what the right-hand fields typically take. It only
-        // decides whether to offer the full text on hover, so being a few pixels out is harmless.
-        var available = _list.Columns[0].Width - IndentFor(row.Kind) - GlyphWidth - 64;
-        var width = TextRenderer.MeasureText(label, row.Kind == ComposerRowKind.Host ? Palette.UiFontBold : Palette.Mono,
-            Size.Empty, TextFormatFlags.SingleLine | TextFormatFlags.NoPadding).Width;
-
-        SetRowToolTip(width > available ? label : null);
+        if (_hoveredRow == index && _toolTipText == text) return;
+        HideRowToolTip(stopTracking: false);
+        _hoveredRow = index;
+        _toolTipText = text;
+        _hoverStarted = Environment.TickCount64;
     }
 
-    private void SetRowToolTip(string? text)
+    private void OnRowHoverTimerTick(object? sender, EventArgs e)
     {
-        if (_toolTipText == text) return;
-        _toolTipText = text;
-        _toolTip.SetToolTip(_list, text);
+        if (!_list.Visible || !_list.IsHandleCreated || FindForm()?.ContainsFocus != true)
+        {
+            HideRowToolTip();
+            return;
+        }
+
+        // Keep checking while the popup is shown: scrolling can replace the row beneath a
+        // stationary pointer without sending MouseMove, and the old text must not linger.
+        var location = _hoverLocation;
+        UpdateRowToolTip(location);
+        if (_toolTipText is null || _rowToolTipShown || Environment.TickCount64 - _hoverStarted < _rowToolTip.InitialDelay) return;
+
+        location.Offset(12, SystemInformation.CursorSize.Height / 2 + 8);
+        _rowToolTip.Show(_toolTipText, this, PointToClient(_list.PointToScreen(location)));
+        _rowToolTipShown = true;
+    }
+
+    /// <summary>Whether the same rectangles passed to the painter leave text behind an ellipsis.</summary>
+    private bool IsLabelTruncated(int index, ComposerRow row)
+    {
+        var bounds = _list.GetItemRect(index, ItemBoundsPortion.Entire);
+        var left = bounds.X + IndentFor(row.Kind) + GlyphWidth;
+        var right = LabelRightEdge(row, bounds);
+        var available = right - left;
+        if (available <= 0) return !string.IsNullOrEmpty(LabelFor(row));
+
+        if (row.Kind != ComposerRowKind.Request)
+            return TextWidth(LabelFor(row), row.Kind == ComposerRowKind.Host ? Palette.UiFontBold : Palette.Mono) > available;
+
+        var method = ComposerHistoryView.MethodOf(row.Session);
+        var methodWidth = Math.Min(MethodWidth(), available);
+        if (TextWidth(method, Palette.Mono) > methodWidth) return true;
+
+        available = right - left - methodWidth;
+        return available <= 0 || TextWidth(ComposerHistoryView.TargetOf(row.Session), Palette.Mono) > available;
+    }
+
+    private void HideRowToolTip(bool stopTracking = true)
+    {
+        if (stopTracking) _rowHoverTimer.Stop();
+        if (_rowToolTipShown) _rowToolTip.Hide(this);
+        _hoveredRow = -1;
+        _toolTipText = null;
+        _rowToolTipShown = false;
     }
 
     // ------------------------------------------------------------------ actions
@@ -491,9 +575,17 @@ public sealed class ComposerHistoryTree : UserControl
             // clearing the query, or after a restart.
             if (_searchActive) return;
 
-            if (row.Expanded) _collapsedHosts.Add(row.Key);
-            else _collapsedHosts.Remove(row.Key);
-            ComposerViewStateStore.Save(new ComposerViewState { CollapsedHosts = [.. _collapsedHosts] });
+            if (row.Expanded)
+            {
+                _collapsedHosts.Add(row.Key);
+                _expandedHosts.Remove(row.Key);
+            }
+            else
+            {
+                _collapsedHosts.Remove(row.Key);
+                _expandedHosts.Add(row.Key);
+            }
+            ComposerViewStateStore.Save(new ComposerViewState { ExpandedHosts = [.. _expandedHosts] });
         }
         else if (row.Kind == ComposerRowKind.Request && row.Count > 1)
         {
@@ -590,7 +682,32 @@ public sealed class ComposerHistoryTree : UserControl
     private int IndexAt(Point location)
     {
         var item = _list.GetItemAt(location.X, location.Y);
-        return item is not null && item.Index >= 0 && item.Index < _rows.Count ? item.Index : -1;
+        if (item is not null && item.Index >= 0 && item.Index < _rows.Count)
+        {
+            var bounds = _list.GetItemRect(item.Index, ItemBoundsPortion.Entire);
+            if (bounds.Top <= location.Y && location.Y < bounds.Bottom) return item.Index;
+        }
+        if (!_list.ClientRectangle.Contains(location) || _rows.Count == 0) return -1;
+
+        // A virtual owner-drawn ListView can return no item from GetItemAt even though it has a
+        // rectangle for the visible row. Off-screen virtual rows do not reliably expose a
+        // rectangle, so find the pointer within the small visible range rather than bisecting the
+        // whole list.
+        var first = Math.Clamp(_list.TopItem?.Index ?? 0, 0, _rows.Count - 1);
+        var rowHeight = _list.GetItemRect(first, ItemBoundsPortion.Entire).Height;
+        if (rowHeight <= 0) return -1;
+
+        // TopItem can be the first fully visible row; include one row above it for a partly
+        // visible predecessor and two below the viewport for rounding at the bottom edge.
+        var firstCandidate = Math.Max(first - 1, 0);
+        var lastCandidate = Math.Min(_rows.Count, first + _list.ClientSize.Height / rowHeight + 2);
+        for (var index = firstCandidate; index < lastCandidate; index++)
+        {
+            var bounds = _list.GetItemRect(index, ItemBoundsPortion.Entire);
+            if (bounds.Top <= location.Y && location.Y < bounds.Bottom) return index;
+        }
+
+        return -1;
     }
 
     /// <summary>
@@ -692,6 +809,9 @@ public sealed class ComposerHistoryTree : UserControl
     {
         if (disposing)
         {
+            HideRowToolTip();
+            _rowHoverTimer.Dispose();
+            _rowToolTip.Dispose();
             _toolTip.Dispose();
             _surfaceBrush.Dispose();
             _groupBrush.Dispose();
