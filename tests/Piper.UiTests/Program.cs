@@ -671,7 +671,7 @@ internal static class Program
         _next = 0;
         AddSessions(store, setupRows);
         PumpUntil(() => list.VirtualListSize == setupRows);
-        Check(SendMessage(list.Handle, LvmGetTopIndex, 0, 0) > setupRows / 10, "setup: the grid followed the tail");
+        Check(SendMessage(list.Handle, LvmGetTopIndex, 0, 0) > (setupRows > 100 ? 100 : 0), "setup: the grid followed the tail");
 
         body(store, grid, list);
         form.Close();
