@@ -106,6 +106,9 @@ public sealed class SessionListView : UserControl
     /// </summary>
     public event EventHandler<string>? CopyAsNotice;
 
+    /// <summary>A path-free line for the Log when a SAZ save ends or is cancelled.</summary>
+    public event EventHandler<string>? SazSaveNotice;
+
     public SessionListView(SessionStore store)
     {
         _store = store;
@@ -1442,10 +1445,11 @@ public sealed class SessionListView : UserControl
     }
 
     /// <summary>Prompts for a Fiddler SAZ file and saves the current capture selection.</summary>
-    public bool SaveSelectedSessionsAsSaz()
+    public void SaveSelectedSessionsAsSaz()
     {
+        if (_savingSaz) return;
         var sessions = SelectedSessions.Where(session => session.Request is not null).ToArray();
-        if (sessions.Length == 0) return false;
+        if (sessions.Length == 0) return;
 
         using var dialog = new SaveFileDialog
         {
@@ -1455,23 +1459,71 @@ public sealed class SessionListView : UserControl
             AddExtension = true,
             FileName = Strings.SazImport.SuggestedFileName(DateTime.Now),
         };
-        if (dialog.ShowDialog(this) != DialogResult.OK) return false;
+        if (dialog.ShowDialog(this) != DialogResult.OK) return;
 
+        _ = SaveSazAsync(dialog.FileName, sessions);
+    }
+
+    /// <summary>An export that ends this quickly never shows its progress dialog.</summary>
+    private static readonly TimeSpan SazProgressDelay = TimeSpan.FromMilliseconds(300);
+
+    private bool _savingSaz;
+
+    /// <summary>
+    /// Writes <paramref name="sessions"/> on a worker thread. Their messages are read here, on the UI
+    /// thread, because capture keeps changing them; a progress dialog with Cancel appears if the
+    /// export takes longer than a moment. The exporter replaces the file only once it is complete.
+    /// </summary>
+    private async Task SaveSazAsync(string path, Session[] sessions)
+    {
+        var fileName = Path.GetFileName(path);
+        _savingSaz = true;
         try
         {
-            SazExporter.Export(dialog.FileName, sessions);
+            var snapshot = SazExporter.Snapshot(sessions);
+            using var cancellation = new CancellationTokenSource();
+            SazExportProgressDialog? progressDialog = null;
+            var latest = 0;
+            var progress = new Progress<int>(count =>
+            {
+                latest = count;
+                progressDialog?.Report(count);
+            });
+            var work = Task.Run(() => SazExporter.Export(path, snapshot, progress, cancellation.Token));
+
+            if (await Task.WhenAny(work, Task.Delay(SazProgressDelay)) != work && !IsDisposed)
+            {
+                using (progressDialog = new SazExportProgressDialog(fileName, snapshot.Count, work, cancellation))
+                {
+                    progressDialog.Report(latest);
+                    progressDialog.ShowDialog(this);
+                }
+            }
+
+            var written = await work;
             Analytics.Track(
                 AnalyticsEvents.FeatureUsed,
                 (AnalyticsProperties.Feature, "session_export"),
                 (AnalyticsProperties.Format, "saz"),
-                (AnalyticsProperties.Count, Analytics.CountBucket(sessions.Length)));
-            return true;
+                (AnalyticsProperties.Count, Analytics.CountBucket(written)));
+            if (!IsDisposed) SazSaveNotice?.Invoke(this, Strings.Log.SavedSessions(written, fileName));
+        }
+        catch (OperationCanceledException)
+        {
+            if (!IsDisposed) SazSaveNotice?.Invoke(this, Strings.Log.SaveSessionsCancelled(fileName));
         }
         catch (Exception ex)
         {
-            MessageBox.Show(this, Strings.SessionList.SaveSessionsFailed(ex.Message),
-                Strings.App.Name, MessageBoxButtons.OK, MessageBoxIcon.Error);
-            return false;
+            // A broad catch, as before the export moved off the UI thread: this is the fire-and-forget
+            // boundary, and any failure to write the file is reported rather than lost. The message can
+            // name the path, so it goes to this dialog only, never the Log.
+            if (!IsDisposed)
+                MessageBox.Show(this, Strings.SessionList.SaveSessionsFailed(ex.Message),
+                    Strings.App.Name, MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+        finally
+        {
+            _savingSaz = false;
         }
     }
 
