@@ -71,6 +71,8 @@ internal static class Program
         StatusImagesTests.Run(Check);
         TrustUiTests.Run(Check);
         TlsFailureUiTests.Run(Check, PumpUntil);
+        TlsFailureInspectorUiTests.Run(Check, PumpUntil);
+        TlsFailureSettingUiTests.Run(Check);
 
         Run("clearing a scrolled grid shows the next rows from the top", (store, grid, list) =>
         {

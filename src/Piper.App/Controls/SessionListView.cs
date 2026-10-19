@@ -367,11 +367,14 @@ public sealed class SessionListView : UserControl
     // from a figure that is merely moving.
     private Session? _refreshedSession;
     private SessionState _refreshedState;
+    // A failed handshake's count is a new record each time; the inspector shows it, so it has to be told.
+    private TlsFailureInfo? _refreshedTlsFailure;
 
     private void RaiseSelectionChanged(Session? session)
     {
         _refreshedSession = session;
         if (session is not null) _refreshedState = session.State;
+        _refreshedTlsFailure = session?.TlsFailure;
         SelectionChanged?.Invoke(this, session);
     }
 
@@ -382,8 +385,11 @@ public sealed class SessionListView : UserControl
         var state = session.State;
         var reload = state != _refreshedState;
         _refreshedState = state;
+        var tlsFailure = session.TlsFailure;
+        var counted = !ReferenceEquals(tlsFailure, _refreshedTlsFailure);
+        _refreshedTlsFailure = tlsFailure;
 
-        if (reload || state is SessionState.Pending or SessionState.SendingRequest
+        if (reload || counted || state is SessionState.Pending or SessionState.SendingRequest
                 or SessionState.AwaitingResponse or SessionState.ReceivingBody)
             SelectedSessionRefreshed?.Invoke(this, new SessionRefresh(session, reload));
     }

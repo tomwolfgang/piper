@@ -866,6 +866,8 @@
     "decryptHttpsNote": "Requires the Piper root certificate to be trusted.",
     "decryptWhenUntrusted": "Decrypt HTTPS even when Windows does not trust the Piper certificate",
     "decryptWhenUntrustedNote": "For clients that do not use the Windows certificate store (Firefox, Java, Node, curl --cacert, devices): install the Piper certificate in them yourself. A client that does not trust it fails every HTTPS handshake. Off: while Windows does not trust the certificate, HTTPS passes through unread.",
+    "recordClosedAfterHandshake": "Show a row when a client closes right after the TLS handshake",
+    "recordClosedAfterHandshakeNote": "A client that finishes the handshake and then sends no request within two seconds gets a TLS ERR row. A browser's speculative connection looks the same, so turn this off if those rows are noise. A client that visibly refuses the certificate is always shown.",
     "askToTrust": "Ask to trust the Piper certificate when Piper starts",
     "askToTrustNote": "Applies while the certificate is not trusted. Don't ask again in that prompt turns this off; the status bar still shows that HTTPS is not decrypted.",
     "http2Downstream": "Negotiate HTTP/2 with browsers",

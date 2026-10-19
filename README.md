@@ -129,7 +129,7 @@ Terms are ANDed. Prefix any term with `-` or `!` to negate it.
 | `size:` `reqsize:` | `size:>100kb` | `b`/`kb`/`mb`/`gb` suffixes |
 | `dur:` | `dur:>500` | milliseconds |
 | `is:` | `is:json`, `is:error`, `is:composed`, `is:slow` | see Help > Search syntax |
-| `is:tlsfail` | `is:tlsfail`, `-is:tlsfail` | rows for TLS handshakes a client failed; `is:error` matches them too |
+| `is:tlsfail` | `is:tlsfail`, `-is:tlsfail` | the `TLS ERR` rows: TLS handshakes a client failed (see [Why is nothing captured?](#why-is-nothing-captured)); `is:error` matches them too |
 | `handshake:` | `handshake:rejected`, `handshake:closed\|afterhello` | one kind of those rows: `rejected`, `closed`, `afterhello`, `early`, `timeout`, `protocol`, `nottls` or `other`. There is no `pinning` value, because Piper cannot see why a client refused its certificate |
 
 An unrecognised field is searched literally, so a pasted URL works as typed. A malformed value on
@@ -663,6 +663,49 @@ own code. Counts are reported as buckets rather than exact figures.
 Reports wait in `%LOCALAPPDATA%\Piper\analytics\pending.jsonl`, a plain text file you can read before
 it is sent. **Tools > Configurations > Privacy** holds the switch and a button that opens that
 folder. Turning reporting off deletes the identifiers and discards anything not yet sent.
+
+## Why is nothing captured?
+
+First the plain causes: capture is off (`F12`), the app does not use the proxy (Piper only sees what is
+routed through it, for example with **Capture > Use as system proxy**), or the capture scope or a filterset
+hides it (see [Search grammar](#search-grammar) for the filter box).
+
+If the app does reach Piper, decrypts HTTPS and still shows nothing, it may be refusing Piper's certificate.
+Piper decrypts a connection by presenting its own certificate in place of the site's, and an app that does not
+accept it ends the connection before sending a request, so there is nothing to capture. Piper shows that as a
+row: Result `TLS ERR`, Method `CONNECT`, the host, and in the Path column the reason, with a count when the
+app kept trying (`(12 attempts)`). Select the row for the details. `is:tlsfail` finds these rows and
+`handshake:<kind>` narrows them (see the table above).
+
+| Path says | What Piper saw | What it does not prove |
+| --- | --- | --- |
+| client refused Piper's certificate | the client ended the handshake with a TLS alert or an SChannel error that means the certificate was not accepted; the alert name is shown when Piper could read one | why: Piper's root not trusted by that app, a trust store of its own (Node, Java, Python, Firefox) and an app that pins the real certificate look the same |
+| client closed the connection during the handshake | a ClientHello arrived, then the client closed the connection with no alert Piper could read | whether it checked the certificate, was cancelled or timed out |
+| client closed right after the handshake, no request sent | the handshake finished and the client closed within two seconds without a request | low confidence: a browser's speculative connection looks the same. **Configurations > HTTPS** switches these rows off; a client that visibly refused the certificate is always shown |
+| client closed the tunnel before TLS started | the client left before a complete ClientHello, so it never saw Piper's certificate | nothing about certificates; usually harmless |
+| no TLS handshake completed in time | no handshake finished within the handshake timeout | why the client was silent |
+| no shared TLS version or cipher | the client and Piper share none; Piper offers TLS 1.2 and 1.3 | which versions the client offered |
+| client sent non-TLS data after CONNECT | the bytes were not TLS; a plain-text protocol tunnelled through CONNECT ends up here | which protocol it was |
+| TLS handshake failed | any other failure | the cause |
+
+Piper never labels a row as pinning, because from the server side it cannot tell pinning from an untrusted
+root; the inspector offers it only as a possible cause. Amber rows are ones where the client refused or left
+(nothing broke inside Piper); red ones are any other failure.
+
+Reading the count: failures from the same app to the same host and port with the same reason are counted
+into one row, not added as a row each, and the count is the number of attempts so far. A row counts for at
+most ten minutes, then a new one starts, and the Time column is the first attempt's. Piper tracks at most 256
+such rows at a time and adds at most 20 new ones per ten seconds. Past that, one row per app reads
+`N more TLS handshake failures are not shown individually`: those hosts and reasons are not listed anywhere.
+
+What to do: if the app should be captured, trust Piper's root where that app looks for it. Windows apps use
+the Windows store (**Tools > Configurations > HTTPS > Trust root certificate**); apps with a store of their own
+need the certificate installed in it, and an app that pins the real certificate cannot be decrypted at all.
+There is no per-host switch yet to leave one host undecrypted; turning off **Decrypt HTTPS traffic** passes all
+HTTPS through unread. If the app works, ignore the rows.
+
+These rows hold no request, header, body or certificate. Exporting a capture writes each as a request-only
+`CONNECT` entry without the reason, and nothing about them is reported anywhere.
 
 ## Reporting a problem
 

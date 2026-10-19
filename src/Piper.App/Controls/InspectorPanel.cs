@@ -80,6 +80,12 @@ public sealed class InspectorPanel : UserControl
         var state = session.State;
         if (session.Response is not { } response)
         {
+            if (session.TlsFailure is { } tlsFailure)
+            {
+                _response.SetNotes(TlsFailureText.Summary(tlsFailure), TlsFailureText.Panel(tlsFailure, session.Host, session.ProcessName));
+                return;
+            }
+
             _response.SetMessage(null, state switch
             {
                 SessionState.Failed => Strings.Inspector.ResponseFailed(session.Error, CertificateFailureHint.For(session.Error)),

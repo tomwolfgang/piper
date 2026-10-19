@@ -13,6 +13,7 @@ public sealed class ConfigurationsDialog : Form
     private CheckBox _decryptHttps = null!;
     private CheckBox _askToTrust = null!;
     private CheckBox _decryptWhenUntrusted = null!;
+    private CheckBox _recordClosedAfterHandshake = null!;
     private DarkTabControl _tabs = null!;
     private Label _trustStatus = null!;
     private readonly Func<bool> _isCertificateTrusted;
@@ -90,6 +91,7 @@ public sealed class ConfigurationsDialog : Form
         options.DecryptHttps = _decryptHttps.Checked;
         options.AskToTrustCertificate = _askToTrust.Checked;
         options.DecryptWhenUntrusted = _decryptWhenUntrusted.Checked;
+        options.RecordClosedAfterHandshake = _recordClosedAfterHandshake.Checked;
         options.EnableHttp2Downstream = _http2Downstream.Checked;
         options.EnableHttp2Upstream = _http2Upstream.Checked;
         options.EnableHttp3Upstream = _http3Upstream.Checked;
@@ -201,6 +203,8 @@ public sealed class ConfigurationsDialog : Form
             Strings.Configurations.AskToTrustNote, descriptionMaxWidth: 560);
         _decryptWhenUntrusted = AddOption(panel, Strings.Configurations.DecryptWhenUntrusted, options.DecryptWhenUntrusted,
             Strings.Configurations.DecryptWhenUntrustedNote, descriptionMaxWidth: 560);
+        _recordClosedAfterHandshake = AddOption(panel, Strings.Configurations.RecordClosedAfterHandshake, options.RecordClosedAfterHandshake,
+            Strings.Configurations.RecordClosedAfterHandshakeNote, descriptionMaxWidth: 560);
         _http2Downstream = AddOption(panel, Strings.Configurations.Http2Downstream, options.EnableHttp2Downstream,
             Strings.Configurations.Http2DownstreamNote);
         _http2Upstream = AddOption(panel, Strings.Configurations.Http2Upstream, options.EnableHttp2Upstream,

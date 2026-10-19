@@ -1192,6 +1192,8 @@ internal static class Strings
         public static string DecryptHttpsNote => I18n.T("configurations.decryptHttpsNote");
         public static string DecryptWhenUntrusted => I18n.T("configurations.decryptWhenUntrusted");
         public static string DecryptWhenUntrustedNote => I18n.T("configurations.decryptWhenUntrustedNote");
+        public static string RecordClosedAfterHandshake => I18n.T("configurations.recordClosedAfterHandshake");
+        public static string RecordClosedAfterHandshakeNote => I18n.T("configurations.recordClosedAfterHandshakeNote");
         public static string AskToTrust => I18n.T("configurations.askToTrust");
         public static string AskToTrustNote => I18n.T("configurations.askToTrustNote");
         public static string Http2Downstream => I18n.T("configurations.http2Downstream");
