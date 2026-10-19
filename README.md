@@ -129,6 +129,8 @@ Terms are ANDed. Prefix any term with `-` or `!` to negate it.
 | `size:` `reqsize:` | `size:>100kb` | `b`/`kb`/`mb`/`gb` suffixes |
 | `dur:` | `dur:>500` | milliseconds |
 | `is:` | `is:json`, `is:error`, `is:composed`, `is:slow` | see Help > Search syntax |
+| `is:tlsfail` | `is:tlsfail`, `-is:tlsfail` | rows for TLS handshakes a client failed; `is:error` matches them too |
+| `handshake:` | `handshake:rejected`, `handshake:closed\|afterhello` | one kind of those rows: `rejected`, `closed`, `afterhello`, `early`, `timeout`, `protocol`, `nottls` or `other`. There is no `pinning` value, because Piper cannot see why a client refused its certificate |
 
 An unrecognised field is searched literally, so a pasted URL works as typed. A malformed value on
 a known field — `status:abc` — is reported as a warning and ignored rather than failing the query.
