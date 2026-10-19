@@ -226,7 +226,14 @@ public sealed partial class MainForm : Form, IMessageFilter
         _sessionList.ShowHiddenHostRequested += (_, host) => ShowHiddenHost(host);
         _sessionList.ShowAllHiddenRequested += (_, _) =>
         {
-            foreach (var host in _sessionHiddenHosts.Keys.ToArray()) ShowHiddenHost(host, log: false);
+            // One settings write and one grid rebuild for the lot, not one per host.
+            var settings = _filterPanel.Settings;
+            var unticked = false;
+            foreach (var (host, recorded) in _sessionHiddenHosts)
+                if (recorded) unticked |= settings.UnhideHost(host);
+            _sessionHiddenHosts.Clear();
+            if (unticked) _filterPanel.ApplySettings(settings);
+            ApplySessionHiddenHosts();
             AppendLog(Strings.Log.AllHiddenShown);
         };
         _sessionList.HiddenShownNotice += (_, description) => AppendLog(Strings.Log.HiddenShown(description));
@@ -1961,7 +1968,7 @@ public sealed partial class MainForm : Form, IMessageFilter
     /// has its entry unticked too, so the filterset does not hide it again on the next run or start;
     /// the entry stays in the list as one click to hide it again.
     /// </summary>
-    private void ShowHiddenHost(string host, bool log = true)
+    private void ShowHiddenHost(string host)
     {
         if (!_sessionHiddenHosts.Remove(host, out var recorded)) return;
 
@@ -1975,8 +1982,7 @@ public sealed partial class MainForm : Form, IMessageFilter
         }
         ApplySessionHiddenHosts();
 
-        if (log)
-            AppendLog(unticked ? Strings.Log.HiddenHostShownUnticked(host) : Strings.Log.HiddenShown(Strings.SessionList.HiddenHost(host)));
+        AppendLog(unticked ? Strings.Log.HiddenHostShownUnticked(host) : Strings.Log.HiddenShown(Strings.SessionList.HiddenHost(host)));
     }
 
     /// <summary>
