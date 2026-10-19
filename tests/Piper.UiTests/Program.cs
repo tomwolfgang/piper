@@ -14,7 +14,6 @@ internal static class Program
 {
     private const int LvmGetTopIndex = 0x1000 + 39;
     private const int WmMouseMove = 0x0200;
-    private const int EmGetWordBreakProc = 0x00D1;
     private const int WmLButtonDown = 0x0201;
     private const int WmLButtonUp = 0x0202;
     private const int WmLButtonDoubleClick = 0x0203;
@@ -25,6 +24,9 @@ internal static class Program
 
     [DllImport("user32.dll")]
     private static extern nint SendMessage(nint hwnd, int msg, nint wParam, nint lParam);
+
+    [DllImport("user32.dll")]
+    private static extern nint GetCapture();
 
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
@@ -197,14 +199,15 @@ internal static class Program
         DoubleClick(textBox, new Point(point.X + 1, point.Y + 1));
         Check(textBox.SelectedText == word, "double-click selects only the URI component");
 
-        // Regression: the double-click was swallowed, so the native control never entered drag mode.
-        var dragTarget = text.IndexOf("HTTP", StringComparison.Ordinal) + 2;
+        // A held double-click keeps its URI-component selection, then extends one character at a
+        // time instead of asking the native edit control to snap the drag to words.
+        var dragTarget = text.IndexOf("init", StringComparison.Ordinal) + 1;
         var dragPoint = textBox.GetPositionFromCharIndex(dragTarget);
         DoubleClickAndHold(textBox, new Point(point.X + 1, point.Y + 1));
         Check(textBox.SelectedText == word, "double-click and hold selects only the URI component");
         MouseMove(textBox, new Point(dragPoint.X + 1, dragPoint.Y + 1), leftButton: true);
-        Check(textBox.SelectedText == "passwordless/init HTTP",
-            "dragging right after a double-click extends by URI component from the word");
+        Check(textBox.SelectedText == "passwordless/in",
+            "dragging right after a double-click extends by individual characters");
         var dragged = (textBox.SelectionStart, textBox.SelectionLength);
         LeftButtonUp(textBox, new Point(dragPoint.X + 1, dragPoint.Y + 1));
         MouseMove(textBox, new Point(point.X + 1, point.Y + 1), leftButton: false);
@@ -216,8 +219,34 @@ internal static class Program
         DoubleClickAndHold(textBox, new Point(initPoint.X + 1, initPoint.Y + 1));
         MouseMove(textBox, new Point(authPoint.X + 1, authPoint.Y + 1), leftButton: true);
         LeftButtonUp(textBox, new Point(authPoint.X + 1, authPoint.Y + 1));
-        Check(textBox.SelectedText == "auth/passwordless/init",
-            "dragging left after a double-click keeps the word and extends by URI component");
+        Check(textBox.SelectedText == "uth/passwordless/init",
+            "dragging left after a double-click extends by individual characters");
+
+        Console.WriteLine("== a held double-click scrolls when dragged outside its text box");
+        using (var scrollForm = new Form { Width = 160, Height = 100, ShowInTaskbar = false, StartPosition = FormStartPosition.Manual, Location = new Point(0, 120) })
+        {
+            var scrollText = "word/" + new string('x', 1_000);
+            var scrollBox = new TextBox { Dock = DockStyle.Top, Text = scrollText };
+            scrollForm.Controls.Add(scrollBox);
+            Palette.Apply(scrollForm);
+            scrollForm.Show();
+            Palette.Apply(scrollForm);
+            scrollBox.Select(0, 0);
+            scrollBox.ScrollToCaret();
+            var scrollPoint = scrollBox.GetPositionFromCharIndex(1);
+            var initialFirstCharacterPosition = scrollBox.GetPositionFromCharIndex(0).X;
+            var outside = new Point(scrollBox.ClientRectangle.Right + 20, scrollPoint.Y + 1);
+            DoubleClickAndHold(scrollBox, new Point(scrollPoint.X + 1, scrollPoint.Y + 1));
+            MouseMove(scrollBox, outside, leftButton: true);
+            PumpFor(200);
+            Check(scrollBox.SelectionLength > 4, "dragging a held double-click outside extends the selection");
+            Check(scrollBox.GetPositionFromCharIndex(0).X < initialFirstCharacterPosition,
+                "dragging a held double-click outside scrolls the text box");
+            MouseMove(scrollBox, outside, leftButton: false);
+            Check(GetCapture() != scrollBox.Handle, "moving without the button releases the drag capture");
+            LeftButtonUp(scrollBox, outside);
+            scrollForm.Close();
+        }
 
         textBox.Select(wordStart, 0);
         PressWordKey(textBox, Keys.Right, shift: true);
@@ -292,30 +321,41 @@ internal static class Program
         DoubleClickAndHold(large, new Point(largePoint.X + 1, largePoint.Y + 1));
         MouseMove(large, new Point(largeDragPoint.X + 1, largeDragPoint.Y + 1), leftButton: true);
         LeftButtonUp(large, new Point(largeDragPoint.X + 1, largeDragPoint.Y + 1));
-        Check(large.SelectionStart == largeWordStart && large.SelectedText == word + "/init",
-            "dragging after a double-click past offset 65,536 extends by URI component");
+        Check(large.SelectionStart == largeWordStart && large.SelectedText == word + "/in",
+            "dragging after a double-click past offset 65,536 extends by individual characters");
         large.Select(largeWordStart, 0);
         PressWordKey(large, Keys.Right, shift: true);
         Check(large.SelectionStart == largeWordStart && large.SelectedText == word,
             "Ctrl+Shift+Right selects the same component past offset 65,536");
-        Console.WriteLine("== the drag word-break proc is bounded and leaves wrapping alone");
-        Check(SendMessage(large.Handle, EmGetWordBreakProc, 0, 0) != 0, "a non-wrapping box drags by URI component");
+        Console.WriteLine("== character drags work in wrapping and long text boxes");
         large.WordWrap = true;
-        Check(SendMessage(large.Handle, EmGetWordBreakProc, 0, 0) == 0,
-            "a wrapping box keeps the native word break, which its line layout also uses");
         large.Select(largeWordStart + 2, 0);
         large.ScrollToCaret();
         var wrappedPoint = large.GetPositionFromCharIndex(largeWordStart + 2);
+        var wrappedDragPoint = large.GetPositionFromCharIndex(largeWordStart + word.Length + 2);
         DoubleClickAndHold(large, new Point(wrappedPoint.X + 1, wrappedPoint.Y + 1));
-        MouseMove(large, new Point(wrappedPoint.X + 1, wrappedPoint.Y + 1), leftButton: true);
-        LeftButtonUp(large, new Point(wrappedPoint.X + 1, wrappedPoint.Y + 1));
-        Check(large.SelectionStart == largeWordStart && large.SelectedText == word,
-            "in a wrapping box a held double-click still selects only the URI component");
+        MouseMove(large, new Point(wrappedDragPoint.X + 1, wrappedDragPoint.Y + 1), leftButton: true);
+        LeftButtonUp(large, new Point(wrappedDragPoint.X + 1, wrappedDragPoint.Y + 1));
+        Check(large.SelectionStart == largeWordStart && large.SelectedText == word + "/in",
+            "a wrapping box extends a held double-click by individual characters");
         large.WordWrap = false;
-        Check(SendMessage(large.Handle, EmGetWordBreakProc, 0, 0) != 0, "turning wrapping off restores it");
 
-        // One megabyte without a boundary: each callback must look at a bounded window, not the line.
-        large.Text = new string('a', 1024 * 1024);
+        var longWordText = new string('a', 70_000) + "/tail";
+        large.Text = longWordText;
+        large.Select(69_990, 0);
+        large.ScrollToCaret();
+        var longWordPoint = large.GetPositionFromCharIndex(69_990);
+        var longWordDragPoint = large.GetPositionFromCharIndex(70_002);
+        Check(large.ClientRectangle.Contains(longWordPoint) && large.ClientRectangle.Contains(longWordDragPoint),
+            "setup: the end of a word longer than 32K characters is visible");
+        DoubleClickAndHold(large, new Point(longWordPoint.X + 1, longWordPoint.Y + 1));
+        MouseMove(large, new Point(longWordDragPoint.X + 1, longWordDragPoint.Y + 1), leftButton: true);
+        LeftButtonUp(large, new Point(longWordDragPoint.X + 1, longWordDragPoint.Y + 1));
+        Check(large.SelectionStart == 0 && large.SelectionLength == 70_003 && large.SelectedText.EndsWith("/ta", StringComparison.Ordinal),
+            "dragging after a word longer than 32K characters keeps the full character index");
+
+        // One MiB text element: repeated moves must not rescan an unbounded combining-mark run.
+        large.Text = "a" + new string('\u0301', 1024 * 1024 - 1);
         large.Select(0, 0);
         large.ScrollToCaret();
         var longPoint = large.GetPositionFromCharIndex(10);
@@ -325,7 +365,7 @@ internal static class Program
         for (var move = 0; move < 50; move++)
             MouseMove(large, new Point(longDragPoint.X + 1 + move % 2, longDragPoint.Y + 1), leftButton: true);
         LeftButtonUp(large, new Point(longDragPoint.X + 1, longDragPoint.Y + 1));
-        Check(watch.Elapsed < TimeSpan.FromSeconds(2), $"dragging in a 1 MiB word stays responsive ({watch.ElapsedMilliseconds} ms)");
+        Check(watch.Elapsed < TimeSpan.FromSeconds(2), $"character dragging in a 1 MiB combining-mark run stays responsive ({watch.ElapsedMilliseconds} ms)");
         Check(large.SelectionStart == 0 && large.SelectionLength > 0, "the selection still starts at the word");
         largeForm.Close();
 
