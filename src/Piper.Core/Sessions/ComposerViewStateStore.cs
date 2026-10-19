@@ -2,21 +2,20 @@ using System.Text.Json;
 
 namespace Piper.Core.Sessions;
 
-/// <summary>Which host groups the user has folded away in the Composer history pane.</summary>
+/// <summary>Which host groups the user has explicitly opened in the Composer history pane.</summary>
 /// <remarks>
-/// Only collapsed hosts are recorded, so a missing, unreadable, or truncated file means "everything
-/// expanded" - the behaviour the pane had before groups existed, and the right default for a host
-/// the user has never seen.
+/// Only explicitly opened hosts are recorded, so a missing, unreadable, or truncated file keeps
+/// the default folded state for every group.
 /// </remarks>
 public sealed class ComposerViewState
 {
-    public List<string> CollapsedHosts { get; set; } = [];
+    public List<string> ExpandedHosts { get; set; } = [];
 }
 
 /// <summary>
-/// Persists the Composer history pane's expand/collapse state under the user's local app-data
-/// directory, alongside the history itself. View state is a convenience, so every failure degrades
-/// to no settings rather than surfacing.
+/// Persists the Composer history pane's explicitly opened host groups under the user's local
+/// app-data directory, alongside the history itself. View state is a convenience, so every failure
+/// degrades to the compact folded default rather than surfacing.
 /// </summary>
 public static class ComposerViewStateStore
 {
@@ -34,7 +33,7 @@ public static class ComposerViewStateStore
         ArgumentNullException.ThrowIfNull(state);
         path ??= DefaultPath;
 
-        var sanitized = new ComposerViewState { CollapsedHosts = Clean(state.CollapsedHosts) };
+        var sanitized = new ComposerViewState { ExpandedHosts = Clean(state.ExpandedHosts) };
 
         try
         {
@@ -63,7 +62,7 @@ public static class ComposerViewStateStore
             var state = JsonSerializer.Deserialize<ComposerViewState>(File.ReadAllText(path));
             return state is null
                 ? new ComposerViewState()
-                : new ComposerViewState { CollapsedHosts = Clean(state.CollapsedHosts) };
+                : new ComposerViewState { ExpandedHosts = Clean(state.ExpandedHosts) };
         }
         catch (IOException)
         {
@@ -88,7 +87,7 @@ public static class ComposerViewStateStore
         .Distinct(StringComparer.OrdinalIgnoreCase)
         // Ordered before the cap because the caller hands over a materialised HashSet, whose order
         // is not meaningful and not stable between saves. Without this, which hosts survive past
-        // the ceiling could change on every write and a collapsed host could quietly come back.
+        // the ceiling could change on every write and an opened host could quietly fold again.
         .OrderBy(host => host, StringComparer.OrdinalIgnoreCase)
         .Take(MaxHosts)
         .ToList();

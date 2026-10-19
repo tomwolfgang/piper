@@ -299,7 +299,8 @@ Close other programs first, use `--wait-quiet 10`, and report the median and ran
 - Composer with search, raw-request editing, repeat-N, and verbatim header sending
 - Composer history grouped into collapsible hosts, repeat sends folded into one counted row, and
   the response to the last send inspectable without leaving the Composer. Which hosts you have
-  collapsed is remembered across restarts; a host you have not seen before starts expanded
+  explicitly opened is remembered across restarts; restored history otherwise starts collapsed.
+  Hovering a shortened history row shows its full text in a tooltip
 - Copy as curl and other languages, per-host filtering, dark theme
 - **Copy as** in the session grid's context menu writes the selected request as curl for bash, for
   cmd or for PowerShell, as PowerShell `Invoke-WebRequest`, JavaScript `fetch`, Python `requests` or

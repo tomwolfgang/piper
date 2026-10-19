@@ -139,6 +139,29 @@ public static class ComposerHistoryView
     }
 
     /// <summary>
+    /// Returns every host group present in a history, ready for the Composer's initial folded
+    /// state. Hosts added later in the same Composer session remain visible, so a just-completed
+    /// send does not disappear beneath a group the user has not seen yet.
+    /// </summary>
+    /// <param name="expandedHosts">Host groups the user has explicitly opened in an earlier session.</param>
+    public static IReadOnlySet<string> InitiallyCollapsedHosts(
+        IReadOnlyList<Session> history,
+        IReadOnlySet<string>? expandedHosts = null)
+    {
+        ArgumentNullException.ThrowIfNull(history);
+
+        var hosts = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var session in history)
+        {
+            if (session is null || session.IsTunnel || session.Request is null) continue;
+            var host = HostOf(session);
+            if (expandedHosts?.Contains(host) != true) hosts.Add(host);
+        }
+
+        return hosts;
+    }
+
+    /// <summary>
     /// What makes two sends "the same request" inside a host: the method and the full target. The
     /// query is part of it because /search?q=a and /search?q=b are different requests.
     /// </summary>
