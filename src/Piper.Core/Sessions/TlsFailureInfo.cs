@@ -10,7 +10,7 @@ public enum TlsFailureKind
     /// <summary>A full ClientHello arrived, then the client closed with no alert evidence.</summary>
     ClosedInHandshake,
 
-    /// <summary>Handshake completed, client closed before any request. Reserved for the post-handshake check.</summary>
+    /// <summary>Handshake completed, client closed before any request, within a short window. Low confidence: a speculative connection looks the same.</summary>
     ClosedAfterHandshake,
 
     /// <summary>The client closed before a ClientHello was complete. It never saw Piper's certificate.</summary>

@@ -55,17 +55,7 @@ internal static class TlsFailureClassifier
         var phase = helloSeen ? TlsFailurePhase.InHandshake : TlsFailurePhase.BeforeHello;
         if (budgetExpired) return new TlsFailureInfo(TlsFailureKind.Timeout, phase);
 
-        uint? secStatus = null;
-        string? alert = null;
-        var notTls = false;
-        var depth = 0;
-        for (var current = exception; current is not null && depth < MaxChainDepth; current = current.InnerException, depth++)
-        {
-            if (current is Win32Exception win32) secStatus ??= unchecked((uint)win32.NativeErrorCode);
-            alert ??= FindAlert(current.Message);
-            if (current is AuthenticationException && current.Message.Contains("frame size", StringComparison.Ordinal))
-                notTls = true;
-        }
+        Scan(exception, out var secStatus, out var alert, out var notTls);
 
         TlsFailureKind kind;
         if ((alert is not null && Array.IndexOf(RejectingAlerts, alert) >= 0)
@@ -81,6 +71,40 @@ internal static class TlsFailureClassifier
             kind = TlsFailureKind.Other;
 
         return new TlsFailureInfo(kind, phase, alert, secStatus);
+    }
+
+    /// <summary>
+    /// A client that finished the handshake and then ended the connection before any request. With evidence
+    /// that it refused the certificate (the SChannel status the first read fails with, or an alert name) that
+    /// is <see cref="TlsFailureKind.Rejected"/>; anything else is <see cref="TlsFailureKind.ClosedAfterHandshake"/>,
+    /// which claims no more than "it left", since a speculative connection looks the same.
+    /// </summary>
+    /// <param name="exception">What the first read threw, or null when the client closed cleanly.</param>
+    public static TlsFailureInfo ClassifyAfterHandshake(Exception? exception)
+    {
+        uint? secStatus = null;
+        string? alert = null;
+        if (exception is not null) Scan(exception, out secStatus, out alert, out _);
+
+        var rejected = (alert is not null && Array.IndexOf(RejectingAlerts, alert) >= 0)
+                       || secStatus is SecUntrustedRoot or SecCertUnknown;
+        return new TlsFailureInfo(
+            rejected ? TlsFailureKind.Rejected : TlsFailureKind.ClosedAfterHandshake, TlsFailurePhase.AfterHandshake, alert, secStatus);
+    }
+
+    private static void Scan(Exception exception, out uint? secStatus, out string? alert, out bool notTls)
+    {
+        secStatus = null;
+        alert = null;
+        notTls = false;
+        var depth = 0;
+        for (var current = exception; current is not null && depth < MaxChainDepth; current = current.InnerException, depth++)
+        {
+            if (current is Win32Exception win32) secStatus ??= unchecked((uint)win32.NativeErrorCode);
+            alert ??= FindAlert(current.Message);
+            if (current is AuthenticationException && current.Message.Contains("frame size", StringComparison.Ordinal))
+                notTls = true;
+        }
     }
 
     /// <summary>The SNI if it is a plain host name (letters, digits, dot, hyphen, underscore, at most

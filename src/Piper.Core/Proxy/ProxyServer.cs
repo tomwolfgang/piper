@@ -415,6 +415,16 @@ public sealed class ProxyServer : IAsyncDisposable
             get { lock (_gate) return _evictedAt != 0 && Stopwatch.GetElapsedTime(_evictedAt) < EvictionGrace; }
         }
 
+        /// <summary>True when the last wait for a request's first byte ended because the peer closed the
+        /// connection cleanly. Set by <c>ReadRequestAsync</c>, which returns null for that and for every other
+        /// way a wait ends; read only by the tunnel loop, to tell a client that left from one that went quiet.</summary>
+        public bool PeerClosed { get; set; }
+
+        /// <summary>The IOException the last wait for a request's first byte failed with (a reset, or a
+        /// record the client's TLS stack would not decrypt), kept so the tunnel loop can tell it from one
+        /// thrown later, in the middle of a request.</summary>
+        public IOException? WaitFailure { get; set; }
+
         /// <summary>Starts an idle period; the token is cancelled if the connection is evicted during it.</summary>
         public CancellationToken BeginIdle()
         {
@@ -662,11 +672,20 @@ public sealed class ProxyServer : IAsyncDisposable
             idle.CancelAfter(first ? _options.RequestHeadTimeout : _options.IdleTimeout);
             try
             {
-                if (!await reader.HasMoreDataAsync(idle.Token).ConfigureAwait(false)) return null;
+                if (!await reader.HasMoreDataAsync(idle.Token).ConfigureAwait(false))
+                {
+                    state.PeerClosed = true;
+                    return null;
+                }
             }
             catch (OperationCanceledException) when (!ct.IsCancellationRequested)
             {
                 return null; // idle (or evicted) - close it quietly
+            }
+            catch (IOException ex)
+            {
+                state.WaitFailure = ex;
+                throw;
             }
             finally
             {
@@ -821,6 +840,8 @@ public sealed class ProxyServer : IAsyncDisposable
         if (!await AuthenticateClientAsync(ssl, connect, host, port, clientEndpoint, processName, ct).ConfigureAwait(false))
             return;
 
+        // From here a client that leaves without a request is told apart from one that never got this far.
+        var established = Stopwatch.GetTimestamp();
         if (ssl.NegotiatedApplicationProtocol == SslApplicationProtocol.Http2)
         {
             await RunHttp2Async(ssl, clientEndpoint, processName, ct).ConfigureAwait(false);
@@ -831,6 +852,7 @@ public sealed class ProxyServer : IAsyncDisposable
         using var tlsReader = new HttpStreamReader(tunnel);
         using var slot = new ConnectionSlot();
 
+        var served = false;
         try
         {
             for (var first = true; !ct.IsCancellationRequested; first = false)
@@ -838,7 +860,15 @@ public sealed class ProxyServer : IAsyncDisposable
                 var request = await ReadRequestAsync(
                     tlsReader, tunnel, state, first, isHttps: true, r => BuildTunnelUrl(r, host, port), clientEndpoint, processName, ct)
                     .ConfigureAwait(false);
-                if (request is null) break;
+                if (request is null)
+                {
+                    // Zero requests and a clean close: the client finished the handshake and left.
+                    if (!served && state.PeerClosed)
+                        await RecordAfterHandshakeAsync(ssl, connect, host, port, clientEndpoint, processName, established, null, ct).ConfigureAwait(false);
+                    break;
+                }
+
+                served = true;
 
                 // Inside a tunnel the target is origin-form; rebuild the absolute URL as https.
                 request.Url = BuildTunnelUrl(request, host, port);
@@ -850,6 +880,12 @@ public sealed class ProxyServer : IAsyncDisposable
             }
         }
         catch (OperationCanceledException) { }
+        catch (IOException ex) when (!served && ReferenceEquals(ex, state.WaitFailure))
+        {
+            // The very first read failed: a reset, or a record the client's stack would not decrypt (it
+            // refused the certificate and the failure only surfaced here).
+            await RecordAfterHandshakeAsync(ssl, connect, host, port, clientEndpoint, processName, established, ex, ct).ConfigureAwait(false);
+        }
         catch (IOException) { }
         catch (HttpParseException ex) { Log?.Invoke(this, $"Protocol error in tunnel to {host}: {ex.Message}"); }
         finally
@@ -946,6 +982,35 @@ public sealed class ProxyServer : IAsyncDisposable
             TlsFailure = info,
             Completed = completed,
         });
+    }
+
+    /// <summary>
+    /// Records a client that finished the handshake and then ended the connection without a single request:
+    /// its first read failed, or it closed cleanly. Called at most once per connection, and only when no
+    /// request was served, so it cannot double-record with the failure before the handshake finished. Not
+    /// for a stop (which closes every connection). Evidence that the client refused the certificate is
+    /// always recorded; a plain close only within <see cref="ProxyOptions.ClosedAfterHandshakeWindow"/>,
+    /// and only while <see cref="ProxyOptions.RecordClosedAfterHandshake"/> is on, since a browser's
+    /// speculative connection looks the same. The row's Time is how long the client held the connection.
+    /// </summary>
+    private async Task RecordAfterHandshakeAsync(
+        SslStream ssl, HttpRequestData connect, string host, int port, string clientEndpoint, Task<string> processName,
+        long established, Exception? failure, CancellationToken ct)
+    {
+        if (ct.IsCancellationRequested) return;
+
+        var info = TlsFailureClassifier.ClassifyAfterHandshake(failure);
+        var held = Stopwatch.GetElapsedTime(established);
+        var refused = info.Kind == TlsFailureKind.Rejected;
+        if (!refused && (!_options.RecordClosedAfterHandshake || held > _options.ClosedAfterHandshakeWindow)) return;
+
+        var completed = DateTimeOffset.Now;
+        await RecordClientTlsFailureAsync(
+            connect, host, port, clientEndpoint, processName, completed - held, completed,
+            info with { Sni = TlsFailureClassifier.SanitizeSni(ssl.TargetHostName), LastSeen = completed },
+            refused && failure is not null
+                ? $"TLS handshake with client failed: {Describe(failure)}"
+                : "Client closed the TLS connection right after the handshake, before sending a request").ConfigureAwait(false);
     }
 
     /// <summary>Runs one browser-facing HTTP/2 connection. Each stream is forwarded independently

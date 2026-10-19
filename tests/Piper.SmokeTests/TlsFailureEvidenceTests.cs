@@ -134,7 +134,7 @@ internal static class TlsFailureEvidenceTests
         await Fails("a silent client is a timeout, and Time is the wait", _ => Task.CompletedTask,
             TlsFailureKind.Timeout, Before, null, TimeSpan.FromMilliseconds(1500));
 
-        await runner.RunAsync("a .NET client that rejects the certificate (TLS 1.2 and 1.3) is never mislabelled", async () =>
+        await runner.RunAsync("a .NET client that rejects the certificate (TLS 1.2 and 1.3) is recorded once, as rejected (1.3: or a bare close)", async () =>
         {
             foreach (var protocol in new[] { SslProtocols.Tls12, SslProtocols.Tls13 })
             {
@@ -145,14 +145,22 @@ internal static class TlsFailureEvidenceTests
                     var refused = false;
                     try { await ssl.AuthenticateAsClientAsync(Client("reject.test", protocol, accept: false)); }
                     catch (Exception ex) when (ex is AuthenticationException or IOException) { refused = true; }
-                    client.Dispose();
+                    await CloseGracefullyAsync(client);
                     runner.IsTrue(refused, $"{protocol}: the client refused the certificate");
 
-                    // The server may see this in the handshake or only on the first read (a later change
-                    // records that); whatever is recorded now must say "rejected".
-                    await Poll.UntilAsync(() => store.Snapshot().Any(s => s.TlsFailure is not null), 1500);
-                    foreach (var row in store.Snapshot().Where(s => s.TlsFailure is not null))
-                        runner.AreEqual(TlsFailureKind.Rejected, row.TlsFailure!.Kind, $"{protocol}: a recorded row says rejected");
+                    // The server sees it on the first read after a completed handshake (probe), or in the handshake.
+                    runner.IsTrue(await Poll.UntilAsync(() => store.Snapshot().Any(s => s.TlsFailure is not null)), $"{protocol}: a row is recorded");
+                    await Task.Delay(300);
+                    var rows = store.Snapshot().Where(s => s.TlsFailure is not null).ToArray();
+                    runner.AreEqual(1, rows.Length, $"{protocol}: one row, not one per place it was noticed");
+                    // TLS 1.3 is a race between the client's alert and the reset its stack follows it with (measured:
+                    // about two runs in three see the alert). A reset alone proves nothing, so it must read as a plain close.
+                    var kind = rows[0].TlsFailure!.Kind;
+                    runner.IsTrue(kind == TlsFailureKind.Rejected || (protocol == SslProtocols.Tls13 && kind == TlsFailureKind.ClosedAfterHandshake),
+                        $"{protocol}: rejected, or on 1.3 a reset that left no evidence (got {kind})");
+                    if (kind == TlsFailureKind.Rejected)
+                        runner.IsTrue(rows[0].TlsFailure!.SecStatus is TlsFailureClassifier.SecUntrustedRoot or TlsFailureClassifier.SecCertUnknown
+                                      || rows[0].TlsFailure!.Alert is not null, $"{protocol}: with the evidence it rests on (0x{rows[0].TlsFailure!.SecStatus:X})");
                 });
             }
         });
@@ -206,7 +214,7 @@ internal static class TlsFailureEvidenceTests
     private static AuthenticationException Alert(string name) =>
         new($"Authentication failed because the remote party sent a TLS alert: '{name}'.", new Win32Exception(unchecked((int)0x80090326)));
 
-    private static SslClientAuthenticationOptions Client(string host, SslProtocols protocols, bool accept) => new()
+    internal static SslClientAuthenticationOptions Client(string host, SslProtocols protocols, bool accept) => new()
     {
         TargetHost = host,
         EnabledSslProtocols = protocols,
@@ -214,17 +222,35 @@ internal static class TlsFailureEvidenceTests
         RemoteCertificateValidationCallback = (_, _, _, _) => accept,
     };
 
+    /// <summary>Ends the connection with a FIN and waits for the proxy to end its side, so nothing the
+    /// proxy sent is left unread. An abortive close (RST) can discard the client's alert before the proxy
+    /// reads it, which would make what the proxy sees a race the test does not control.</summary>
+    internal static async Task CloseGracefullyAsync(TcpClient client)
+    {
+        client.Client.Shutdown(SocketShutdown.Send);
+        using var limit = new CancellationTokenSource(Patience);
+        var buffer = new byte[1024];
+        try
+        {
+            while (await client.Client.ReceiveAsync(buffer, SocketFlags.None, limit.Token) > 0) { }
+        }
+        catch (Exception ex) when (ex is SocketException or OperationCanceledException or ObjectDisposedException) { }
+        client.Dispose();
+    }
+
     internal static void Reset(TcpClient client)
     {
         client.Client.LingerState = new LingerOption(true, 0);
         client.Dispose();
     }
 
-    internal static async Task WithProxyAsync(CertificateAuthority ca, TimeSpan? handshakeBudget, Func<int, SessionStore, Task> body)
+    internal static async Task WithProxyAsync(
+        CertificateAuthority ca, TimeSpan? handshakeBudget, Func<int, SessionStore, Task> body, Action<ProxyOptions>? configure = null)
     {
         var store = new SessionStore();
         var options = new ProxyOptions { Port = 0, DecryptHttps = true };
         if (handshakeBudget is { } budget) options.TlsHandshakeTimeout = budget;
+        configure?.Invoke(options);
         var proxy = new ProxyServer(options, ca, store);
         proxy.Start();
         try
