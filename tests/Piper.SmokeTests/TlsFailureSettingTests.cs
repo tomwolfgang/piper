@@ -3,7 +3,8 @@ using Piper.Core.Proxy;
 using Piper.Core.Sessions;
 
 // The switch for the rows a client leaves by closing right after the TLS handshake (X2 slice 3), and the
-// README section that explains every row, which has to use the words the grid does.
+// README section that explains every row, which has to use the words the grid does. Nothing registers these
+// groups: every public static Task Run*Async(TestRunner) is found by reflection (TestDiscovery in Program.cs).
 internal static class TlsFailureSettingTests
 {
     public static Task RunTlsFailureSettingAsync(TestRunner runner) => runner.RunAsync("settings: the after-handshake rows switch persists, applies and defaults on", () =>
