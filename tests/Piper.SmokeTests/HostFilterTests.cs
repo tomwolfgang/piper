@@ -146,10 +146,6 @@ internal static class HostFilterTests
             runner.IsTrue(!HostFilterTerm.Covers("localhost:3000", "localhost:4000"), "but stays a fragment, port included");
             runner.IsTrue(HostFilterTerm.Covers("[::1]:8080", "[::1]:8080"), "an IPv6 literal with a port matches itself");
             runner.IsTrue(!HostFilterTerm.Covers("[::1]:8080", "[::1]:9090"), "and also keeps its port");
-
-            var settings = new FilterSettings();
-            runner.IsTrue(settings.HideHost("example.com:8443"), "precondition: the host is recorded");
-            runner.IsTrue(settings.Hides("example.com:8443"), "the recorded entry hides the host it came from");
             return Task.CompletedTask;
         });
 

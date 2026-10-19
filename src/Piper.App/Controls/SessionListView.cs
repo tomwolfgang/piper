@@ -64,11 +64,11 @@ public sealed class SessionListView : UserControl
     private FindSessionsRequest _lastFind = FindSessionsRequest.Default;
     private Func<Session, bool>? _visibilityFilter;
     private Func<Session, bool>? _filtersetFilter;
-    private IReadOnlyList<string> _sessionHiddenHosts = [];
-    // Hidden from the right-click menu's Hide submenu for this run only. Values come from captured
-    // sessions and are only compared in memory and shown in that menu, never composed into a query.
-    private readonly List<string> _hiddenProcesses = [];
-    private readonly List<string> _hiddenContentTypes = [];
+    // What the right-click menu hid, for this run only, shown as tags in _hiddenBar. Like Fiddler's
+    // "Filter Now", these are the user's quick view and stay apart from the Filters tab. Values come
+    // from captured sessions: they are only compared in memory and shown, never composed into a query.
+    private readonly List<HideEntry> _hides = [];
+    private readonly FlowLayoutPanel _hiddenBar;
     private bool _hiddenHostsFilterChanged;
     private bool _autoScroll = true;
 
@@ -99,24 +99,6 @@ public sealed class SessionListView : UserControl
 
     /// <summary>Raised when the user double-clicks a row, asking to look at it in the inspector.</summary>
     public event EventHandler<Session>? SessionActivated;
-
-    /// <summary>
-    /// Raised with a host the user asked to stop seeing. The grid deliberately does not know how
-    /// hiding is stored, so the form routes this into the Filters tab's persisted Hosts list.
-    /// </summary>
-    public event EventHandler<string>? HideHostRequested;
-
-    /// <summary>Raised with a host the user picked under "Show hidden" to see again.</summary>
-    public event EventHandler<string>? ShowHiddenHostRequested;
-
-    /// <summary>
-    /// Raised by "Show hidden &gt; Show all", after the grid has dropped its own process and content
-    /// type hides, so the form can show its hidden hosts again too.
-    /// </summary>
-    public event EventHandler? ShowAllHiddenRequested;
-
-    /// <summary>Raised with a line for the Log tab after a process or content type is shown again.</summary>
-    public event EventHandler<string>? HiddenShownNotice;
 
     /// <summary>
     /// Raised with a line for the Log tab after a Copy as command, saying what was copied or why
@@ -200,7 +182,22 @@ public sealed class SessionListView : UserControl
         _filterToolTip.SetToolTip(_followButton, Strings.SessionList.FollowTailTooltip);
         _list.ClientSizeChanged += (_, _) => PositionFollowButton();
 
+        // Under the filter box, and only while something is hidden: one tag per hide, each a click
+        // away from showing its rows again.
+        _hiddenBar = new FlowLayoutPanel
+        {
+            Name = HiddenBarName,
+            Dock = DockStyle.Top,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            WrapContents = true,
+            Padding = new Padding(2, 0, 2, 2),
+            Visible = false,
+        };
+
+        // Docked last to first: the filter row on top, the hidden bar under it, the grid filling the rest.
         Controls.Add(_list);
+        Controls.Add(_hiddenBar);
         Controls.Add(filterRow);
         Controls.Add(_followButton);
         _followButton.BringToFront();
@@ -340,60 +337,131 @@ public sealed class SessionListView : UserControl
         }
     }
 
-    /// <summary>
-    /// Hosts hidden with "Hide this host" for this session, in a slot of their own for the same
-    /// reason as <see cref="FiltersetFilter"/>: the search box is the user's. The form owns what is
-    /// in it and takes a host back out when its Filters tab entry is unticked or removed. Unlike a
-    /// filter change this keeps the scroll position, since it removes a few rows, not most of them.
-    /// </summary>
-    /// <remarks>
-    /// Host patterns rather than a predicate, so "Show hidden" can list each one to show again.
-    /// </remarks>
-    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
-    public IReadOnlyList<string> SessionHiddenHosts
+    private enum HideKind { Host, Process, ContentType }
+
+    /// <summary>One right-click hide, and how many rows it hid at the last rebuild.</summary>
+    private sealed class HideEntry(HideKind kind, string value)
     {
-        get => _sessionHiddenHosts;
-        set
+        public HideKind Kind { get; } = kind;
+        public string Value { get; } = value;
+        public int Hidden { get; set; }
+
+        public bool Matches(Session session) => Kind switch
         {
-            _sessionHiddenHosts = value ?? [];
-            RebuildForHide();
-        }
+            HideKind.Host => HostFilterTerm.Covers(Value, session.Host),
+            HideKind.Process => string.Equals(session.ProcessName, Value, StringComparison.OrdinalIgnoreCase),
+            _ => string.Equals(MediaType(session), Value, StringComparison.OrdinalIgnoreCase),
+        };
     }
-
-    /// <summary>Hides every session from this process until it is shown again from "Show hidden".</summary>
-    public void HideProcess(string process) => AddHide(_hiddenProcesses, process);
-
-    /// <summary>Hides every session whose response has this media type until it is shown again.</summary>
-    public void HideContentType(string mediaType) => AddHide(_hiddenContentTypes, mediaType);
 
     // ponytail: a cap, not an eviction policy; past it the menu stops offering more hides.
     private const int MaxHides = 64;
 
-    private void AddHide(List<string> hides, string value)
+    /// <summary>Hides a host's sessions until its tag is clicked, as the menu's "Hide host" does.</summary>
+    public void HideHost(string host)
+    {
+        if (HostFilterTerm.IsFilterableHost(host)) AddHide(HideKind.Host, host);
+    }
+
+    private void AddHide(HideKind kind, string value)
     {
         value = value.Trim();
-        if (value.Length == 0 || hides.Count >= MaxHides
-            || hides.Contains(value, StringComparer.OrdinalIgnoreCase)) return;
-        hides.Add(value);
+        if (value.Length == 0 || _hides.Count >= MaxHides
+            || _hides.Any(hide => hide.Kind == kind && string.Equals(hide.Value, value, StringComparison.OrdinalIgnoreCase))) return;
+        _hides.Add(new HideEntry(kind, value));
         RebuildForHide();
+    }
+
+    private void RemoveHides(params HideEntry[] hides)
+    {
+        if (hides.Count(_hides.Remove) > 0) RebuildForHide();
     }
 
     private void RebuildForHide()
     {
+        // The bar first: showing or hiding it resizes the grid, and the rebuild must place the rows
+        // in the grid's final height, or a followed tail ends up below the bottom edge.
+        FillHiddenBar();
         _hiddenHostsFilterChanged = true;
         Rebuild();
     }
 
-    private int HiddenCount => _sessionHiddenHosts.Count + _hiddenProcesses.Count + _hiddenContentTypes.Count;
-
-    /// <summary>The response's media type without parameters, as "Hide &gt; Content type" matches it.</summary>
+    /// <summary>The response's media type without parameters, as "Hide by &gt; Content type" matches it.</summary>
     private static string MediaType(Session session) =>
         session.ContentType.Split(';', 2)[0].Trim();
 
-    private bool IsHiddenHere(Session session) =>
-        _sessionHiddenHosts.Any(pattern => HostFilterTerm.Covers(pattern, session.Host))
-        || (_hiddenProcesses.Count > 0 && _hiddenProcesses.Contains(session.ProcessName, StringComparer.OrdinalIgnoreCase))
-        || (_hiddenContentTypes.Count > 0 && _hiddenContentTypes.Contains(MediaType(session), StringComparer.OrdinalIgnoreCase));
+    /// <summary>The bar under the filter box listing what is hidden, named so a test can find it.</summary>
+    public const string HiddenBarName = "hiddenBar";
+
+    /// <summary>Lays the tags out again after a hide is added or removed.</summary>
+    private void FillHiddenBar()
+    {
+        _hiddenBar.SuspendLayout();
+        while (_hiddenBar.Controls.Count > 0) _hiddenBar.Controls[0].Dispose();
+
+        if (_hides.Count > 0)
+        {
+            _hiddenBar.Controls.Add(new Label
+            {
+                AutoSize = true,
+                Text = Strings.SessionList.HiddenBarLabel,
+                Margin = new Padding(4, 7, 4, 0),
+            });
+            foreach (var hide in _hides)
+            {
+                var tag = NewBarButton(hide, () => RemoveHides(hide));
+                _filterToolTip.SetToolTip(tag, Strings.SessionList.ShowAgainTooltip(TrimForDisplay(hide.Value, 200)));
+                _hiddenBar.Controls.Add(tag);
+            }
+            _hiddenBar.Controls.Add(NewBarButton(null, () => RemoveHides([.. _hides])));
+        }
+
+        _hiddenBar.Visible = _hides.Count > 0;
+        Palette.Apply(_hiddenBar);
+        _hiddenBar.ResumeLayout();
+        UpdateHiddenCounts();
+    }
+
+    private Button NewBarButton(HideEntry? hide, Action click)
+    {
+        var button = new Button
+        {
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            // A captured value can carry '&', which a button would otherwise take as a mnemonic.
+            UseMnemonic = false,
+            TabStop = false,
+            Cursor = Cursors.Hand,
+            Margin = new Padding(2),
+            Tag = hide,
+            Text = hide is null ? Strings.SessionList.ShowAllHidden : string.Empty,
+        };
+        // After the click returns: the handler disposes the very button that raised it.
+        button.Click += (_, _) => BeginInvoke(click);
+        return button;
+    }
+
+    /// <summary>Puts each tag's row count up to date after a rebuild recounted them.</summary>
+    private void UpdateHiddenCounts()
+    {
+        foreach (Control control in _hiddenBar.Controls)
+        {
+            if (control.Tag is not HideEntry hide) continue;
+            var text = Strings.SessionList.HiddenTag(HideLabel(hide.Kind, TrimForDisplay(hide.Value, 60)), hide.Hidden);
+            if (control.Text != text) control.Text = text;
+        }
+    }
+
+    private static string HideLabel(HideKind kind, string value) => kind switch
+    {
+        HideKind.Host => Strings.SessionList.HiddenHost(value),
+        HideKind.Process => Strings.SessionList.HiddenProcess(value),
+        _ => Strings.SessionList.HiddenContentType(value),
+    };
+
+    // Captured values can be any length.
+    private static string TrimForDisplay(string value, int maxLength) =>
+        value.Length > maxLength ? value[..(maxLength - 1)] + "…" : value;
 
     private void RequestRefresh() => _refreshPending = true;
 
@@ -864,6 +932,7 @@ public sealed class SessionListView : UserControl
 
         _list.Invalidate();
         UpdateFollowButton();
+        if (_hides.Count > 0) UpdateHiddenCounts();
     }
 
     /// <summary>
@@ -944,7 +1013,8 @@ public sealed class SessionListView : UserControl
 
     private void ApplyVisibilityFiltersInPlace()
     {
-        if (_query.IsEmpty && _visibilityFilter is null && _filtersetFilter is null && HiddenCount == 0) return;
+        foreach (var hide in _hides) hide.Hidden = 0;
+        if (_query.IsEmpty && _visibilityFilter is null && _filtersetFilter is null && _hides.Count == 0) return;
 
         var writeIndex = 0;
         for (var readIndex = 0; readIndex < _visible.Count; readIndex++)
@@ -958,7 +1028,11 @@ public sealed class SessionListView : UserControl
             // like it did nothing. The search box and hidden hosts are the user's own view and still apply.
             if (!session.IsUpdateCheck && !session.IsImported && _visibilityFilter is not null && !_visibilityFilter(session)) continue;
             if (!session.IsUpdateCheck && !session.IsImported && _filtersetFilter is not null && !_filtersetFilter(session)) continue;
-            if (!session.IsUpdateCheck && HiddenCount > 0 && IsHiddenHere(session)) continue;
+            if (!session.IsUpdateCheck && _hides.Count > 0 && _hides.Find(hide => hide.Matches(session)) is { } hiddenBy)
+            {
+                hiddenBy.Hidden++;
+                continue;
+            }
             _visible[writeIndex++] = session;
         }
 
@@ -1268,20 +1342,17 @@ public sealed class SessionListView : UserControl
         {
             if (SelectedSession is { } session) FilterText = $"host:{session.Host}";
         });
-        // Fiddler's "Filter Now": hide what this row has, and list what is hidden so each is one click
-        // to show again. All are filled as the menu opens, from the row and the current hides. The
-        // host, the common case, is one click; the rarer criteria sit in "Hide by".
+        // Fiddler's "Filter Now": hide what this row has, for this run, as tags in the hidden bar.
+        // The host, the common case, is one click; the rarer criteria sit in "Hide by". Both are
+        // filled as the menu opens, from the selected row.
         var hideHost = new ToolStripMenuItem(string.Empty, null, (_, _) =>
         {
-            if (SelectedSession is { } session) HideHostRequested?.Invoke(this, session.Host);
+            if (SelectedSession is { } session) HideHost(session.Host);
         }) { Name = HideHostItemName };
         menu.Items.Add(hideHost);
         var hide = new ToolStripMenuItem(Strings.SessionList.HideMenu) { Name = HideMenuName };
         hide.DropDownItems.Add(new ToolStripMenuItem()); // a placeholder, so the submenu arrow shows
         menu.Items.Add(hide);
-        var showHidden = new ToolStripMenuItem { Name = ShowHiddenMenuName };
-        showHidden.DropDownItems.Add(new ToolStripMenuItem());
-        menu.Items.Add(showHidden);
         menu.Items.Add(new ToolStripSeparator());
         var textWizard = new ToolStripMenuItem(Strings.SessionList.SendUrlToTextWizard, null,
             (_, _) => TextWizardDialog.Open(FindForm(), SelectedSession?.Url));
@@ -1298,7 +1369,6 @@ public sealed class SessionListView : UserControl
             copyAs.Enabled = resend.Enabled;
             clearMarks.Enabled = _marks.Count > 0;
             FillHideMenu(hideHost, hide);
-            FillShowHiddenMenu(showHidden);
             autoResponder.Enabled = SelectedSession is { IsTunnel: false, Request.Url: not null };
         };
 
@@ -1311,15 +1381,13 @@ public sealed class SessionListView : UserControl
     /// <summary>The context menu's "Hide by" submenu, named so a test can find it.</summary>
     public const string HideMenuName = "hideMenu";
 
-    /// <summary>The context menu's "Show hidden" submenu, named so a test can find it.</summary>
-    public const string ShowHiddenMenuName = "showHiddenMenu";
-
     private void FillHideMenu(ToolStripMenuItem hideHost, ToolStripMenuItem hide)
     {
         hide.DropDownItems.Clear();
         var session = SelectedSession;
-        var full = HiddenCount >= MaxHides;
-        // The form refuses a host that is not filterable, so offer only what it will accept.
+        var full = _hides.Count >= MaxHides;
+        // Session.Host is the raw Host header when the request line had no parseable URL, so only a
+        // host that is plain hostname material is offered; HostFilterTerm.Covers matches it as a pattern.
         hideHost.Text = Strings.SessionList.HideHost(MenuText(session?.Host ?? string.Empty));
         hideHost.Enabled = session is not null && !full && HostFilterTerm.IsFilterableHost(session.Host);
         hide.Enabled = session is not null;
@@ -1327,59 +1395,19 @@ public sealed class SessionListView : UserControl
 
         AddMenuItem(hide, Strings.SessionList.HiddenProcess(MenuText(session.ProcessName)),
             !full && session.ProcessName.Trim().Length > 0,
-            () => HideProcess(session.ProcessName));
+            () => AddHide(HideKind.Process, session.ProcessName));
         var mediaType = MediaType(session);
         AddMenuItem(hide, Strings.SessionList.HiddenContentType(MenuText(mediaType)),
             !full && mediaType.Length > 0,
-            () => HideContentType(mediaType));
-    }
-
-    private void FillShowHiddenMenu(ToolStripMenuItem showHidden)
-    {
-        showHidden.DropDownItems.Clear();
-        showHidden.Text = Strings.SessionList.ShowHiddenMenu(HiddenCount);
-        showHidden.Enabled = HiddenCount > 0;
-        if (HiddenCount == 0) return;
-
-        foreach (var host in _sessionHiddenHosts.ToArray())
-            AddMenuItem(showHidden, Strings.SessionList.HiddenHost(MenuText(host)), true,
-                () => ShowHiddenHostRequested?.Invoke(this, host));
-        foreach (var process in _hiddenProcesses.ToArray())
-            AddMenuItem(showHidden, Strings.SessionList.HiddenProcess(MenuText(process)), true,
-                () => ShowHidden(_hiddenProcesses, process, Strings.SessionList.HiddenProcess(process)));
-        foreach (var mediaType in _hiddenContentTypes.ToArray())
-            AddMenuItem(showHidden, Strings.SessionList.HiddenContentType(MenuText(mediaType)), true,
-                () => ShowHidden(_hiddenContentTypes, mediaType, Strings.SessionList.HiddenContentType(mediaType)));
-        showHidden.DropDownItems.Add(new ToolStripSeparator());
-        AddMenuItem(showHidden, Strings.SessionList.ShowAllHidden, true, ShowAllHidden);
+            () => AddHide(HideKind.ContentType, mediaType));
     }
 
     private static void AddMenuItem(ToolStripMenuItem parent, string text, bool enabled, Action click) =>
         parent.DropDownItems.Add(new ToolStripMenuItem(text, null, (_, _) => click()) { Enabled = enabled });
 
-    private void ShowHidden(List<string> hides, string value, string description)
-    {
-        if (!hides.Remove(value)) return;
-        RebuildForHide();
-        HiddenShownNotice?.Invoke(this, description);
-    }
-
-    private void ShowAllHidden()
-    {
-        _hiddenProcesses.Clear();
-        _hiddenContentTypes.Clear();
-        RebuildForHide();
-        // The form owns the hosts and logs the result.
-        ShowAllHiddenRequested?.Invoke(this, EventArgs.Empty);
-    }
-
-    // Captured values can be any length and carry '&', which a menu would take as a mnemonic.
-    private static string MenuText(string value)
-    {
-        const int MaxLength = 80;
-        var text = value.Length > MaxLength ? value[..(MaxLength - 1)] + "…" : value;
-        return text.Replace("&", "&&", StringComparison.Ordinal);
-    }
+    // A menu takes '&' as a mnemonic, so a captured one is doubled.
+    private static string MenuText(string value) =>
+        TrimForDisplay(value, 80).Replace("&", "&&", StringComparison.Ordinal);
 
     private void CopyUrls()
     {

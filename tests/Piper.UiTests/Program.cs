@@ -100,7 +100,7 @@ internal static class Program
             var anchor = list.Items[topBefore - 7].Tag; // scrolled up a little, so the place is not just "the bottom"
             list.EnsureVisible(topBefore - 7);
             Check(SendMessage(list.Handle, LvmGetTopIndex, 0, 0) == topBefore - 7 && ((Session)anchor!).Host != RareHost, "setup: scrolled up to a row that stays");
-            grid.SessionHiddenHosts = [RareHost];
+            grid.HideHost(RareHost);
             PumpUntil(() => list.VirtualListSize == 290);
             var topAfter = (int)SendMessage(list.Handle, LvmGetTopIndex, 0, 0);
             Check(ReferenceEquals(list.Items[topAfter].Tag, anchor), $"the same session stays at the top (top index {topAfter})");
@@ -111,12 +111,12 @@ internal static class Program
         Run("hiding the rows at the bottom of a scrolled grid keeps the rest drawn in place", (store, grid, list) =>
         {
             // The top row survives but what is left no longer fills a screen from it.
-            grid.SessionHiddenHosts = ["tail.test"];
+            grid.HideHost("tail.test");
             PumpUntil(() => list.VirtualListSize == 290);
             ExpectBottomInView(list, 290);
         }, hostOf: n => n >= 290 ? "tail.test" : n % 30 == 0 ? RareHost : "example.test");
 
-        Run("the Hide menu hides a row's process and content type, and Show hidden lists each one", (store, grid, list) =>
+        Run("the Hide menu hides a row's host, process or content type, and the hidden bar shows each again", (store, grid, list) =>
         {
             for (var i = 0; i < list.VirtualListSize; i++)
             {
@@ -124,19 +124,14 @@ internal static class Program
                 session.ProcessName = i % 2 == 0 ? "game" : "brow&ser";
                 if (i % 5 == 0) session.Response!.Headers.Add("Content-Type", "image/png; q=1");
             }
-            string? shownHost = null, hiddenHost = null;
-            var showAll = 0;
-            grid.ShowHiddenHostRequested += (_, host) => shownHost = host;
-            grid.ShowAllHiddenRequested += (_, _) => showAll++;
-            grid.HideHostRequested += (_, host) => hiddenHost = host;
+            var bar = (FlowLayoutPanel)grid.Controls[SessionListView.HiddenBarName]!;
+            Check(!bar.Visible, "with nothing hidden the hidden bar is out of the way");
 
-            // Row 0: game, image/png. The host is a one-click item of its own beside "Hide by".
+            // Row 0: rare.test, game, image/png. The host is a one-click item beside "Hide by".
             var hide = OpenSubmenu(list, 0, SessionListView.HideMenuName);
             var hideHost = list.ContextMenuStrip!.Items[SessionListView.HideHostItemName]!;
             Check(hideHost.Enabled && hideHost.Text!.EndsWith(RareHost, StringComparison.Ordinal),
                 $"Hide host names the row's host ({hideHost.Text})");
-            hideHost.PerformClick();
-            Check(hiddenHost == RareHost, "Hide host asks the form to hide the row's host");
             Check(hide.DropDownItems.Count == 2 && hide.DropDownItems[0].Text!.EndsWith("game", StringComparison.Ordinal)
                 && hide.DropDownItems[1].Text!.EndsWith("image/png", StringComparison.Ordinal),
                 $"Hide by offers the row's process and media type ({string.Join(" | ", hide.DropDownItems.Cast<ToolStripItem>().Select(item => item.Text))})");
@@ -144,10 +139,11 @@ internal static class Program
             list.ContextMenuStrip!.Close();
             PumpUntil(() => list.VirtualListSize == 15);
             Check(list.VirtualListSize == 15, $"the process's rows are hidden (got {list.VirtualListSize})");
+            Check(bar.Visible, "the hidden bar appears");
 
             // Row 0 is now item 1: brow&ser, no content type.
             hide = OpenSubmenu(list, 0, SessionListView.HideMenuName);
-            Check(hide.DropDownItems[0].Text!.EndsWith("brow&&ser", StringComparison.Ordinal), "a captured '&' is not taken as a mnemonic");
+            Check(hide.DropDownItems[0].Text!.EndsWith("brow&&ser", StringComparison.Ordinal), "a captured '&' is not taken as a menu mnemonic");
             Check(!hide.DropDownItems[1].Enabled, "a row with no content type cannot hide one");
             list.ContextMenuStrip!.Close();
 
@@ -157,26 +153,31 @@ internal static class Program
             PumpUntil(() => list.VirtualListSize == 12);
             Check(list.VirtualListSize == 12, $"the media type's rows are hidden too (got {list.VirtualListSize})");
 
-            grid.SessionHiddenHosts = ["example.test"];
+            hideHost = list.ContextMenuStrip!.Items[SessionListView.HideHostItemName]!;
+            OpenSubmenu(list, 0, SessionListView.HideMenuName);
+            hideHost.PerformClick(); // item 1's host, example.test
+            list.ContextMenuStrip!.Close();
             PumpUntil(() => list.VirtualListSize == 0);
-            var shown = OpenSubmenu(list, -1, SessionListView.ShowHiddenMenuName);
-            Check(shown.Enabled && shown.Text!.Contains("(3)", StringComparison.Ordinal), $"Show hidden counts every hide ({shown.Text})");
-            Check(shown.DropDownItems.Count == 5, $"each hide is listed, then Show all ({shown.DropDownItems.Count} items)");
-            shown.DropDownItems[0].PerformClick();
-            Check(shownHost == "example.test", "picking a hidden host asks the form to show it");
-            shown.DropDownItems[1].PerformClick(); // the process
-            list.ContextMenuStrip!.Close();
-            grid.SessionHiddenHosts = []; // as the form does for the host
-            PumpUntil(() => list.VirtualListSize == 24);
-            Check(list.VirtualListSize == 24, $"only the media type stays hidden (got {list.VirtualListSize})");
+            Check(list.VirtualListSize == 0, $"Hide host hides the host's rows (got {list.VirtualListSize})");
 
-            shown = OpenSubmenu(list, 0, SessionListView.ShowHiddenMenuName);
-            shown.DropDownItems[^1].PerformClick();
-            list.ContextMenuStrip!.Close();
+            // A tag per hide, in the order hidden, each with how many rows it hides here.
+            var tags = bar.Controls.OfType<Button>().ToArray();
+            string Texts() => string.Join(" | ", tags.Select(tag => tag.Text));
+            Check(tags.Length == 4 && tags[0].Text.Contains("game", StringComparison.Ordinal) && tags[0].Text.Contains("15", StringComparison.Ordinal)
+                && tags[1].Text.Contains("image/png", StringComparison.Ordinal) && tags[1].Text.Contains("3", StringComparison.Ordinal)
+                && tags[2].Text.Contains("example.test", StringComparison.Ordinal) && tags[2].Text.Contains("12", StringComparison.Ordinal),
+                $"each hide is a tag with its row count, then Show all ({Texts()})");
+            Check(!tags[0].UseMnemonic, "a tag shows a captured '&' as it is");
+
+            tags[2].PerformClick(); // the host
+            PumpUntil(() => list.VirtualListSize == 12);
+            Check(list.VirtualListSize == 12, $"clicking a tag shows its rows again (got {list.VirtualListSize})");
+            Check(bar.Controls.OfType<Button>().Count() == 3, "and removes the tag");
+
+            bar.Controls.OfType<Button>().Last().PerformClick(); // Show all
             PumpUntil(() => list.VirtualListSize == 30);
-            Check(list.VirtualListSize == 30 && showAll == 1, $"Show all shows everything again (got {list.VirtualListSize}, {showAll} request)");
-            Check(!OpenSubmenu(list, 0, SessionListView.ShowHiddenMenuName).Enabled, "with nothing hidden, Show hidden is disabled");
-            list.ContextMenuStrip!.Close();
+            Check(list.VirtualListSize == 30, $"Show all shows everything again (got {list.VirtualListSize})");
+            Check(!bar.Visible, "and the hidden bar goes away");
         }, setupRows: 30);
 
         Run("deleting the top row of a scrolled grid keeps the place", (store, grid, list) =>
@@ -197,7 +198,7 @@ internal static class Program
             // left now fits on one screen though it still reaches past the old top row.
             var topBefore = (int)SendMessage(list.Handle, LvmGetTopIndex, 0, 0);
             list.SelectedIndices.Add(list.VirtualListSize - 3); // item 27, whose host is hidden
-            grid.SessionHiddenHosts = ["third.test"];
+            grid.HideHost("third.test");
             PumpUntil(() => list.VirtualListSize == 20);
             Check(20 > topBefore, $"setup: the rows left still reach the old top row {topBefore}");
             ExpectRowsFromTop(list, 20);

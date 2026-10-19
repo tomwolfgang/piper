@@ -211,32 +211,9 @@ public sealed partial class MainForm : Form, IMessageFilter
             // would come back applied on the next start.
             FilterSettingsStore.Save(_filterPanel.Settings);
             _rightTabs.SetTabChecked(filtersPage, !admissionQuery.IsEmpty);
-            // Running or stopping the filterset makes it the authority on what is hidden, so the
-            // "Hide this host" previews give way to it: a running hide-mode list keeps hiding them,
-            // and Show all sessions shows them again.
-            ClearSessionHiddenHosts();
         };
-        _filterPanel.SettingsChanged += (_, _) =>
-        {
-            FilterSettingsStore.Save(_filterPanel.Settings);
-            PruneSessionHiddenHosts();
-        };
-        _sessionList.HideHostRequested += (_, host) => HideHost(host);
+        _filterPanel.SettingsChanged += (_, _) => FilterSettingsStore.Save(_filterPanel.Settings);
         _sessionList.CopyAsNotice += (_, message) => AppendLog(message);
-        _sessionList.ShowHiddenHostRequested += (_, host) => ShowHiddenHost(host);
-        _sessionList.ShowAllHiddenRequested += (_, _) =>
-        {
-            // One settings write and one grid rebuild for the lot, not one per host.
-            var settings = _filterPanel.Settings;
-            var unticked = false;
-            foreach (var (host, recorded) in _sessionHiddenHosts)
-                if (recorded) unticked |= settings.UnhideHost(host);
-            _sessionHiddenHosts.Clear();
-            if (unticked) _filterPanel.ApplySettings(settings);
-            ApplySessionHiddenHosts();
-            AppendLog(Strings.Log.AllHiddenShown);
-        };
-        _sessionList.HiddenShownNotice += (_, description) => AppendLog(Strings.Log.HiddenShown(description));
 
         // Restore the editable settings and then apply their saved enabled state so a restart
         // returns to the same filtered capture view.
@@ -1904,113 +1881,6 @@ public sealed partial class MainForm : Form, IMessageFilter
         // because accessibility tools still report the text of one that is merely not visible.
         _zoomLabel.Text = FontScale.IsDefault ? string.Empty : Strings.StatusBar.Zoom(FontScale.Percent);
         _zoomLabel.Visible = !FontScale.IsDefault;
-    }
-
-    /// <summary>
-    /// Routes the capture list's "Hide this host" into the Filters tab's persisted Hosts list, so
-    /// the choice is still there after a restart, and hides the host in the grid straight away.
-    /// Following Fiddler Classic, this records the host but never ticks "Use Filters" for the user:
-    /// running a filterset stays their explicit action.
-    /// </summary>
-    /// <remarks>
-    /// The immediate hide lives in the grid's own session slot (<see cref="SessionListView.SessionHiddenHosts"/>),
-    /// not in the filter box. Writing a term into the box took the box away from the user, and gave
-    /// one hide two places to undo it: unticking the entry in the Filters tab, as the help says to,
-    /// left the host hidden by the term.
-    /// </remarks>
-    private void HideHost(string host)
-    {
-        // Session.Host is the raw Host header whenever the request line had no parseable URL, so it
-        // is attacker-controlled. Composing that into a query -- transiently or persisted -- would
-        // let it inject terms of its own, so refuse it before it reaches either.
-        if (!HostFilterTerm.IsFilterableHost(host))
-        {
-            AppendLog(Strings.Log.HideHostNotFilterable);
-            return;
-        }
-
-        // Leave the filterset staged rather than running it: recomposing would start dropping this
-        // host at admission (SessionStore.CompletedSessionFilter), which unticking the entry later
-        // cannot undo. As in Fiddler Classic, running a filterset stays an explicit action.
-        var settings = _filterPanel.Settings;
-        var wasShowOnly = settings.HostsMode != 1;
-        var recorded = settings.HideHost(host);
-        if (recorded) _filterPanel.ApplySettings(settings);
-
-        // After ApplySettings, whose SettingsChanged would otherwise prune the new entry as unlisted.
-        _sessionHiddenHosts[host] = recorded;
-        ApplySessionHiddenHosts();
-
-        if (!recorded)
-        {
-            AppendLog(Strings.Log.HideHostShowOnlyConflict(host));
-            return;
-        }
-
-        if (wasShowOnly && settings.HostsMode == 1)
-            AppendLog(Strings.Log.HideHostSwitchedToHideMode);
-
-        AppendLog(Strings.Log.HideHostAdded(host));
-    }
-
-    /// <summary>
-    /// Hosts hidden with "Hide this host" since the filterset last ran, and whether the Filters tab
-    /// list is what records each one. A recorded host stays hidden only while an enabled hide entry
-    /// in that list still covers it; one the list could not take (it was showing only specific
-    /// hosts) is hidden for the session alone.
-    /// </summary>
-    private readonly Dictionary<string, bool> _sessionHiddenHosts = new(StringComparer.OrdinalIgnoreCase);
-
-    private void ApplySessionHiddenHosts() => _sessionList.SessionHiddenHosts = _sessionHiddenHosts.Keys.ToArray();
-
-    /// <summary>
-    /// Undoes "Hide this host" from the grid's "Show hidden" menu. A host the Filters tab recorded
-    /// has its entry unticked too, so the filterset does not hide it again on the next run or start;
-    /// the entry stays in the list as one click to hide it again.
-    /// </summary>
-    private void ShowHiddenHost(string host)
-    {
-        if (!_sessionHiddenHosts.Remove(host, out var recorded)) return;
-
-        var unticked = false;
-        if (recorded)
-        {
-            var settings = _filterPanel.Settings;
-            unticked = settings.UnhideHost(host);
-            // Its SettingsChanged prunes, which finds nothing left to release for this host.
-            if (unticked) _filterPanel.ApplySettings(settings);
-        }
-        ApplySessionHiddenHosts();
-
-        AppendLog(unticked ? Strings.Log.HiddenHostShownUnticked(host) : Strings.Log.HiddenShown(Strings.SessionList.HiddenHost(host)));
-    }
-
-    /// <summary>
-    /// Shows a recorded host again once the Filters tab no longer hides it: its entry was unticked or
-    /// removed, or the list switched to showing only specific hosts. That is the undo the Filters
-    /// help promises, and it has to work before the filterset is ever run.
-    /// </summary>
-    private void PruneSessionHiddenHosts()
-    {
-        if (_sessionHiddenHosts.Count == 0) return;
-
-        var settings = _filterPanel.Settings;
-        var released = _sessionHiddenHosts
-            .Where(pair => pair.Value && !settings.Hides(pair.Key))
-            .Select(pair => pair.Key)
-            .ToArray();
-        if (released.Length == 0) return;
-
-        foreach (var host in released) _sessionHiddenHosts.Remove(host);
-        ApplySessionHiddenHosts();
-    }
-
-    /// <summary>Forgets every session-only hide, for the grid's "show hidden hosts" command and a filterset run.</summary>
-    private void ClearSessionHiddenHosts()
-    {
-        if (_sessionHiddenHosts.Count == 0) return;
-        _sessionHiddenHosts.Clear();
-        ApplySessionHiddenHosts();
     }
 
     /// <summary>
