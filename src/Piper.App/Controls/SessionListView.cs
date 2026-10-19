@@ -734,13 +734,14 @@ public sealed class SessionListView : UserControl
         {
             _suppressSelectionChanged = true;
             var previousCount = _list.VirtualListSize;
-            // Shrinking the count below the top row (Ctrl+X, a narrow filter) with LVSICF_NOSCROLL
-            // leaves the native scroll origin past the end; the next rows then land at a negative top
-            // index, drawn partway down or not at all, and EnsureVisible cannot recover it because it
-            // thinks row 0 is already on screen. Scroll to the top while the control still has the old
-            // count; a repaint in between asks OnRetrieveVirtualItem for rows past _visible, which it
-            // answers with a blank row.
-            if (previousTop > 0 && _visible.Count <= previousTop) _list.EnsureVisible(0);
+            // Shrinking the count while scrolled (Ctrl+X, a narrow filter, "Hide this host") with
+            // LVSICF_NOSCROLL can leave the native scroll origin past the end -- below the top row, or
+            // just short of a screen from it; the next rows then land at a negative top index, drawn
+            // partway down or not at all, and EnsureVisible cannot recover it because it thinks row 0
+            // is already on screen. Scroll to the top while the control still has the old count, and
+            // let HoldAnchorInView put the user's place back; a repaint in between asks
+            // OnRetrieveVirtualItem for rows past _visible, which it answers with a blank row.
+            if (previousTop > 0 && _visible.Count < previousCount) _list.EnsureVisible(0);
             _list.VirtualListSize = _visible.Count;
 
             // Following depends on where the view is, not on whether a row is selected: a selection
@@ -845,8 +846,8 @@ public sealed class SessionListView : UserControl
     /// new session once the store is at capacity (the oldest is dropped from the top), and whenever a
     /// sort puts new sessions above the view. Pinning the top session keeps what the user is reading
     /// still; rows below an insertion inside the view still move, which a live sorted list cannot
-    /// avoid. With the anchor gone (trimmed, hidden or deleted), only an offset now past the last
-    /// row is pulled back.
+    /// avoid. With the anchor gone (trimmed, hidden or deleted), the old offset is kept, pulled back
+    /// to the last row if it is now past it.
     /// </remarks>
     private void HoldAnchorInView(Session? anchor, int previousTop)
     {
@@ -856,11 +857,17 @@ public sealed class SessionListView : UserControl
 
         if (index < 0)
         {
-            if (previousTop >= _visible.Count) _list.EnsureVisible(_visible.Count - 1);
-            return;
+            if (previousTop < 0) return;
+            index = Math.Min(previousTop, _visible.Count - 1);
         }
 
-        if (index != TopIndex()) _list.TopItem = _list.Items[index];
+        // Not TopItem: it scrolls by a row delta (LVM_SCROLL) that the control does not hold to the
+        // rows there are, so a top row past the last full screen -- a few rows hidden from a short
+        // list -- left the native origin past the end and the rows drawn partway down or not at all.
+        // Going to the bottom and then back up to the row lets EnsureVisible do the clamping.
+        if (index == TopIndex()) return;
+        _list.EnsureVisible(_visible.Count - 1);
+        _list.EnsureVisible(index);
     }
 
     /// <summary>Index of the first row in view, or -1 when there is none.</summary>
