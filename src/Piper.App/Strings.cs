@@ -795,6 +795,29 @@ internal static class Strings
         public static string VerifyOriginCertificates => I18n.T("certificateHint.verifyOriginCertificates");
     }
 
+    /// <summary>The wording for a failed client TLS handshake. States what Piper observed: it never says "pinning".</summary>
+    public static class TlsFailure
+    {
+        public static string Result => I18n.T("tlsFailure.result");
+
+        /// <summary>The reason for a kind, as a Path cell shows it; <paramref name="alert"/> only adds to a refusal.</summary>
+        public static string Reason(TlsFailureKind kind, string? alert) => kind switch
+        {
+            TlsFailureKind.Rejected when alert is not null => I18n.T("tlsFailure.reasonRejectedAlert", ("alert", alert)),
+            TlsFailureKind.Rejected => I18n.T("tlsFailure.reasonRejected"),
+            TlsFailureKind.ClosedInHandshake => I18n.T("tlsFailure.reasonClosed"),
+            TlsFailureKind.ClosedAfterHandshake => I18n.T("tlsFailure.reasonAfterHandshake"),
+            TlsFailureKind.ClosedEarly => I18n.T("tlsFailure.reasonEarly"),
+            TlsFailureKind.Timeout => I18n.T("tlsFailure.reasonTimeout"),
+            TlsFailureKind.NoCommonProtocol => I18n.T("tlsFailure.reasonProtocol"),
+            TlsFailureKind.NotTls => I18n.T("tlsFailure.reasonNotTls"),
+            _ => I18n.T("tlsFailure.reasonOther"),
+        };
+
+        public static string PathLabel(string reason, int count) => I18n.T("tlsFailure.path", ("reason", reason), ("count", count));
+        public static string Overflow(int count) => I18n.T("tlsFailure.overflow", ("count", count));
+    }
+
     // --------------------------------------------------------------------- composer
 
     public static class Composer

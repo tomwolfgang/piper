@@ -587,6 +587,23 @@
     "verifyOriginCertificates": "  ->  If you trust this origin, turn off \"Verify origin server certificates\" in Configurations > HTTPS."
   },
 
+  "tlsFailure": {
+    "result": "TLS ERR",
+    "reasonRejected": "client refused Piper's certificate",
+    "reasonRejectedAlert": "client refused Piper's certificate: {{alert}}",
+    "reasonClosed": "client closed the connection during the handshake",
+    "reasonAfterHandshake": "client closed right after the handshake, no request sent",
+    "reasonEarly": "client closed the tunnel before TLS started",
+    "reasonTimeout": "no TLS handshake completed in time",
+    "reasonProtocol": "no shared TLS version or cipher (Piper offers TLS 1.2 and 1.3)",
+    "reasonNotTls": "client sent non-TLS data after CONNECT",
+    "reasonOther": "TLS handshake failed",
+    "path_one": "{{reason}}",
+    "path_other": "{{reason}} ({{count, N0}} attempts)",
+    "overflow_one": "{{count, N0}} more TLS handshake failure is not shown individually",
+    "overflow_other": "{{count, N0}} more TLS handshake failures are not shown individually"
+  },
+
   "composer": {
     "historyHeader": "  Composer History",
     "searchPlaceholder": "Search sent requests...",

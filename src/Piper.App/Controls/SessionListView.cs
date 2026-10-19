@@ -920,10 +920,13 @@ public sealed class SessionListView : UserControl
         var session = _visible[e.ItemIndex];
         var receiving = session.State == SessionState.ReceivingBody;
         var item = new ListViewItem(session.Id.ToString());
-        item.SubItems.Add(receiving ? Strings.SessionList.ReceivingResult(session.StatusText) : session.StatusText);
+        // A failed client handshake says so (TLS ERR), and gives its reason where the path would be.
+        var tlsFailure = session.TlsFailure;
+        item.SubItems.Add(tlsFailure is not null ? TlsFailureText.Result
+            : receiving ? Strings.SessionList.ReceivingResult(session.StatusText) : session.StatusText);
         item.SubItems.Add(session.IsTunnel ? Strings.SessionList.TunnelMethod : session.Method);
         item.SubItems.Add(session.Host);
-        item.SubItems.Add(session.Path + session.Query);
+        item.SubItems.Add(tlsFailure is not null ? TlsFailureText.PathLabel(tlsFailure) : session.Path + session.Query);
         item.SubItems.Add(Format.ShortContentType(session.ContentType));
         item.SubItems.Add(string.IsNullOrEmpty(session.ProcessName) ? Strings.SessionList.UnknownProcess : session.ProcessName);
         item.SubItems.Add(receiving && session.ExpectedResponseBytes > 0

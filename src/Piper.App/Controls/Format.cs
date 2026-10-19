@@ -57,7 +57,7 @@ internal static class Format
     /// The widest Result texts: <see cref="Piper.Core.Sessions.Session.StatusText"/>'s words and a
     /// status code marked as still arriving.
     /// </summary>
-    public static string[] WidestResultTexts() => ["CONNECT", "ERR", Strings.SessionList.ReceivingResult("999")];
+    public static string[] WidestResultTexts() => ["CONNECT", "ERR", Strings.TlsFailure.Result, Strings.SessionList.ReceivingResult("999")];
 
     /// <summary>"3.02 MB of 8.00 MB (37%)", or just what has arrived when the total is unknown.</summary>
     public static string ProgressDetail(long received, long total) => total > 0

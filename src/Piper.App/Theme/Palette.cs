@@ -3,6 +3,7 @@ using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Windows.Forms;
 using Microsoft.Win32;
+using Piper.App.Controls;
 using Piper.Core.Sessions;
 
 namespace Piper.App.Theme;
@@ -145,9 +146,10 @@ public static class Palette
     public static Color ForStatus(Session session)
     {
         ArgumentNullException.ThrowIfNull(session);
-        return session.IsAutoResponded
-            ? AutoResponded
-            : ForStatus(session.StatusCode, session.IsTunnel, session.State == SessionState.Failed, session.IsComposed);
+        if (session.IsAutoResponded) return AutoResponded;
+        // A client that refused or left is amber: nothing broke inside Piper. Any other failure stays red.
+        if (session.TlsFailure is { } tls && TlsFailureText.Tone(tls) == TlsFailureTone.Refusal) return StatusClientError;
+        return ForStatus(session.StatusCode, session.IsTunnel, session.State == SessionState.Failed, session.IsComposed);
     }
 
     public static Color ForStatus(int statusCode, bool isTunnel, bool failed, bool composed)
