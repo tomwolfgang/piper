@@ -214,13 +214,13 @@ internal static class TlsFailureEvidenceTests
         RemoteCertificateValidationCallback = (_, _, _, _) => accept,
     };
 
-    private static void Reset(TcpClient client)
+    internal static void Reset(TcpClient client)
     {
         client.Client.LingerState = new LingerOption(true, 0);
         client.Dispose();
     }
 
-    private static async Task WithProxyAsync(CertificateAuthority ca, TimeSpan? handshakeBudget, Func<int, SessionStore, Task> body)
+    internal static async Task WithProxyAsync(CertificateAuthority ca, TimeSpan? handshakeBudget, Func<int, SessionStore, Task> body)
     {
         var store = new SessionStore();
         var options = new ProxyOptions { Port = 0, DecryptHttps = true };
@@ -230,18 +230,18 @@ internal static class TlsFailureEvidenceTests
         try
         {
             await body(proxy.Endpoint!.Port, store);
-            await Poll.UntilAsync(() => proxy.ActiveConnections == 0);
+            if (!await Poll.UntilAsync(() => proxy.ActiveConnections == 0)) throw new InvalidOperationException("connections did not end");
         }
         finally { await proxy.StopAsync(); }
     }
 
     /// <summary>Opens a tunnel through the proxy and returns the connection once the 200 has arrived.</summary>
-    private static async Task<TcpClient> OpenTunnelAsync(int port)
+    internal static async Task<TcpClient> OpenTunnelAsync(int port, string authority = "127.0.0.1:9")
     {
         var client = new TcpClient { NoDelay = true };
         await client.ConnectAsync(IPAddress.Loopback, port);
         var stream = client.GetStream();
-        await stream.WriteAsync(Encoding.Latin1.GetBytes("CONNECT 127.0.0.1:9 HTTP/1.1\r\nHost: 127.0.0.1:9\r\n\r\n"));
+        await stream.WriteAsync(Encoding.Latin1.GetBytes($"CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\n\r\n"));
         var text = new StringBuilder();
         var buffer = new byte[256];
         using var limit = new CancellationTokenSource(Patience);

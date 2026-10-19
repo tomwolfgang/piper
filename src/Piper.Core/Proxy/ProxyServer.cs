@@ -42,6 +42,9 @@ public sealed class ProxyServer : IAsyncDisposable
     private readonly CertificateAuthority _ca;
     private readonly SessionStore _store;
 
+    /// <summary>Collapses repeated client TLS failures into counted rows; used on the failure path only.</summary>
+    private readonly TlsFailureAggregator _tlsFailures;
+
     /// <summary>Which origins have advertised HTTP/3, shared across every connection this proxy
     /// handles so one origin's Alt-Svc informs later requests from any client connection.</summary>
     private readonly Http3.AltSvcCache _altSvc = new();
@@ -72,6 +75,7 @@ public sealed class ProxyServer : IAsyncDisposable
         _options = options;
         _ca = certificateAuthority;
         _store = store;
+        _tlsFailures = new TlsFailureAggregator(store);
     }
 
     public bool IsRunning
@@ -199,6 +203,10 @@ public sealed class ProxyServer : IAsyncDisposable
         // chain per connection, which must not be paid for by the thread that asked for the stop.
         StopListener(run.Listener);
         await EndRunAsync(run).ConfigureAwait(false);
+
+        // After the connections were told to stop, none of which records a failure once told, so no
+        // announcement of a collapsed row is left to come (bar one already past its check, within a process-name wait).
+        _tlsFailures.Stop();
 
         if (run.AcceptLoop is not null)
         {
@@ -904,27 +912,40 @@ public sealed class ProxyServer : IAsyncDisposable
                 var started = completed - Stopwatch.GetElapsedTime(handshakeStarted);
                 var timedOut = ex is OperationCanceledException && handshakeBudget.IsCancellationRequested;
                 // Typically an untrusted root or a pinned client. Record it so the cause is visible.
-                _store.Add(new Session(started)
-                {
-                    Request = connect,
-                    IsTunnel = true,
-                    IsHttps = true,
-                    State = SessionState.Failed,
-                    ClientEndpoint = clientEndpoint,
-                    ProcessName = await processName.ConfigureAwait(false),
-                    ServerEndpoint = $"{host}:{port}",
-                    Error = timedOut
-                        ? $"TLS handshake with client failed: no handshake within {_options.TlsHandshakeTimeout.TotalSeconds:0.#}s"
-                        : $"TLS handshake with client failed: {Describe(ex)}",
-                    TlsFailure = TlsFailureClassifier.Classify(ex, helloSeen, timedOut)
+                await RecordClientTlsFailureAsync(
+                    connect, host, port, clientEndpoint, processName, started, completed,
+                    TlsFailureClassifier.Classify(ex, helloSeen, timedOut)
                         with { Sni = TlsFailureClassifier.SanitizeSni(clientSni), LastSeen = completed },
-                    Completed = completed,
-                });
+                    timedOut
+                        ? $"TLS handshake with client failed: no handshake within {_options.TlsHandshakeTimeout.TotalSeconds:0.#}s"
+                        : $"TLS handshake with client failed: {Describe(ex)}").ConfigureAwait(false);
             }
 
             await ssl.DisposeAsync().ConfigureAwait(false);
             return false;
         }
+    }
+
+    /// <summary>Adds a failed-handshake row, or counts the failure into the row for the same process, host,
+    /// port and kind (see <see cref="TlsFailureAggregator"/>). Failure path only.</summary>
+    private async Task RecordClientTlsFailureAsync(
+        HttpRequestData connect, string host, int port, string clientEndpoint, Task<string> processName,
+        DateTimeOffset started, DateTimeOffset completed, TlsFailureInfo info, string error)
+    {
+        var process = await processName.ConfigureAwait(false);
+        _tlsFailures.Record(process, host, port, info, () => new Session(started)
+        {
+            Request = connect,
+            IsTunnel = true,
+            IsHttps = true,
+            State = SessionState.Failed,
+            ClientEndpoint = clientEndpoint,
+            ProcessName = process,
+            ServerEndpoint = $"{host}:{port}",
+            Error = error,
+            TlsFailure = info,
+            Completed = completed,
+        });
     }
 
     /// <summary>Runs one browser-facing HTTP/2 connection. Each stream is forwarded independently
