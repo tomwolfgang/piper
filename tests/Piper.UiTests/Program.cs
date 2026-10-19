@@ -172,6 +172,7 @@ internal static class Program
                 && tags[2].Text.Contains("example.test · 29 ", StringComparison.Ordinal),
                 $"each hide is a tag with its row count, then Show all ({Texts()})");
             Check(!tags[0].UseMnemonic, "a tag shows a captured '&' as it is");
+            Check(tags.All(tag => tag.TabStop), "every tag and Show all can be reached with Tab");
 
             tags[2].PerformClick(); // the host
             PumpUntil(() => list.VirtualListSize == 12);
