@@ -152,6 +152,76 @@ internal static class Http2Tests
             runner.IsTrue(!received.Any(r => r.Headers.Contains("x-injected")), "no injected header reached the origin");
         });
 
+        await runner.RunAsync("an h2 client's cookie crumbs reach an HTTP/1.1 origin as one cookie field, in place", async () =>
+        {
+            // Browsers split the cookie into one field per pair; RFC 9113 §8.2.3 requires the crumbs
+            // to be joined with "; " before an HTTP/1.1 hop. HttpClient always sends one field, so
+            // this is a hand-built h2 client again.
+            var authority = $"127.0.0.1:{origin.Port}";
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+            var ct = timeout.Token;
+            await using var ssl = await OpenRawHttp2Async(proxyPort, authority, ca.RootCertificate, ct);
+
+            List<(string, string)> Request(string path, IEnumerable<(string, string)> extra) =>
+                [(":method", "GET"), (":scheme", "https"), (":authority", authority), (":path", path), .. extra];
+            static IEnumerable<(string, string)> Crumbs(int count) =>
+                Enumerable.Range(0, count).Select(i => ("cookie", $"k{i:D4}=v"));
+
+            // Stream 1: three crumbs among other fields, one of them repeated. Stream 3: 1,000
+            // crumbs, under the 64 KiB header list cap but over the 200 lines an HTTP/1.1 head may
+            // have. Stream 5: 2,000 crumbs, over the cap. Stream 7: the connection still works.
+            await Http2FrameWriter.WriteHeadersAsync(ssl, 1, Piper.Core.Http2.Hpack.HpackEncoder.Encode(Request("/crumbs",
+                [("x-before", "1"), ("cookie", "a=1"), ("x-dup", "p"), ("cookie", "b=2"), ("x-dup", "q"), ("cookie", "c=3"), ("x-after", "2")])),
+                endStream: true, 16384, ct);
+            await Http2FrameWriter.WriteHeadersAsync(ssl, 3, Piper.Core.Http2.Hpack.HpackEncoder.Encode(
+                Request("/crumbs-many", Crumbs(1000))), endStream: true, 16384, ct);
+            await Http2FrameWriter.WriteHeadersAsync(ssl, 5, Piper.Core.Http2.Hpack.HpackEncoder.Encode(
+                Request("/crumbs-oversized", Crumbs(2000))), endStream: true, 16384, ct);
+            await Http2FrameWriter.WriteHeadersAsync(ssl, 7, Piper.Core.Http2.Hpack.HpackEncoder.Encode(
+                Request("/crumbs-after", [])), endStream: true, 16384, ct);
+            await ssl.FlushAsync(ct);
+
+            var decoder = new Piper.Core.Http2.Hpack.HpackDecoder();
+            var statuses = new Dictionary<int, string>();
+            var resets = new Dictionary<int, uint>();
+            while (statuses.Count + resets.Count < 4)
+            {
+                var frame = await Http2FrameReader.ReadRequiredAsync(ssl, 1 << 20, ct);
+                if (frame.Type == Http2FrameType.GoAway) { runner.IsTrue(false, "the proxy did not tear the connection down"); return; }
+                if (frame.Type == Http2FrameType.Settings && !frame.HasFlag(Http2FrameFlags.Ack))
+                    await Http2FrameWriter.WriteAsync(ssl, Http2FrameType.Settings, Http2FrameFlags.Ack, 0, ReadOnlyMemory<byte>.Empty, ct);
+                if (frame.Type == Http2FrameType.RstStream)
+                    resets[frame.StreamId] = System.Buffers.Binary.BinaryPrimitives.ReadUInt32BigEndian(frame.Payload.Span);
+                if (frame.Type == Http2FrameType.Headers)
+                    statuses[frame.StreamId] = decoder.Decode(frame.HeaderBlockPayload.Span).First(f => f.Name == ":status").Value;
+            }
+
+            runner.AreEqual("200", statuses.GetValueOrDefault(1), "three crumbs: answered");
+            runner.AreEqual("200", statuses.GetValueOrDefault(3), "1,000 crumbs: answered, not refused by the origin");
+            runner.AreEqual((uint)Http2ErrorCode.EnhanceYourCalm, resets.GetValueOrDefault(5),
+                "crumbs over the header list cap: refused with ENHANCE_YOUR_CALM, as any oversized header list is");
+            runner.AreEqual("200", statuses.GetValueOrDefault(7), "the connection still serves the next request");
+
+            static string Lines(HttpRequestData request, params string[] names) => string.Join(" | ", request.Headers
+                .Where(h => names.Contains(h.Name, StringComparer.OrdinalIgnoreCase))
+                .Select(h => $"{h.Name.ToLowerInvariant()}: {h.Value}"));
+
+            var received = origin.Received.ToArray();
+            var three = received.Last(r => r.RequestTarget == "/crumbs");
+            runner.AreEqual("x-before: 1 | cookie: a=1; b=2; c=3 | x-dup: p | x-dup: q | x-after: 2",
+                Lines(three, "x-before", "cookie", "x-dup", "x-after"),
+                "one cookie field, in order, where the first crumb was; other repeated fields untouched");
+
+            var many = received.Last(r => r.RequestTarget == "/crumbs-many");
+            runner.AreEqual(string.Join("; ", Crumbs(1000).Select(c => c.Item2)), string.Join("|", many.Headers.GetValues("cookie")),
+                "1,000 crumbs: one cookie field holding every pair in order");
+            runner.IsTrue(!received.Any(r => r.RequestTarget == "/crumbs-oversized"), "crumbs over the cap never reach the origin");
+
+            var session = await WaitForSessionAsync(store, s => s.Path == "/crumbs");
+            runner.AreEqual("a=1|b=2|c=3", string.Join("|", session.Request!.Headers.GetValues("cookie")),
+                "the capture still shows the crumbs exactly as the client sent them");
+        });
+
         await runner.RunAsync("a bodiless response from an HTTP/1.1 origin ends on the h2 HEADERS frame", async () =>
         {
             // HEAD, 204 and 304 end after their header section (RFC 9110 6.4.1). Handed a relay
@@ -247,6 +317,68 @@ internal static class Http2Tests
 
         await using var h2Origin = new TestHttp2Origin(ca.GetCertificateFor("127.0.0.1"), EchoHandler);
         var h2OriginBase = $"https://127.0.0.1:{h2Origin.Port}";
+
+        await runner.RunAsync("cookie crumbs are joined only for an HTTP/1.1 upstream, and only from an h2 or h3 client", async () =>
+        {
+            var h2Received = new System.Collections.Concurrent.ConcurrentQueue<HttpRequestData>();
+            await using var capturingH2 = new TestHttp2Origin(ca.GetCertificateFor("127.0.0.1"), (request, _) =>
+            {
+                h2Received.Enqueue(request);
+                return Task.FromResult(HttpResponseData.Simple(200, "OK", "ok"));
+            });
+
+            async Task<string> SendAsync(int port, IEnumerable<HttpRequestData> received, string path, string version, params string[] cookies)
+            {
+                var request = new HttpRequestData
+                {
+                    Method = "GET",
+                    RequestTarget = path,
+                    HttpVersion = version,
+                    Url = new Uri($"https://127.0.0.1:{port}{path}"),
+                };
+                request.Headers.Set("Host", $"127.0.0.1:{port}");
+                foreach (var cookie in cookies) request.Headers.Add("cookie", cookie);
+
+                var forwardStore = new SessionStore();
+                var response = await Http2RequestForwarder.ForwardAsync(
+                    request, options, forwardStore, new Piper.Core.Http3.AltSvcCache(), "test", "test", CancellationToken.None);
+                if (response.RelayBody is { } relay) await relay(Stream.Null, CancellationToken.None);
+
+                runner.AreEqual(200, response.Head.StatusCode, $"{path}: answered");
+                runner.AreEqual(string.Join("|", cookies), string.Join("|", forwardStore.Snapshot().Single().Request!.Headers.GetValues("cookie")),
+                    $"{path}: the capture keeps the fields as the client sent them");
+                return string.Join("|", received.Last(r => r.RequestTarget == path).Headers.GetValues("cookie"));
+            }
+
+            runner.AreEqual("a=1", await SendAsync(origin.Port, origin.Received, "/one-cookie", "HTTP/2", "a=1"), "a single cookie field is unchanged");
+            runner.AreEqual("", await SendAsync(origin.Port, origin.Received, "/no-cookie", "HTTP/2"), "no cookie field: none is added");
+            runner.AreEqual("a=1; ; c=3", await SendAsync(origin.Port, origin.Received, "/empty-crumb", "HTTP/2", "a=1", "", "c=3"),
+                "an empty crumb is joined like any other");
+            runner.AreEqual("a=1; b=2", await SendAsync(origin.Port, origin.Received, "/h3-crumbs", "HTTP/3", "a=1", "b=2"),
+                "an HTTP/3 request's crumbs are joined too (RFC 9114 §4.2.1)");
+            runner.AreEqual("a=1|b=2", await SendAsync(origin.Port, origin.Received, "/h1-cookies", "HTTP/1.1", "a=1", "b=2"),
+                "an HTTP/1.1 client's cookie lines go upstream as it sent them");
+            runner.AreEqual("a=1|b=2|c=3", await SendAsync(capturingH2.Port, h2Received, "/h2-crumbs", "HTTP/2", "a=1", "b=2", "c=3"),
+                "an HTTP/2 upstream receives the crumbs unchanged");
+        });
+
+        await runner.RunAsync("JoinCookieCrumbs matches the name in any case and keeps the first field's name and place", () =>
+        {
+            var headers = new HeaderCollection();
+            headers.Add("Host", "example.test");
+            headers.Add("Cookie", "a=1");
+            headers.Add("X-Dup", "p");
+            headers.Add("COOKIE", "b=2");
+            headers.Add("X-Dup", "q");
+            UpstreamRequestSender.JoinCookieCrumbs(headers);
+            runner.AreEqual("Host: example.test|Cookie: a=1; b=2|X-Dup: p|X-Dup: q", string.Join("|", headers), "joined in place");
+
+            var single = new HeaderCollection();
+            single.Add("cookie", "a=1; b=2");
+            UpstreamRequestSender.JoinCookieCrumbs(single);
+            runner.AreEqual("cookie: a=1; b=2", string.Join("|", single), "one field is left as it is");
+            return Task.CompletedTask;
+        });
 
         await runner.RunAsync("browser speaks h1.1, Piper negotiates h2 upstream: both legs captured independently", async () =>
         {
@@ -476,6 +608,47 @@ internal static class Http2Tests
             DefaultVersionPolicy = HttpVersionPolicy.RequestVersionExact,
             Timeout = TimeSpan.FromSeconds(20),
         };
+    }
+
+    /// <summary>CONNECT through the proxy, TLS with ALPN h2 against Piper's MITM leaf, then the
+    /// connection preface and an empty SETTINGS: ready for raw frames HttpClient will not send.</summary>
+    private static async Task<SslStream> OpenRawHttp2Async(int proxyPort, string authority, X509Certificate2 root, CancellationToken ct)
+    {
+        var tcp = new TcpClient();
+        try
+        {
+            await tcp.ConnectAsync(IPAddress.Loopback, proxyPort, ct);
+            var raw = tcp.GetStream();
+            await raw.WriteAsync(Encoding.ASCII.GetBytes($"CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\n\r\n"), ct);
+            var reply = new List<byte>();
+            var one = new byte[1];
+            while (reply.Count < 4 || !reply.TakeLast(4).SequenceEqual("\r\n\r\n"u8.ToArray()))
+            {
+                if (await raw.ReadAsync(one, ct) == 0) throw new IOException("proxy closed during CONNECT");
+                reply.Add(one[0]);
+            }
+            if (!Encoding.ASCII.GetString(reply.ToArray()).Contains(" 200 ")) throw new IOException("CONNECT refused");
+
+            // Owns the socket from here: disposing it closes the connection.
+            var ssl = new SslStream(raw, leaveInnerStreamOpen: false);
+            await ssl.AuthenticateAsClientAsync(new SslClientAuthenticationOptions
+            {
+                TargetHost = "127.0.0.1",
+                ApplicationProtocols = [SslApplicationProtocol.Http2],
+                RemoteCertificateValidationCallback = (_, cert, _, _) => TrustsRoot(root, cert),
+            }, ct);
+            if (ssl.NegotiatedApplicationProtocol != SslApplicationProtocol.Http2) throw new IOException("h2 not negotiated");
+
+            await ssl.WriteAsync("PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"u8.ToArray(), ct);
+            await Http2FrameWriter.WriteAsync(ssl, Http2FrameType.Settings, Http2FrameFlags.None, 0, ReadOnlyMemory<byte>.Empty, ct);
+            return ssl;
+        }
+        catch
+        {
+            // Nothing owns the connection yet; close it rather than leave it to the finalizer.
+            tcp.Dispose();
+            throw;
+        }
     }
 
     /// <summary>The test's HttpClient only ever sees Piper's MITM leaf, minted on the fly and
