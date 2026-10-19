@@ -418,8 +418,9 @@ public sealed class SessionListView : UserControl
 
         _hiddenBar.Visible = _hides.Count > 0;
         Palette.Apply(_hiddenBar);
-        _hiddenBar.ResumeLayout();
+        // Before the layout resumes, so no tag is ever drawn without its text.
         UpdateHiddenCounts();
+        _hiddenBar.ResumeLayout();
     }
 
     private Button NewBarButton(HideEntry? hide, Action click)
@@ -1034,10 +1035,18 @@ public sealed class SessionListView : UserControl
             // like it did nothing. The search box and hidden hosts are the user's own view and still apply.
             if (!session.IsUpdateCheck && !session.IsImported && _visibilityFilter is not null && !_visibilityFilter(session)) continue;
             if (!session.IsUpdateCheck && !session.IsImported && _filtersetFilter is not null && !_filtersetFilter(session)) continue;
-            if (!session.IsUpdateCheck && _hides.Count > 0 && _hides.Find(hide => hide.Matches(session)) is { } hiddenBy)
+            if (!session.IsUpdateCheck && _hides.Count > 0)
             {
-                hiddenBy.Hidden++;
-                continue;
+                // Every matching hide counts the row, so each tag says what removing it alone would
+                // not bring back -- not just what no earlier tag already hid.
+                var hidden = false;
+                foreach (var hide in _hides)
+                {
+                    if (!hide.Matches(session)) continue;
+                    hide.Hidden++;
+                    hidden = true;
+                }
+                if (hidden) continue;
             }
             _visible[writeIndex++] = session;
         }

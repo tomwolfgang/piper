@@ -163,12 +163,13 @@ internal static class Program
             PumpUntil(() => list.VirtualListSize == 0);
             Check(list.VirtualListSize == 0, $"Hide host hides the host's rows (got {list.VirtualListSize})");
 
-            // A tag per hide, in the order hidden, each with how many rows it hides here.
+            // A tag per hide, in the order hidden, each counting every row it matches, even rows an
+            // earlier tag hides too: 15 even rows, 6 images, 29 rows on example.test.
             var tags = bar.Controls.OfType<Button>().ToArray();
             string Texts() => string.Join(" | ", tags.Select(tag => tag.Text));
-            Check(tags.Length == 4 && tags[0].Text.Contains("game", StringComparison.Ordinal) && tags[0].Text.Contains("15", StringComparison.Ordinal)
-                && tags[1].Text.Contains("image/png", StringComparison.Ordinal) && tags[1].Text.Contains("3", StringComparison.Ordinal)
-                && tags[2].Text.Contains("example.test", StringComparison.Ordinal) && tags[2].Text.Contains("12", StringComparison.Ordinal),
+            Check(tags.Length == 4 && tags[0].Text.Contains("game · 15 ", StringComparison.Ordinal)
+                && tags[1].Text.Contains("image/png · 6 ", StringComparison.Ordinal)
+                && tags[2].Text.Contains("example.test · 29 ", StringComparison.Ordinal),
                 $"each hide is a tag with its row count, then Show all ({Texts()})");
             Check(!tags[0].UseMnemonic, "a tag shows a captured '&' as it is");
 
