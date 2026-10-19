@@ -79,6 +79,53 @@ internal static class Program
             ExpectRowsFromTop(list, 10);
         });
 
+        Run("hiding a host from a scrolled grid keeps the rows drawn in place", (store, grid, list) =>
+        {
+            // "Hide this host": a few rows go, but fewer than would bring the count under the top row.
+            var topBefore = (int)SendMessage(list.Handle, LvmGetTopIndex, 0, 0);
+            var anchor = list.Items[topBefore - 7].Tag; // scrolled up a little, so the place is not just "the bottom"
+            list.EnsureVisible(topBefore - 7);
+            Check(SendMessage(list.Handle, LvmGetTopIndex, 0, 0) == topBefore - 7 && ((Session)anchor!).Host != RareHost, "setup: scrolled up to a row that stays");
+            grid.SessionHiddenHostsFilter = session => session.Host != RareHost;
+            PumpUntil(() => list.VirtualListSize == 290);
+            var topAfter = (int)SendMessage(list.Handle, LvmGetTopIndex, 0, 0);
+            Check(ReferenceEquals(list.Items[topAfter].Tag, anchor), $"the same session stays at the top (top index {topAfter})");
+            var first = list.GetItemRect(topAfter);
+            Check(first.Top >= 0 && first.Top <= first.Height * 2, $"the top row is drawn at the top (y={first.Top})");
+        });
+
+        Run("hiding the rows at the bottom of a scrolled grid keeps the rest drawn in place", (store, grid, list) =>
+        {
+            // The top row survives but what is left no longer fills a screen from it.
+            grid.SessionHiddenHostsFilter = session => int.Parse(session.Path.AsSpan("/item/".Length)) < 290;
+            PumpUntil(() => list.VirtualListSize == 290);
+            ExpectBottomInView(list, 290);
+        });
+
+        Run("deleting the top row of a scrolled grid keeps the place", (store, grid, list) =>
+        {
+            var topBefore = (int)SendMessage(list.Handle, LvmGetTopIndex, 0, 0);
+            list.EnsureVisible(topBefore - 50);
+            var top = (int)SendMessage(list.Handle, LvmGetTopIndex, 0, 0);
+            var doomed = (Session)list.Items[top].Tag!;
+            store.RemoveAll(session => ReferenceEquals(session, doomed)); // Del
+            PumpUntil(() => list.VirtualListSize == 299);
+            var topAfter = (int)SendMessage(list.Handle, LvmGetTopIndex, 0, 0);
+            Check(topAfter == top, $"the view stays at row {top} (got {topAfter})");
+        });
+
+        Run("hiding a host from a grid scrolled a few rows shows the rest from the top", (store, grid, list) =>
+        {
+            // As recorded: a list a little over a screen, a selected row's host hidden, and what is
+            // left now fits on one screen though it still reaches past the old top row.
+            var topBefore = (int)SendMessage(list.Handle, LvmGetTopIndex, 0, 0);
+            list.SelectedIndices.Add(list.VirtualListSize - 3); // item 27, whose host is hidden
+            grid.SessionHiddenHostsFilter = session => int.Parse(session.Path.AsSpan("/item/".Length)) % 3 != 0;
+            PumpUntil(() => list.VirtualListSize == 20);
+            Check(20 > topBefore, $"setup: the rows left still reach the old top row {topBefore}");
+            ExpectRowsFromTop(list, 20);
+        }, setupRows: 30);
+
         Run("Ctrl+A selects every visible session", (store, grid, list) =>
         {
             PressKey(list, Keys.A, controlPressed: true, shift: false);
@@ -611,7 +658,7 @@ internal static class Program
     }
 
     /// <summary>Hosts a real grid, fills it past a screen so it follows the tail, then runs the case.</summary>
-    private static void Run(string name, Action<SessionStore, SessionListView, ListView> body)
+    private static void Run(string name, Action<SessionStore, SessionListView, ListView> body, int setupRows = 300)
     {
         Console.WriteLine($"== {name}");
         var store = new SessionStore();
@@ -622,9 +669,9 @@ internal static class Program
         var list = FindListView(grid);
 
         _next = 0;
-        AddSessions(store, 300);
-        PumpUntil(() => list.VirtualListSize == 300);
-        Check(SendMessage(list.Handle, LvmGetTopIndex, 0, 0) > 100, "setup: the grid followed the tail");
+        AddSessions(store, setupRows);
+        PumpUntil(() => list.VirtualListSize == setupRows);
+        Check(SendMessage(list.Handle, LvmGetTopIndex, 0, 0) > (setupRows > 100 ? 100 : 0), "setup: the grid followed the tail");
 
         body(store, grid, list);
         form.Close();
@@ -642,6 +689,19 @@ internal static class Program
         // Only where every row fits, so a high-DPI runner with taller rows does not fail it spuriously.
         if (first.Top + rows * first.Height <= list.ClientSize.Height)
             Check(list.GetItemRect(rows - 1).Bottom <= list.ClientSize.Height, "the newest row is on screen");
+    }
+
+    private static void ExpectBottomInView(ListView list, int rows)
+    {
+        Check(list.VirtualListSize == rows, $"{rows} rows are listed (got {list.VirtualListSize})");
+        if (list.VirtualListSize != rows || rows == 0) return;
+        var topIndex = (int)SendMessage(list.Handle, LvmGetTopIndex, 0, 0);
+        var top = list.GetItemRect(topIndex);
+        var last = list.GetItemRect(rows - 1);
+        Check(top.Top >= 0 && top.Top <= top.Height * 2, $"the top row {topIndex} is drawn at the top (y={top.Top})");
+        Check(last.Bottom <= list.ClientSize.Height, $"the last row is on screen (bottom {last.Bottom} of {list.ClientSize.Height})");
+        // Past the end the view would show blank space below the last row with rows above it hidden.
+        Check(list.ClientSize.Height - last.Bottom < last.Height * 2, $"no blank space under the last row (bottom {last.Bottom} of {list.ClientSize.Height})");
     }
 
     private const string RareHost = "rare.test";
