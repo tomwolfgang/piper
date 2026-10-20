@@ -1315,9 +1315,12 @@ public sealed class ProxyServer : IAsyncDisposable
                 {
                     var connectStart = stopwatch.Elapsed;
                     // An upgrade stays on HTTP/1.1: an h2 request has no Connection/Upgrade, so an origin
-                    // that offers h2 in ALPN would answer 200 instead of 101.
+                    // that offers h2 in ALPN would answer 200 instead of 101. Every client on this path
+                    // speaks HTTP/1.1, and an h2 upstream is one-shot (below), so by default the origin
+                    // is asked for HTTP/1.1 too and the slot's connection is kept for the next request.
+                    var allowHttp2 = !isUpgrade && !_options.PreferHttp11UpstreamForHttp11Clients;
                     upstream = await UpstreamConnection.ConnectAsync(
-                        host, port, targetIsTls, _options, ct, allowHttp2: !isUpgrade).ConfigureAwait(false);
+                        host, port, targetIsTls, _options, ct, allowHttp2).ConfigureAwait(false);
                     slot.Connection = upstream;
                     session.ConnectTime = stopwatch.Elapsed - connectStart;
                 }

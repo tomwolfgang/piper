@@ -1210,6 +1210,8 @@ internal static class Strings
         public static string Http2DownstreamNote => I18n.T("configurations.http2DownstreamNote");
         public static string Http2Upstream => I18n.T("configurations.http2Upstream");
         public static string Http2UpstreamNote => I18n.T("configurations.http2UpstreamNote");
+        public static string Http11UpstreamForHttp11Clients => I18n.T("configurations.http11UpstreamForHttp11Clients");
+        public static string Http11UpstreamForHttp11ClientsNote => I18n.T("configurations.http11UpstreamForHttp11ClientsNote");
         public static string Http3Upstream => I18n.T("configurations.http3Upstream");
         public static string Http3UpstreamNote => I18n.T("configurations.http3UpstreamNote");
         public static string ValidateUpstream => I18n.T("configurations.validateUpstream");

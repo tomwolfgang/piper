@@ -12,6 +12,7 @@ internal static class ProxyConfigurationSettingsStoreTests
                 DecryptHttps = false,
                 EnableHttp2Downstream = false,
                 EnableHttp2Upstream = false,
+                PreferHttp11UpstreamForHttp11Clients = false,
                 EnableHttp3Upstream = true,
                 ValidateUpstreamCertificates = false,
                 GlobalUserAgent = "Piper smoke test",
@@ -29,6 +30,7 @@ internal static class ProxyConfigurationSettingsStoreTests
             runner.AreEqual(saved.EnableHttp2Downstream, restored.EnableHttp2Downstream, "downstream HTTP/2");
             runner.AreEqual(saved.EnableHttp2Upstream, restored.EnableHttp2Upstream, "upstream HTTP/2");
             runner.AreEqual(saved.EnableHttp3Upstream, restored.EnableHttp3Upstream, "upstream HTTP/3");
+            runner.AreEqual(false, restored.PreferHttp11UpstreamForHttp11Clients, "HTTP/1.1 upstream for HTTP/1.1 clients");
             runner.AreEqual(saved.ValidateUpstreamCertificates, restored.ValidateUpstreamCertificates, "upstream certificate validation");
             runner.AreEqual(saved.GlobalUserAgent, restored.GlobalUserAgent, "global User-Agent");
             runner.AreEqual(saved.HostRemapping.Enabled, restored.HostRemapping.Enabled, "host remapping enabled");
@@ -40,6 +42,12 @@ internal static class ProxyConfigurationSettingsStoreTests
             runner.AreEqual(saved.ValidateUpstreamCertificates, options.ValidateUpstreamCertificates,
                 "certificate validation toggle applies to proxy options");
             runner.IsTrue(options.HostRemapping.Enabled, "host remapping applies to proxy options");
+            runner.IsTrue(!options.PreferHttp11UpstreamForHttp11Clients, "HTTP/1.1 upstream toggle applies to proxy options");
+
+            // A file saved before the toggle existed has no such key: it must load as the default (on).
+            File.WriteAllText(path, "{\"EnableHttp2Upstream\":true}");
+            runner.IsTrue(ProxyConfigurationSettingsStore.Load(path)!.PreferHttp11UpstreamForHttp11Clients,
+                "an older settings file keeps HTTP/1.1 upstream for HTTP/1.1 clients on");
             runner.AreEqual("127.0.0.1", options.HostRemapping.Resolve("api.example.test"), "mapped host resolves to IP");
 
             File.WriteAllText(path, "not json");
