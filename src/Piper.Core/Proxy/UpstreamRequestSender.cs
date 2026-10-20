@@ -91,9 +91,43 @@ internal static class UpstreamRequestSender
     /// </remarks>
     private static void MakeValidHttp11(HttpRequestData outbound)
     {
+        // Only a request that arrived over HTTP/2 or HTTP/3 can carry crumbs; an HTTP/1.1 client's
+        // header lines go upstream as it sent them.
+        if (!outbound.HttpVersion.StartsWith("HTTP/1.", StringComparison.Ordinal))
+            JoinCookieCrumbs(outbound.Headers);
+
         outbound.HttpVersion = "HTTP/1.1";
 
         if (!outbound.Headers.Contains("Host") && outbound.Url is { } url)
             outbound.Headers.Set("Host", url.IsDefaultPort ? url.Host : $"{url.Host}:{url.Port}");
+    }
+
+    /// <summary>
+    /// Joins the <c>cookie</c> fields of an HTTP/2 or HTTP/3 request into the single field HTTP/1.1
+    /// expects, in their original order and at the position of the first one. Browsers split the
+    /// cookie into one field per pair ("crumbs") so each compresses on its own, and RFC 9113 §8.2.3
+    /// and RFC 9114 §4.2.1 require the crumbs to be concatenated with "; " before the request
+    /// reaches an HTTP/1.1 context. Sent as separate lines, an origin may read only the first one, or
+    /// join them with commas and misread every cookie after it.
+    /// </summary>
+    /// <remarks>
+    /// Applied to the outbound clone only, so the captured session still shows the crumbs the client
+    /// sent. The joined value is shorter than the separate lines it replaces, and the decoded header
+    /// list it is built from is already capped (<c>SETTINGS_MAX_HEADER_LIST_SIZE</c>), so it needs no
+    /// bound of its own. Values were checked for CR, LF and NUL when the request was decoded.
+    /// </remarks>
+    internal static void JoinCookieCrumbs(HeaderCollection headers)
+    {
+        string? name = null;
+        var count = 0;
+        foreach (var header in headers)
+        {
+            if (!string.Equals(header.Name, "cookie", StringComparison.OrdinalIgnoreCase)) continue;
+            name ??= header.Name;
+            count++;
+        }
+
+        if (count > 1)
+            headers.Set(name!, string.Join("; ", headers.GetValues(name!)));
     }
 }
