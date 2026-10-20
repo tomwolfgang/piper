@@ -89,6 +89,28 @@ internal static class SazExportUiTests
                 check(notices is [var notice] && notice.StartsWith("Saving keep.saz was cancelled."), $"the Log records the cancel (got {string.Join(" | ", notices)})");
                 check(!OpenProgressDialogs().Any(), "the progress dialog closed itself");
             }
+
+            Console.WriteLine("== closing the app mid-save cancels it and removes the temporary file");
+            using (var form = new Form { Width = 900, Height = 400, ShowInTaskbar = false })
+            {
+                var grid = new SessionListView(new SessionStore()) { Dock = DockStyle.Fill };
+                form.Controls.Add(grid);
+                form.Show();
+                var target = Path.Combine(folder, "close.saz");
+                byte[] original = [.. "kept on close"u8];
+                File.WriteAllBytes(target, original);
+
+                // Before the progress dialog appears, the window can still be closed.
+                var save = Save(grid, target, Sessions(body, 150));
+                grid.CancelSazSave(TimeSpan.FromSeconds(10));
+                var files = Directory.GetFiles(folder).Length;
+                pumpUntil(() => save.IsCompleted);
+
+                check(files == 3, $"the temporary file is gone once the cancel returns ({files} files)");
+                check(File.ReadAllBytes(target).SequenceEqual(original), "the existing file is byte-identical");
+                check(save.IsCompletedSuccessfully, "the cancelled save ends without a fault");
+                check(!OpenProgressDialogs().Any(), "no progress dialog is left open");
+            }
         }
         finally
         {

@@ -1468,6 +1468,21 @@ public sealed class SessionListView : UserControl
     private static readonly TimeSpan SazProgressDelay = TimeSpan.FromMilliseconds(300);
 
     private bool _savingSaz;
+    private Task? _sazWork;
+    private CancellationTokenSource? _sazCancellation;
+
+    /// <summary>
+    /// Cancels a save in progress and waits up to <paramref name="timeout"/> for its worker to stop,
+    /// so an app closing mid-save does not leave the partial temporary file beside the target. The
+    /// worker checks for cancellation at least every 1 MiB, so the wait is short.
+    /// </summary>
+    public void CancelSazSave(TimeSpan timeout)
+    {
+        if (_sazWork is not { IsCompleted: false } work) return;
+        _sazCancellation?.Cancel();
+        // WhenAny never faults, so a cancelled or failed export does not throw here.
+        Task.WhenAny(work).Wait(timeout);
+    }
 
     /// <summary>
     /// Writes <paramref name="sessions"/> on a worker thread. Their messages are read here, on the UI
@@ -1490,6 +1505,8 @@ public sealed class SessionListView : UserControl
                 progressDialog?.Report(count);
             });
             var work = Task.Run(() => SazExporter.Export(path, snapshot, progress, cancellation.Token));
+            _sazCancellation = cancellation;
+            _sazWork = work;
 
             if (await Task.WhenAny(work, Task.Delay(SazProgressDelay)) != work && !IsDisposed)
             {
@@ -1524,6 +1541,8 @@ public sealed class SessionListView : UserControl
         finally
         {
             _savingSaz = false;
+            _sazWork = null;
+            _sazCancellation = null;
         }
     }
 

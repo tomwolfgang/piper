@@ -2067,6 +2067,7 @@ public sealed partial class MainForm : Form, IMessageFilter
 
         SaveWindowBounds();
         SaveFontScaleSettings();
+        _sessionList.CancelSazSave(TimeSpan.FromSeconds(5));
 
         // Windows shutdown, Task Manager and Application.Exit do not honour a cancelled close:
         // deferring the cleanup to a continuation there would let the process go away with the
