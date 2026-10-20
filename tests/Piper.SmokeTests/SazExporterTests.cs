@@ -118,6 +118,25 @@ internal static class SazExporterTests
                 ExpectUntouched(runner, folder, target, original);
             }));
 
+        await runner.RunAsync("SAZ export: an incomplete or capped body is marked, a complete one is not", () =>
+            WithExistingTarget((_, target, _) =>
+            {
+                var incomplete = MakeSession(1, [1, 2, 3], "application/octet-stream");
+                incomplete.Response!.BodyTotalLength = 5000;
+                var capped = MakeSession(2, new byte[100], "application/octet-stream");
+                capped.Response!.KeepPrefix(10);
+                var complete = MakeSession(3, [7, 8], "application/octet-stream");
+
+                SazExporter.Export(target, SazExporter.Snapshot([incomplete, capped, complete]));
+                var imported = SazImporter.Import(target).Sessions;
+
+                runner.AreEqual("5000", imported[0].Response!.Headers["X-Piper-Body-Truncated"], "a partly received body carries its full length");
+                runner.AreEqual("3", imported[0].Response!.Headers["Content-Length"], "its Content-Length matches the bytes written");
+                runner.AreEqual("100", imported[1].Response!.Headers["X-Piper-Body-Truncated"], "a body capped to a prefix is marked");
+                runner.AreEqual("10", imported[1].Response!.Headers["Content-Length"], "the capped body's length matches its prefix");
+                runner.IsTrue(imported[2].Response!.Headers["X-Piper-Body-Truncated"] is null, "a complete body is not marked");
+            }));
+
         await runner.RunAsync("SAZ export: a successful export replaces the old file and round-trips through the importer", () =>
             WithExistingTarget((folder, target, _) =>
             {

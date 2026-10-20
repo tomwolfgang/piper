@@ -179,6 +179,8 @@ public static class SazExporter
         if (hadChunkedTransfer || headers.Contains("Content-Length"))
             headers.Set("Content-Length", body.Length.ToString(System.Globalization.CultureInfo.InvariantCulture));
 
+        // Same test as HttpMessage.IsBodyComplete, but against the body array read once above, so a
+        // body replaced while the snapshot is taken cannot pair one array's length with another's.
         if (body.LongLength < totalLength)
             headers.Set(TruncationHeader, totalLength.ToString(System.Globalization.CultureInfo.InvariantCulture));
 
