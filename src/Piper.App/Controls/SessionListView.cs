@@ -64,7 +64,11 @@ public sealed class SessionListView : UserControl
     private FindSessionsRequest _lastFind = FindSessionsRequest.Default;
     private Func<Session, bool>? _visibilityFilter;
     private Func<Session, bool>? _filtersetFilter;
-    private Func<Session, bool>? _sessionHiddenHostsFilter;
+    // What the right-click menu hid, for this run only, shown as tags in _hiddenBar. Like Fiddler's
+    // "Filter Now", these are the user's quick view and stay apart from the Filters tab. Values come
+    // from captured sessions: they are only compared in memory and shown, never composed into a query.
+    private readonly SessionHideList _hides = new();
+    private readonly FlowLayoutPanel _hiddenBar;
     private bool _hiddenHostsFilterChanged;
     private bool _autoScroll = true;
 
@@ -97,19 +101,13 @@ public sealed class SessionListView : UserControl
     public event EventHandler<Session>? SessionActivated;
 
     /// <summary>
-    /// Raised with a host the user asked to stop seeing. The grid deliberately does not know how
-    /// hiding is stored, so the form routes this into the Filters tab's persisted Hosts list.
-    /// </summary>
-    public event EventHandler<string>? HideHostRequested;
-
-    /// <summary>Raised when the user asks to see again every host hidden this session.</summary>
-    public event EventHandler? ShowSessionHiddenHostsRequested;
-
-    /// <summary>
     /// Raised with a line for the Log tab after a Copy as command, saying what was copied or why
     /// nothing was. It never carries any captured value.
     /// </summary>
     public event EventHandler<string>? CopyAsNotice;
+
+    /// <summary>A path-free line for the Log when a SAZ save ends or is cancelled.</summary>
+    public event EventHandler<string>? SazSaveNotice;
 
     public SessionListView(SessionStore store)
     {
@@ -187,7 +185,22 @@ public sealed class SessionListView : UserControl
         _filterToolTip.SetToolTip(_followButton, Strings.SessionList.FollowTailTooltip);
         _list.ClientSizeChanged += (_, _) => PositionFollowButton();
 
+        // Under the filter box, and only while something is hidden: one tag per hide, each a click
+        // away from showing its rows again.
+        _hiddenBar = new FlowLayoutPanel
+        {
+            Name = HiddenBarName,
+            Dock = DockStyle.Top,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            WrapContents = true,
+            Padding = new Padding(2, 0, 2, 2),
+            Visible = false,
+        };
+
+        // Docked last to first: the filter row on top, the hidden bar under it, the grid filling the rest.
         Controls.Add(_list);
+        Controls.Add(_hiddenBar);
         Controls.Add(filterRow);
         Controls.Add(_followButton);
         _followButton.BringToFront();
@@ -327,23 +340,107 @@ public sealed class SessionListView : UserControl
         }
     }
 
-    /// <summary>
-    /// Hosts hidden with "Hide this host" for this session, in a slot of their own for the same
-    /// reason as <see cref="FiltersetFilter"/>: the search box is the user's. The form owns what is
-    /// in it and takes a host back out when its Filters tab entry is unticked or removed. Unlike a
-    /// filter change this keeps the scroll position, since it removes a few rows, not most of them.
-    /// </summary>
-    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
-    public Func<Session, bool>? SessionHiddenHostsFilter
+    /// <summary>Hides a host's sessions until its tag is clicked, as the menu's "Hide host" does.</summary>
+    public void HideHost(string host) => AddHide(SessionHideKind.Host, host);
+
+    private void AddHide(SessionHideKind kind, string value)
     {
-        get => _sessionHiddenHostsFilter;
-        set
+        if (_hides.Add(kind, value)) RebuildForHide();
+    }
+
+    private void RemoveHide(SessionHide hide)
+    {
+        if (_hides.Remove(hide)) RebuildForHide();
+    }
+
+    private void ClearHides()
+    {
+        if (_hides.Clear()) RebuildForHide();
+    }
+
+    private void RebuildForHide()
+    {
+        // The bar first: showing or hiding it resizes the grid, and the rebuild must place the rows
+        // in the grid's final height, or a followed tail ends up below the bottom edge.
+        FillHiddenBar();
+        _hiddenHostsFilterChanged = true;
+        Rebuild();
+    }
+
+    /// <summary>The bar under the filter box listing what is hidden, named so a test can find it.</summary>
+    public const string HiddenBarName = "hiddenBar";
+
+    /// <summary>Lays the tags out again after a hide is added or removed.</summary>
+    private void FillHiddenBar()
+    {
+        _hiddenBar.SuspendLayout();
+        while (_hiddenBar.Controls.Count > 0) _hiddenBar.Controls[0].Dispose();
+
+        if (_hides.Count > 0)
         {
-            _sessionHiddenHostsFilter = value;
-            _hiddenHostsFilterChanged = true;
-            Rebuild();
+            _hiddenBar.Controls.Add(new Label
+            {
+                AutoSize = true,
+                Text = Strings.SessionList.HiddenBarLabel,
+                Margin = new Padding(4, 7, 4, 0),
+            });
+            foreach (var hide in _hides.Items)
+            {
+                var tag = NewBarButton(hide, () => RemoveHide(hide));
+                _filterToolTip.SetToolTip(tag, Strings.SessionList.ShowAgainTooltip(TrimForDisplay(hide.Value, 200)));
+                _hiddenBar.Controls.Add(tag);
+            }
+            _hiddenBar.Controls.Add(NewBarButton(null, ClearHides));
+        }
+
+        _hiddenBar.Visible = _hides.Count > 0;
+        Palette.Apply(_hiddenBar);
+        // Before the layout resumes, so no tag is ever drawn without its text.
+        UpdateHiddenCounts();
+        _hiddenBar.ResumeLayout();
+    }
+
+    private Button NewBarButton(SessionHide? hide, Action click)
+    {
+        var button = new Button
+        {
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            // A captured value can carry '&', which a button would otherwise take as a mnemonic.
+            UseMnemonic = false,
+            // Reachable with Tab: the menu can hide rows, and the bar is the only way to show them again.
+            TabStop = true,
+            Cursor = Cursors.Hand,
+            Margin = new Padding(2),
+            Tag = hide,
+            Text = hide is null ? Strings.SessionList.ShowAllHidden : string.Empty,
+        };
+        // After the click returns: the handler disposes the very button that raised it.
+        button.Click += (_, _) => BeginInvoke(click);
+        return button;
+    }
+
+    /// <summary>Puts each tag's row count up to date after a rebuild recounted them.</summary>
+    private void UpdateHiddenCounts()
+    {
+        foreach (Control control in _hiddenBar.Controls)
+        {
+            if (control.Tag is not SessionHide hide) continue;
+            var text = Strings.SessionList.HiddenTag(HideLabel(hide.Kind, TrimForDisplay(hide.Value, 60)), hide.Hidden);
+            if (control.Text != text) control.Text = text;
         }
     }
+
+    private static string HideLabel(SessionHideKind kind, string value) => kind switch
+    {
+        SessionHideKind.Host => Strings.SessionList.HiddenHost(value),
+        SessionHideKind.Process => Strings.SessionList.HiddenProcess(value),
+        _ => Strings.SessionList.HiddenContentType(value),
+    };
+
+    // Captured values can be any length.
+    private static string TrimForDisplay(string value, int maxLength) =>
+        value.Length > maxLength ? value[..(maxLength - 1)] + "…" : value;
 
     private void RequestRefresh() => _refreshPending = true;
 
@@ -820,6 +917,7 @@ public sealed class SessionListView : UserControl
 
         _list.Invalidate();
         UpdateFollowButton();
+        if (_hides.Count > 0) UpdateHiddenCounts();
     }
 
     /// <summary>
@@ -900,7 +998,8 @@ public sealed class SessionListView : UserControl
 
     private void ApplyVisibilityFiltersInPlace()
     {
-        if (_query.IsEmpty && _visibilityFilter is null && _filtersetFilter is null && _sessionHiddenHostsFilter is null) return;
+        _hides.ResetCounts();
+        if (_query.IsEmpty && _visibilityFilter is null && _filtersetFilter is null && _hides.Count == 0) return;
 
         var writeIndex = 0;
         for (var readIndex = 0; readIndex < _visible.Count; readIndex++)
@@ -914,7 +1013,7 @@ public sealed class SessionListView : UserControl
             // like it did nothing. The search box and hidden hosts are the user's own view and still apply.
             if (!session.IsUpdateCheck && !session.IsImported && _visibilityFilter is not null && !_visibilityFilter(session)) continue;
             if (!session.IsUpdateCheck && !session.IsImported && _filtersetFilter is not null && !_filtersetFilter(session)) continue;
-            if (!session.IsUpdateCheck && _sessionHiddenHostsFilter is not null && !_sessionHiddenHostsFilter(session)) continue;
+            if (!session.IsUpdateCheck && _hides.Count > 0 && _hides.HidesAndCounts(session)) continue;
             _visible[writeIndex++] = session;
         }
 
@@ -1227,12 +1326,17 @@ public sealed class SessionListView : UserControl
         {
             if (SelectedSession is { } session) FilterText = $"host:{session.Host}";
         });
-        menu.Items.Add(Strings.SessionList.HideThisHost, null, (_, _) =>
+        // Fiddler's "Filter Now": hide what this row has, for this run, as tags in the hidden bar.
+        // The host, the common case, is one click; the rarer criteria sit in "Hide by". Both are
+        // filled as the menu opens, from the selected row.
+        var hideHost = new ToolStripMenuItem(string.Empty, null, (_, _) =>
         {
-            if (SelectedSession is { } session) HideHostRequested?.Invoke(this, session.Host);
-        });
-        var showHiddenHosts = menu.Items.Add(Strings.SessionList.ShowHiddenHosts, null,
-            (_, _) => ShowSessionHiddenHostsRequested?.Invoke(this, EventArgs.Empty));
+            if (SelectedSession is { } session) HideHost(session.Host);
+        }) { Name = HideHostItemName };
+        menu.Items.Add(hideHost);
+        var hide = new ToolStripMenuItem(Strings.SessionList.HideMenu) { Name = HideMenuName };
+        hide.DropDownItems.Add(new ToolStripMenuItem()); // a placeholder, so the submenu arrow shows
+        menu.Items.Add(hide);
         menu.Items.Add(new ToolStripSeparator());
         var textWizard = new ToolStripMenuItem(Strings.SessionList.SendUrlToTextWizard, null,
             (_, _) => TextWizardDialog.Open(FindForm(), SelectedSession?.Url));
@@ -1248,12 +1352,48 @@ public sealed class SessionListView : UserControl
             resend.Enabled = SelectedSession is { IsTunnel: false, Request: not null };
             copyAs.Enabled = resend.Enabled;
             clearMarks.Enabled = _marks.Count > 0;
-            showHiddenHosts.Enabled = _sessionHiddenHostsFilter is not null;
+            FillHideMenu(hideHost, hide);
             autoResponder.Enabled = SelectedSession is { IsTunnel: false, Request.Url: not null };
         };
 
         _list.ContextMenuStrip = menu;
     }
+
+    /// <summary>The context menu's "Hide host" item, named so a test can find it.</summary>
+    public const string HideHostItemName = "hideHostItem";
+
+    /// <summary>The context menu's "Hide by" submenu, named so a test can find it.</summary>
+    public const string HideMenuName = "hideMenu";
+
+    private void FillHideMenu(ToolStripMenuItem hideHost, ToolStripMenuItem hide)
+    {
+        hide.DropDownItems.Clear();
+        var session = SelectedSession;
+        var full = _hides.IsFull;
+        // Session.Host is the raw Host header when the request line had no parseable URL, so only a
+        // host that is plain hostname material is offered; HostFilterTerm.Covers matches it as a pattern.
+        hideHost.Text = Strings.SessionList.HideHost(MenuText(session?.Host ?? string.Empty));
+        hideHost.Enabled = session is not null && !full && HostFilterTerm.IsFilterableHost(session.Host);
+        hide.Enabled = session is not null;
+        if (session is null) return;
+
+        // An imported or hand-built session can carry no process; treat that as none, not a crash.
+        var processName = session.ProcessName ?? string.Empty;
+        AddMenuItem(hide, Strings.SessionList.HiddenProcess(MenuText(processName)),
+            !full && processName.Trim().Length > 0,
+            () => AddHide(SessionHideKind.Process, processName));
+        var mediaType = SessionHideList.MediaType(session);
+        AddMenuItem(hide, Strings.SessionList.HiddenContentType(MenuText(mediaType)),
+            !full && mediaType.Length > 0,
+            () => AddHide(SessionHideKind.ContentType, mediaType));
+    }
+
+    private static void AddMenuItem(ToolStripMenuItem parent, string text, bool enabled, Action click) =>
+        parent.DropDownItems.Add(new ToolStripMenuItem(text, null, (_, _) => click()) { Enabled = enabled });
+
+    // A menu takes '&' as a mnemonic, so a captured one is doubled.
+    private static string MenuText(string value) =>
+        TrimForDisplay(value, 80).Replace("&", "&&", StringComparison.Ordinal);
 
     private void CopyUrls()
     {
@@ -1305,10 +1445,11 @@ public sealed class SessionListView : UserControl
     }
 
     /// <summary>Prompts for a Fiddler SAZ file and saves the current capture selection.</summary>
-    public bool SaveSelectedSessionsAsSaz()
+    public void SaveSelectedSessionsAsSaz()
     {
+        if (_savingSaz) return;
         var sessions = SelectedSessions.Where(session => session.Request is not null).ToArray();
-        if (sessions.Length == 0) return false;
+        if (sessions.Length == 0) return;
 
         using var dialog = new SaveFileDialog
         {
@@ -1318,23 +1459,90 @@ public sealed class SessionListView : UserControl
             AddExtension = true,
             FileName = Strings.SazImport.SuggestedFileName(DateTime.Now),
         };
-        if (dialog.ShowDialog(this) != DialogResult.OK) return false;
+        if (dialog.ShowDialog(this) != DialogResult.OK) return;
 
+        _ = SaveSazAsync(dialog.FileName, sessions);
+    }
+
+    /// <summary>An export that ends this quickly never shows its progress dialog.</summary>
+    private static readonly TimeSpan SazProgressDelay = TimeSpan.FromMilliseconds(300);
+
+    private bool _savingSaz;
+    private Task? _sazWork;
+    private CancellationTokenSource? _sazCancellation;
+
+    /// <summary>
+    /// Cancels a save in progress and waits up to <paramref name="timeout"/> for its worker to stop,
+    /// so an app closing mid-save does not leave the partial temporary file beside the target. The
+    /// worker checks for cancellation at least every 1 MiB, so the wait is short.
+    /// </summary>
+    public void CancelSazSave(TimeSpan timeout)
+    {
+        if (_sazWork is not { IsCompleted: false } work) return;
+        _sazCancellation?.Cancel();
+        // WhenAny never faults, so a cancelled or failed export does not throw here.
+        Task.WhenAny(work).Wait(timeout);
+    }
+
+    /// <summary>
+    /// Writes <paramref name="sessions"/> on a worker thread. Their messages are read here, on the UI
+    /// thread, because capture keeps changing them; a progress dialog with Cancel appears if the
+    /// export takes longer than a moment. The exporter replaces the file only once it is complete.
+    /// </summary>
+    private async Task SaveSazAsync(string path, Session[] sessions)
+    {
+        var fileName = Path.GetFileName(path);
+        _savingSaz = true;
         try
         {
-            SazExporter.Export(dialog.FileName, sessions);
+            var snapshot = SazExporter.Snapshot(sessions);
+            using var cancellation = new CancellationTokenSource();
+            SazExportProgressDialog? progressDialog = null;
+            var latest = 0;
+            var progress = new Progress<int>(count =>
+            {
+                latest = count;
+                progressDialog?.Report(count);
+            });
+            var work = Task.Run(() => SazExporter.Export(path, snapshot, progress, cancellation.Token));
+            _sazCancellation = cancellation;
+            _sazWork = work;
+
+            if (await Task.WhenAny(work, Task.Delay(SazProgressDelay)) != work && !IsDisposed)
+            {
+                using (progressDialog = new SazExportProgressDialog(fileName, snapshot.Count, work, cancellation))
+                {
+                    progressDialog.Report(latest);
+                    progressDialog.ShowDialog(this);
+                }
+            }
+
+            var written = await work;
             Analytics.Track(
                 AnalyticsEvents.FeatureUsed,
                 (AnalyticsProperties.Feature, "session_export"),
                 (AnalyticsProperties.Format, "saz"),
-                (AnalyticsProperties.Count, Analytics.CountBucket(sessions.Length)));
-            return true;
+                (AnalyticsProperties.Count, Analytics.CountBucket(written)));
+            if (!IsDisposed) SazSaveNotice?.Invoke(this, Strings.Log.SavedSessions(written, fileName));
+        }
+        catch (OperationCanceledException)
+        {
+            if (!IsDisposed) SazSaveNotice?.Invoke(this, Strings.Log.SaveSessionsCancelled(fileName));
         }
         catch (Exception ex)
         {
-            MessageBox.Show(this, Strings.SessionList.SaveSessionsFailed(ex.Message),
-                Strings.App.Name, MessageBoxButtons.OK, MessageBoxIcon.Error);
-            return false;
+            // A broad catch, as before the export moved off the UI thread: this is the fire-and-forget
+            // boundary, and any failure to write the file is reported rather than lost. The message can
+            // name the path, so it goes to this dialog only, never the Log.
+            if (!IsDisposed)
+                MessageBox.Show(this, Strings.SessionList.SaveSessionsFailed(ex.Message),
+                    Strings.App.Name, MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+        finally
+        {
+            _savingSaz = false;
+            _sazWork = null;
+            _sazCancellation = null;
         }
     }
 

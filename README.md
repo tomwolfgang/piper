@@ -341,7 +341,12 @@ Close other programs first, use `--wait-quiet 10`, and report the median and ran
   hostile input: an entry may expand to at most 128 MiB and the whole archive to 512 MiB, it may
   hold at most 200,000 entries, each body is kept only up to the same capture limit as live traffic,
   and a file that breaks a limit is refused with a message rather than opened. Imported sessions are
-  always listed, whatever capture scope or filterset is active
+  always listed, whatever capture scope or filterset is active. Saving a SAZ builds it in a
+  temporary `.tmp` file beside the target and replaces the target only once the archive is
+  complete, so a failed save leaves an existing file as it was; bodies that are already compressed
+  (a Content-Encoding, images, video, audio, archives, web fonts) are stored rather than compressed
+  again. The save runs in the background; a long one shows its progress with a Cancel button that
+  leaves an existing file untouched, and the Log records each save by file name
 - AutoResponder: ordered rules that answer a request locally instead of sending it upstream -
   see below
 - TextWizard: encode, decode and hash a value without leaving Piper — see below

@@ -379,6 +379,11 @@ internal static class Strings
             ? I18n.T("log.importedSessionsToComposer", ("count", count), ("fileName", fileName))
             : I18n.T("log.importedSessions", ("count", count), ("fileName", fileName));
 
+        public static string SavedSessions(int count, string fileName) =>
+            I18n.T("log.savedSessions", ("count", count), ("fileName", fileName));
+        public static string SaveSessionsCancelled(string fileName) =>
+            I18n.T("log.saveSessionsCancelled", ("fileName", fileName));
+
         public static string ImportedSessionsDropped(int count, int capacity) =>
             I18n.T("log.importedSessionsDropped", ("count", count), ("capacity", capacity));
 
@@ -407,12 +412,6 @@ internal static class Strings
             I18n.T("log.systemProxyRestoreFailed", ("message", message));
         public static string ShutdownFailed(string message) => I18n.T("log.shutdownFailed", ("message", message));
 
-        public static string HideHostNotFilterable => I18n.T("log.hideHostNotFilterable");
-        public static string HideHostShowOnlyConflict(string host) =>
-            I18n.T("log.hideHostShowOnlyConflict", ("host", host));
-        public static string HideHostSwitchedToHideMode => I18n.T("log.hideHostSwitchedToHideMode");
-        public static string HideHostAdded(string host) => I18n.T("log.hideHostAdded", ("host", host));
-        public static string SessionHiddenHostsShown => I18n.T("log.sessionHiddenHostsShown");
         public static string HostPatternsIgnored(int count) => I18n.T("log.hostPatternsIgnored", ("count", count));
 
         public static string ShowingTrustPrompt => I18n.T("log.showingTrustPrompt");
@@ -582,8 +581,15 @@ internal static class Strings
         public static string ClearFindMarks => I18n.T("sessionList.clearFindMarks");
         public static string FilterSessions => I18n.T("sessionList.filterSessions");
         public static string FilterToThisHost => I18n.T("sessionList.filterToThisHost");
-        public static string HideThisHost => I18n.T("sessionList.hideThisHost");
-        public static string ShowHiddenHosts => I18n.T("sessionList.showHiddenHosts");
+        public static string HideHost(string value) => I18n.T("sessionList.hideHost", ("value", value));
+        public static string HideMenu => I18n.T("sessionList.hideMenu");
+        public static string HiddenHost(string value) => I18n.T("sessionList.hiddenHost", ("value", value));
+        public static string HiddenProcess(string value) => I18n.T("sessionList.hiddenProcess", ("value", value));
+        public static string HiddenContentType(string value) => I18n.T("sessionList.hiddenContentType", ("value", value));
+        public static string HiddenBarLabel => I18n.T("sessionList.hiddenBarLabel");
+        public static string HiddenTag(string label, int count) => I18n.T("sessionList.hiddenTag", ("label", label), ("count", count));
+        public static string ShowAgainTooltip(string value) => I18n.T("sessionList.showAgainTooltip", ("value", value));
+        public static string ShowAllHidden => I18n.T("sessionList.showAllHidden");
         public static string FollowTail => I18n.T("sessionList.followTail");
         public static string FollowTailTooltip => I18n.T("sessionList.followTailTooltip");
         public static string SendUrlToTextWizard => I18n.T("sessionList.sendUrlToTextWizard");
@@ -594,6 +600,10 @@ internal static class Strings
             I18n.T("sessionList.saveResponseBodyFailed", ("message", message));
         public static string SaveSessionsFailed(string message) =>
             I18n.T("sessionList.saveSessionsFailed", ("message", message));
+        public static string SaveSessionsProgressCaption => I18n.T("sessionList.saveSessionsProgressCaption");
+        public static string SaveSessionsProgress(int count, string fileName) =>
+            I18n.T("sessionList.saveSessionsProgress", ("count", count), ("fileName", fileName));
+        public static string SaveSessionsCancelling => I18n.T("sessionList.saveSessionsCancelling");
         public static string SuggestedResponseFileName(int sessionId, string extension) =>
             I18n.T("sessionList.suggestedResponseFileName", ("sessionId", sessionId), ("extension", extension));
 
