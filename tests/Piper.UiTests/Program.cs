@@ -70,6 +70,7 @@ internal static class Program
         VideoViewLifecycleTests.Run(Check, PumpUntil);
         VideoInspectorTests.Run(Check, PumpUntil);
         JsonInspectorTests.Run(Check, PumpUntil);
+        SazExportUiTests.Run(Check, PumpUntil);
         StatusImagesTests.Run(Check);
         TrustUiTests.Run(Check);
         TlsFailureUiTests.Run(Check, PumpUntil);

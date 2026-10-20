@@ -379,6 +379,11 @@ internal static class Strings
             ? I18n.T("log.importedSessionsToComposer", ("count", count), ("fileName", fileName))
             : I18n.T("log.importedSessions", ("count", count), ("fileName", fileName));
 
+        public static string SavedSessions(int count, string fileName) =>
+            I18n.T("log.savedSessions", ("count", count), ("fileName", fileName));
+        public static string SaveSessionsCancelled(string fileName) =>
+            I18n.T("log.saveSessionsCancelled", ("fileName", fileName));
+
         public static string ImportedSessionsDropped(int count, int capacity) =>
             I18n.T("log.importedSessionsDropped", ("count", count), ("capacity", capacity));
 
@@ -595,6 +600,10 @@ internal static class Strings
             I18n.T("sessionList.saveResponseBodyFailed", ("message", message));
         public static string SaveSessionsFailed(string message) =>
             I18n.T("sessionList.saveSessionsFailed", ("message", message));
+        public static string SaveSessionsProgressCaption => I18n.T("sessionList.saveSessionsProgressCaption");
+        public static string SaveSessionsProgress(int count, string fileName) =>
+            I18n.T("sessionList.saveSessionsProgress", ("count", count), ("fileName", fileName));
+        public static string SaveSessionsCancelling => I18n.T("sessionList.saveSessionsCancelling");
         public static string SuggestedResponseFileName(int sessionId, string extension) =>
             I18n.T("sessionList.suggestedResponseFileName", ("sessionId", sessionId), ("extension", extension));
 

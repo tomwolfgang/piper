@@ -214,6 +214,7 @@ public sealed partial class MainForm : Form, IMessageFilter
         };
         _filterPanel.SettingsChanged += (_, _) => FilterSettingsStore.Save(_filterPanel.Settings);
         _sessionList.CopyAsNotice += (_, message) => AppendLog(message);
+        _sessionList.SazSaveNotice += (_, message) => AppendLog(message);
 
         // Restore the editable settings and then apply their saved enabled state so a restart
         // returns to the same filtered capture view.
@@ -2066,6 +2067,7 @@ public sealed partial class MainForm : Form, IMessageFilter
 
         SaveWindowBounds();
         SaveFontScaleSettings();
+        _sessionList.CancelSazSave(TimeSpan.FromSeconds(5));
 
         // Windows shutdown, Task Manager and Application.Exit do not honour a cancelled close:
         // deferring the cleanup to a continuation there would let the process go away with the
