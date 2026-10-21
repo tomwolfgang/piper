@@ -241,6 +241,14 @@ Close other programs first, use `--wait-quiet 10`, and report the median and ran
 - HTTP/2 on both legs (from-scratch HPACK, framing and flow control) - ALPN-negotiated with the
   browser inside a decrypted tunnel and, independently, with the origin server, so Piper freely
   translates between h1.1 and h2 on either side and records which protocol each leg actually used
+- An HTTP/1.1 client (curl, most SDKs and tools) reaches the origin over HTTP/1.1 too, by default,
+  and its requests share one reusable origin connection, as they would without Piper. **Configurations
+  > HTTPS > Use HTTP/1.1 with origin servers for HTTP/1.1 clients** turns that off, so such a client
+  is translated to h2 when the origin offers it; an h2 origin connection is not reused on that path,
+  so every request then pays a new TCP and TLS handshake (about two round trips). An origin that
+  speaks only HTTP/2 needs the option off: with it on, those requests fail with a `502` and a failed
+  session. HTTP/2 clients (browsers) are not affected, and still open one origin connection per
+  request
 - The browser-facing HTTP/2 connection treats its peer as hostile: a peer that floods PING, SETTINGS
   or resets without reading the replies gets GOAWAY(`ENHANCE_YOUR_CALM`), a malformed header block
   is `COMPRESSION_ERROR`, a flow-control window past 2^31-1 is `FLOW_CONTROL_ERROR`, a connection

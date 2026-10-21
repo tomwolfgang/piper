@@ -11,6 +11,7 @@ public sealed class ProxyConfigurationSettings
     public bool RecordClosedAfterHandshake { get; set; } = true;
     public bool EnableHttp2Downstream { get; set; } = true;
     public bool EnableHttp2Upstream { get; set; } = true;
+    public bool PreferHttp11UpstreamForHttp11Clients { get; set; } = true;
     public bool EnableHttp3Upstream { get; set; }
     public bool ValidateUpstreamCertificates { get; set; } = true;
     public string? GlobalUserAgent { get; set; }
@@ -24,6 +25,7 @@ public sealed class ProxyConfigurationSettings
         RecordClosedAfterHandshake = options.RecordClosedAfterHandshake,
         EnableHttp2Downstream = options.EnableHttp2Downstream,
         EnableHttp2Upstream = options.EnableHttp2Upstream,
+        PreferHttp11UpstreamForHttp11Clients = options.PreferHttp11UpstreamForHttp11Clients,
         EnableHttp3Upstream = options.EnableHttp3Upstream,
         ValidateUpstreamCertificates = options.ValidateUpstreamCertificates,
         GlobalUserAgent = options.GlobalUserAgent,
@@ -39,6 +41,7 @@ public sealed class ProxyConfigurationSettings
         options.RecordClosedAfterHandshake = RecordClosedAfterHandshake;
         options.EnableHttp2Downstream = EnableHttp2Downstream;
         options.EnableHttp2Upstream = EnableHttp2Upstream;
+        options.PreferHttp11UpstreamForHttp11Clients = PreferHttp11UpstreamForHttp11Clients;
         options.EnableHttp3Upstream = EnableHttp3Upstream;
         options.ValidateUpstreamCertificates = ValidateUpstreamCertificates;
         options.GlobalUserAgent = string.IsNullOrWhiteSpace(GlobalUserAgent) ? null : GlobalUserAgent.Trim();

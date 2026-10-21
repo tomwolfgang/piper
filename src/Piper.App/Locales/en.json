@@ -883,6 +883,8 @@
     "http2DownstreamNote": "Applies to new decrypted browser connections.",
     "http2Upstream": "Negotiate HTTP/2 with origin servers",
     "http2UpstreamNote": "Applies to new origin connections.",
+    "http11UpstreamForHttp11Clients": "Use HTTP/1.1 with origin servers for HTTP/1.1 clients",
+    "http11UpstreamForHttp11ClientsNote": "Keeps one reusable origin connection per client connection, as the client would have without Piper. Off: an HTTP/1.1 client may reach the origin over HTTP/2, translated, with a new origin connection for every request. An origin that only speaks HTTP/2 needs this off. HTTP/2 clients are not affected.",
     "http3Upstream": "Attempt HTTP/3 with origin servers (QUIC)",
     "http3UpstreamNote": "Origins are tried over QUIC only after advertising HTTP/3 through Alt-Svc.",
     "validateUpstream": "Verify origin server certificates",

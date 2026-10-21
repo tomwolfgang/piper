@@ -32,6 +32,8 @@ internal static class Http2Tests
             DecryptHttps = true,
             ValidateUpstreamCertificates = false, // the origin's leaf isn't independently trusted; MITM re-encryption is
             EnableHttp2Downstream = true,
+            // Several tests here send from an HTTP/1.1 client and need the h1.1-to-h2 translation.
+            PreferHttp11UpstreamForHttp11Clients = false,
         };
 
         await using var proxy = new ProxyServer(options, ca, store);

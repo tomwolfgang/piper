@@ -98,7 +98,14 @@ internal static class UpgradeOverH2Tests
         {
             Store = new SessionStore();
             Proxy = new ProxyServer(
-                new ProxyOptions { Port = 0, DecryptHttps = true, ValidateUpstreamCertificates = false }, ca, Store);
+                new ProxyOptions
+                {
+                    Port = 0,
+                    DecryptHttps = true,
+                    ValidateUpstreamCertificates = false,
+                    // Ordinary requests from these HTTP/1.1 clients must still be able to go upstream over h2.
+                    PreferHttp11UpstreamForHttp11Clients = false,
+                }, ca, Store);
             Proxy.Start();
             Port = Proxy.Endpoint!.Port;
         }

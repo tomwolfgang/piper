@@ -845,6 +845,7 @@ internal static class Http2ClientHardeningTests
                 DecryptHttps = true,
                 ValidateUpstreamCertificates = false,
                 UpstreamIdleTimeout = TimeSpan.FromMilliseconds(600),
+                PreferHttp11UpstreamForHttp11Clients = false, // the HTTP/1.1 client must reach the origin over h2
             };
             await using var proxy = new ProxyServer(options, ca, store);
             proxy.Start();

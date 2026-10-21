@@ -21,6 +21,7 @@ public sealed class ConfigurationsDialog : Form
     private readonly bool _savedDecryptsWhenUntrusted;
     private CheckBox _http2Downstream = null!;
     private CheckBox _http2Upstream = null!;
+    private CheckBox _http11UpstreamForHttp11Clients = null!;
     private CheckBox _http3Upstream = null!;
     private CheckBox _validateUpstreamCertificates = null!;
     private CheckBox _analyticsEnabled = null!;
@@ -94,6 +95,7 @@ public sealed class ConfigurationsDialog : Form
         options.RecordClosedAfterHandshake = _recordClosedAfterHandshake.Checked;
         options.EnableHttp2Downstream = _http2Downstream.Checked;
         options.EnableHttp2Upstream = _http2Upstream.Checked;
+        options.PreferHttp11UpstreamForHttp11Clients = _http11UpstreamForHttp11Clients.Checked;
         options.EnableHttp3Upstream = _http3Upstream.Checked;
         options.ValidateUpstreamCertificates = _validateUpstreamCertificates.Checked;
     }
@@ -209,6 +211,9 @@ public sealed class ConfigurationsDialog : Form
             Strings.Configurations.Http2DownstreamNote);
         _http2Upstream = AddOption(panel, Strings.Configurations.Http2Upstream, options.EnableHttp2Upstream,
             Strings.Configurations.Http2UpstreamNote);
+        _http11UpstreamForHttp11Clients = AddOption(panel, Strings.Configurations.Http11UpstreamForHttp11Clients,
+            options.PreferHttp11UpstreamForHttp11Clients, Strings.Configurations.Http11UpstreamForHttp11ClientsNote,
+            descriptionMaxWidth: 560);
         _http3Upstream = AddOption(panel, Strings.Configurations.Http3Upstream, options.EnableHttp3Upstream,
             Strings.Configurations.Http3UpstreamNote);
         _validateUpstreamCertificates = AddOption(panel, Strings.Configurations.ValidateUpstream,

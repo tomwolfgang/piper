@@ -220,6 +220,14 @@ public sealed class ProxyOptions
     /// timing) this proxy exists to capture accurately.</summary>
     public bool EnableHttp2Upstream { get; set; } = true;
 
+    /// <summary>Connect to the origin over HTTP/1.1 (no ALPN offer, as with
+    /// <see cref="EnableHttp2Upstream"/> off) when the client itself speaks HTTP/1.1, so the
+    /// client connection's upstream keep-alive connection is reused. Defaults on: without Piper
+    /// that client would talk HTTP/1.1 to the origin anyway, and an h2 upstream is one-shot on
+    /// this path, costing a new TCP+TLS handshake (about two round trips) per request. Off restores
+    /// h1.1-to-h2 translation for these clients. HTTP/2 clients are unaffected.</summary>
+    public bool PreferHttp11UpstreamForHttp11Clients { get; set; } = true;
+
     /// <summary>
     /// Attempt HTTP/3 over QUIC when an origin has advertised it via <c>Alt-Svc</c>. Upstream
     /// only: a browser using a system proxy always tunnels over TCP and disables QUIC, so there is
