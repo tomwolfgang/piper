@@ -28,6 +28,7 @@ internal static class Scenarios
         new("tunnel_up", "CONNECT tunnel: 256 MB upload", c => TunnelTransferAsync(c, 'U')),
         new("sessions_100k", "100,000 captured sessions: memory per session and heap after a collection", SessionsAsync),
         .. TlsScenarios.All,
+        .. ReuseScenarios.All,
     ];
 
     private static Scenario Get(int concurrency) => new($"get_c{concurrency}",

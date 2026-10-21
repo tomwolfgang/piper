@@ -28,6 +28,7 @@ registered install (64-bit, then 32-bit registry view) or the default one, alway
 | `tls_handshake_30` | HTTPS to 30 new hosts: first request (CONNECT, both handshakes, a minted certificate) against a repeat on the same connection |
 | `h2_c100` | HTTP/2 through the proxy, one client connection, 100 parallel streams, 2,000 measured requests (or `--duration`, if that ends first; the ramp and the first stats round trip before the window do not count toward the 2,000, but are capped at 2,000 of their own, so `requests` is 2,000 unless some failed and the connections to the origin stay under 4,000); a response that is not HTTP/2 counts as an error |
 | `rtt50_h1`, `rtt50_h2` | up to 1 GB streamed from an origin 50 ms away (the proxy-to-origin leg goes through a delaying relay; `rtt_actual_ms` is the measured round trip), read for `max(--duration, 10 s)`; a response that ends early with fewer bytes is a failure, not a rate |
+| `seq_*_rtt50`, `seq_*_rtt10` | upstream connection reuse: 30 sequential 16 KB HTTPS GETs on one client connection to an origin 50 or 10 ms away that offers HTTP/2 (the relay also charges each new connection its TCP handshake round trip). `seq_direct_h1`/`_h2` go straight to the origin (the reference); `seq_h1c_*` and `seq_h2c_*` go through the decrypting proxy with an HTTP/1.1 or HTTP/2 client, `_h2up` with `EnableHttp2Upstream` at its default (on), `_h1up` with it off (`host --no-h2-upstream`). `p50_ms`, `p90_ms`, `upstream_conns` (new connections the proxy opened in the 30 requests), `mcycles_per_req` (the host's exact CPU cycles), `first_ms` (the first request, apart) |
 
 Every scenario run starts a fresh host process and warms it up unmeasured. Tunnel payloads are 1 KB,
 never a few bytes: ESET buffers loopback HTTP and stalls tiny payloads with or without Piper.
@@ -43,6 +44,9 @@ a run the exhausted ports ruined.
 
 `--wait-quiet PCT` waits, up to 60 s before each run, for the system CPU to fall under `PCT`; it takes a whole
 number from 1 to 100 (decimals are refused), and the background CPU of each run is recorded either way.
+The `seq_*` scenarios send only 30 requests, so the tier-1 recompilation that follows their warm-up lands inside the
+measured window and dominates `mcycles_per_req` and `cpu_per_req_us`; for their CPU numbers run the driver with
+`DOTNET_TieredCompilation=0` (the host process inherits it). Their latencies do not need it.
 `--duration S` is whole seconds too: the time `get_*` and `hdr_*` measure, the limit of `h2_c100` (it also ends at
 its 2,000 requests), and the floor of the 10 s window `rtt50_*` read for.
 

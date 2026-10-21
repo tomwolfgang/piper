@@ -13,9 +13,10 @@ namespace Piper.Bench;
 /// compete with the proxy for CPU. Only public Piper.Core API is used, so the same source builds
 /// against an older checkout.
 ///
-/// <c>host --ca-dir D [--decrypt] [--insecure-upstream] [--remap "ip name;ip name"]</c>: decryption on (the
+/// <c>host --ca-dir D [--decrypt] [--insecure-upstream] [--no-h2-upstream] [--remap "ip name;ip name"]</c>: decryption on (the
 /// driver's client trusts the temporary CA in-process, nothing is installed), origin certificates not
-/// validated (the benchmark origin's is self-signed), and host remapping so many names reach the origin.
+/// validated (the benchmark origin's is self-signed), HTTP/2 not offered to origins
+/// (<c>ProxyOptions.EnableHttp2Upstream</c> off), and host remapping so many names reach the origin.
 ///
 /// stdout: <c>READY port startup_ms configuration</c> (a host built before the last field existed omits it), then one reply per command. stdin: <c>stats</c> | <c>gc</c> (the
 /// same counters after a forced, compacting collection) | <c>capacity N</c> | <c>quit</c>; when stdin
@@ -26,7 +27,7 @@ internal static class HostMode
     public static async Task<int> RunAsync(string[] args)
     {
         string? caDirectory = null, remap = null;
-        bool decrypt = false, insecureUpstream = false;
+        bool decrypt = false, insecureUpstream = false, noHttp2Upstream = false;
         for (var i = 0; i < args.Length; i++)
         {
             switch (args[i])
@@ -35,13 +36,14 @@ internal static class HostMode
                 case "--remap" when i + 1 < args.Length: remap = args[++i]; break;
                 case "--decrypt": decrypt = true; break;
                 case "--insecure-upstream": insecureUpstream = true; break;
+                case "--no-h2-upstream": noHttp2Upstream = true; break;
                 default: caDirectory = null; i = args.Length; break;
             }
         }
 
         if (string.IsNullOrWhiteSpace(caDirectory))
         {
-            Console.Error.WriteLine("usage: piper-bench host --ca-dir <directory> [--decrypt] [--insecure-upstream] [--remap \"ip name;ip name\"]");
+            Console.Error.WriteLine("usage: piper-bench host --ca-dir <directory> [--decrypt] [--insecure-upstream] [--no-h2-upstream] [--remap \"ip name;ip name\"]");
             return 2;
         }
 
@@ -49,6 +51,7 @@ internal static class HostMode
         using var ca = CertificateAuthority.LoadOrCreate(caDirectory);
         var store = new SessionStore();
         var options = new ProxyOptions { Port = 0, DecryptHttps = decrypt, ValidateUpstreamCertificates = !insecureUpstream };
+        if (noHttp2Upstream) options.EnableHttp2Upstream = false;
         if (remap is not null) options.HostRemapping.Apply(new HostRemappingSettings { Enabled = true, Mappings = remap.Replace(';', '\n') });
         var proxy = new ProxyServer(options, ca, store);
         proxy.Start();
@@ -100,6 +103,13 @@ internal static class HostMode
         using var self = Process.GetCurrentProcess();
         return $"{(command == "gc" ? "GC" : "STATS")} ws={self.WorkingSet64} peakws={self.PeakWorkingSet64} heap={GC.GetTotalMemory(false)} " +
             $"alloc={GC.GetTotalAllocatedBytes()} cpums={self.TotalProcessorTime.TotalMilliseconds:F0} " +
-            $"threads={self.Threads.Count} sessions={store.Count} gcpausems={GC.GetTotalPauseDuration().TotalMilliseconds:F0}";
+            $"threads={self.Threads.Count} sessions={store.Count} gcpausems={GC.GetTotalPauseDuration().TotalMilliseconds:F0}" +
+            (QueryProcessCycleTime(self.Handle, out var cycles) ? $" cycles={cycles}" : "");
     }
+
+    // Exact CPU cycles of every thread of the process. TotalProcessorTime is charged in clock ticks, which
+    // misattributes the short bursts of a few requests spread over seconds; a counter it does not replace.
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+    [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
+    private static extern bool QueryProcessCycleTime(IntPtr process, out long cycles);
 }

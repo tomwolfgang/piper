@@ -6,7 +6,7 @@ using Piper.Bench;
 // The delaying relay behind the benchmark's rtt50_* scenarios (the benchmark runs are not tests).
 internal static class LatencyRelayTests
 {
-    public static Task RunAsync(TestRunner runner) => runner.RunAsync("bench latency relay: delay, order, half-close and disposal", async () =>
+    public static Task RunAsync(TestRunner runner) => runner.RunAsync("bench latency relay: delay, connect round trip, order, half-close and disposal", async () =>
     {
         using var cancel = new CancellationTokenSource(TimeSpan.FromSeconds(60));
         using var stopServers = new CancelOnDispose(cancel); // disposing a token source does not cancel it: end the two listeners when the test ends
@@ -34,6 +34,26 @@ internal static class LatencyRelayTests
             var echoed = new byte[sent.Length];
             for (var got = 0; got < echoed.Length;) got += await client.ReceiveAsync(echoed.AsMemory(got), ct);
             runner.IsTrue(sent.AsSpan().SequenceEqual(echoed), "bytes come back in the order they were sent");
+        }
+
+        await using (var relay = new LatencyRelay(echo, TimeSpan.FromMilliseconds(20), connectRoundTrip: true))
+        {
+            // The first exchange of a connection also pays the TCP handshake's round trip; later ones do not.
+            using var client = await ConnectAsync(relay.Port, ct);
+            var clock = Stopwatch.StartNew();
+            await client.SendAsync(new byte[1], ct);
+            await client.ReceiveAsync(new byte[1], ct);
+            var firstMs = clock.ElapsedMilliseconds;
+            clock.Restart();
+            await client.SendAsync(new byte[1], ct);
+            await client.ReceiveAsync(new byte[1], ct);
+            var secondMs = clock.ElapsedMilliseconds;
+            runner.IsTrue(firstMs >= 76, $"a new connection's first byte comes back after two round trips ({firstMs} ms for 4 x 20)");
+            runner.IsTrue(secondMs is >= 36 and < 76, $"a later byte after one round trip ({secondMs} ms for 2 x 20)");
+            using var second = await ConnectAsync(relay.Port, ct);
+            await second.SendAsync(new byte[1], ct);
+            await second.ReceiveAsync(new byte[1], ct);
+            runner.AreEqual(2, relay.Accepted, "the relay counts the connections it accepted");
         }
 
         await using (var relay = new LatencyRelay(counter, TimeSpan.FromMilliseconds(5)))
