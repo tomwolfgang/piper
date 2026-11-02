@@ -6,8 +6,8 @@ using Piper.Core.Security;
 
 // S12: how the root CA's private key is kept on disk, migrated from the old constant-password PFX, and
 // what happens when it cannot be read. Every file lives in a fresh folder under the per-run temp folder
-// (never %LOCALAPPDATA%\Piper), and the Windows trust store is never opened: the store matching is
-// checked through the pure selection that Install and Uninstall use.
+// (never %LOCALAPPDATA%\Piper), and the Windows trust store is never opened (store matching is in
+// TrustStoreMatchingTests).
 internal static class RootKeyAtRestTests
 {
     private const string LegacyPassword = "Piper";
@@ -28,7 +28,6 @@ internal static class RootKeyAtRestTests
         await RunUnreadableLegacyBesideGoodKeyAsync(runner);
         await RunRenamedRootNoticeAsync(runner);
         await RunPublicCertificateRepairAsync(runner);
-        await RunStoreMatchingAsync(runner);
     }
 
     private static Task RunFreshRootAsync(TestRunner runner) => runner.RunAsync("a new root key is DPAPI-protected, user-only, and written with its public certificate", () =>
@@ -360,32 +359,6 @@ internal static class RootKeyAtRestTests
         return Task.CompletedTask;
     });
 
-    private static Task RunStoreMatchingAsync(TestRunner runner) => runner.RunAsync("trust store cleanup matches Piper roots exactly and never a look-alike", () =>
-    {
-        using var current = NewRoot(CurrentSubject);
-        using var stale = NewRoot(CurrentSubject);
-        using var old = NewRoot(OldSubject);
-        using var lookAlike = NewRoot("CN=Piper Root CA - DO NOT TRUST, O=Piper, OU=Generated locally, OU=Someone else");
-        using var substring = NewRoot("CN=Not the Piper Root CA, O=Contoso");
-        using var oldSubstring = NewRoot("CN=Piper Root CA, O=Contoso");
-        using var issuedByOther = NewIssued(CurrentSubject, substring);
-
-        var store = new[] { current, stale, old, lookAlike, substring, oldSubstring, issuedByOther };
-
-        var onInstall = TrustStore.SelectPiperRoots(store, current, includeCurrent: false).Select(c => c.Thumbprint).ToHashSet();
-        runner.IsTrue(onInstall.SetEquals([stale.Thumbprint, old.Thumbprint]),
-            "installing retires only earlier Piper roots with the exact Piper name");
-
-        var onRemove = TrustStore.SelectPiperRoots(store, current, includeCurrent: true).Select(c => c.Thumbprint).ToHashSet();
-        runner.IsTrue(onRemove.SetEquals([current.Thumbprint, stale.Thumbprint, old.Thumbprint]),
-            "removing takes this root (by thumbprint) and earlier Piper roots, nothing else");
-
-        runner.IsTrue(!onRemove.Contains(lookAlike.Thumbprint) && !onRemove.Contains(substring.Thumbprint)
-            && !onRemove.Contains(oldSubstring.Thumbprint), "a foreign root whose name contains Piper's is left alone");
-        runner.IsTrue(!onRemove.Contains(issuedByOther.Thumbprint), "a certificate with Piper's name issued by someone else is left alone");
-        return Task.CompletedTask;
-    });
-
     private static void AssertUnreadableKeptAside(TestRunner runner, CertificateAuthority ca, string directory, byte[] original)
     {
         runner.IsTrue(ca.Replacement is { Reason: RootReplacementReason.Unreadable }, "the replacement is reported as an unreadable root");
@@ -443,14 +416,6 @@ internal static class RootKeyAtRestTests
         using var cert = request.CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddYears(2));
         return X509CertificateLoader.LoadPkcs12(cert.Export(X509ContentType.Pfx, LegacyPassword), LegacyPassword,
             X509KeyStorageFlags.Exportable | X509KeyStorageFlags.EphemeralKeySet);
-    }
-
-    private static X509Certificate2 NewIssued(string subject, X509Certificate2 issuer)
-    {
-        using var rsa = RSA.Create(2048);
-        var request = new CertificateRequest(subject, rsa, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
-        request.CertificateExtensions.Add(new X509BasicConstraintsExtension(true, false, 0, true));
-        return request.Create(issuer, DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddYears(1), [1, 2, 3, 4]);
     }
 
     private static string NewDirectory() =>
