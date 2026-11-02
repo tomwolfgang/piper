@@ -8,9 +8,9 @@ namespace Piper.Core.Security;
 /// Trusted Root store.
 /// </summary>
 /// <remarks>
-/// Trusting this root means any process holding the matching private key - which sits
-/// unencrypted-by-user-password in the local profile - can impersonate any TLS site to
-/// this account. Piper calls <see cref="Install"/> only after the user confirms either
+/// Trusting this root means any process holding the matching private key - which sits in
+/// the local profile, encrypted only to this Windows account, so any program running as this
+/// user can read it - can impersonate any TLS site to this account. Piper calls <see cref="Install"/> only after the user confirms either
 /// the startup prompt or the explicit configuration action; <see cref="Uninstall"/> is
 /// offered alongside it so the change is easy to reverse.
 /// </remarks>
