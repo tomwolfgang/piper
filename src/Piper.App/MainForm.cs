@@ -2187,7 +2187,9 @@ public sealed partial class MainForm : Form, IMessageFilter
         try
         {
             // A capture toggle may still be changing the proxy on a worker thread; let it finish so
-            // what it set is seen and undone here. Its own failure was already reported by the toggle.
+            // what it set is seen and undone here. WhenAny on purpose: it does not rethrow, because
+            // every caller of RunSystemProxyChangeAsync awaits its task inside its own try/catch and
+            // has already reported the failure. A new caller must do the same.
             await Task.WhenAny(_systemProxyChange);
 
             if (_systemProxy.IsHeld)

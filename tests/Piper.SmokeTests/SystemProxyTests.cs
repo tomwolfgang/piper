@@ -137,6 +137,22 @@ internal static class SystemProxyTests
         runner.AreEqual(SystemProxyBackupStore.SetAsidePath(path), setAside.SetAsidePath, "and says where it kept it");
         runner.IsTrue(!File.Exists(path) && File.Exists(SystemProxyBackupStore.SetAsidePath(path)), "so the next backup is not blocked by it");
 
+        // Setting it aside can fail (the file is held open elsewhere): the user still hears about
+        // it, without a kept-as path, and the record stays where it was rather than vanishing.
+        File.WriteAllText(path, "not json");
+        LeftoverResult heldOpen;
+        using (new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read))
+            heldOpen = SystemProxyRecovery.RestoreLeftovers(settings, path, setAsideCorrupt: true);
+        runner.AreEqual(LeftoverOutcome.Corrupt, heldOpen.Outcome, "a damaged record that cannot be moved is still reported");
+        runner.AreEqual<string?>(null, heldOpen.SetAsidePath, "without claiming it was kept elsewhere");
+        runner.IsTrue(File.Exists(path), "and it stays in place, to be reported again next launch");
+
+        // It does not block the proxy for good: the next enable's atomic save replaces it.
+        var healing = new SystemProxySession(new FakeProxySettings(UserSettings), path);
+        runner.IsTrue(healing.Enable(Endpoint), "the next capture can still take the proxy");
+        runner.AreEqual(SystemProxyBackupStatus.Loaded, SystemProxyBackupStore.Load(path).Status, "and its record replaces the damaged one");
+        healing.Restore();
+
         File.WriteAllText(path, new string(' ', SystemProxyBackupStore.MaxBytes + 1));
         var oversize = SystemProxyRecovery.RestoreLeftovers(settings, path);
         runner.AreEqual(LeftoverOutcome.Corrupt, oversize.Outcome, "an oversize record is corrupt");
@@ -239,9 +255,18 @@ internal static class SystemProxyTests
         };
         var enabling = Task.Run(() => session.Enable(Endpoint));
         runner.IsTrue(enableEntered.Wait(TimeSpan.FromSeconds(10)), "enable is in flight");
-        var restoring = Task.Run(session.Restore);
-        await Task.Delay(100);
-        runner.IsTrue(!restoring.IsCompleted, "a concurrent restore waits for it");
+        using var restoreStarted = new ManualResetEventSlim();
+        using var restoreReachedSettings = new ManualResetEventSlim();
+        settings.OnRestore = restoreReachedSettings.Set;
+        var restoring = Task.Run(() =>
+        {
+            restoreStarted.Set();
+            return session.Restore();
+        });
+        runner.IsTrue(restoreStarted.Wait(TimeSpan.FromSeconds(10)), "a concurrent restore has started");
+        runner.IsTrue(!restoreReachedSettings.Wait(TimeSpan.FromMilliseconds(200)),
+            "but does not touch the settings while the enable is still writing");
+        runner.IsTrue(!restoring.IsCompleted, "it is waiting on the enable");
         releaseEnable.Set();
         settings.OnEnable = null;
         runner.IsTrue(await enabling, "the enable completes");
@@ -276,6 +301,7 @@ internal static class SystemProxyTests
         public Exception? EnableFailure;
         public Exception? RestoreFailure;
         public Action? OnEnable;
+        public Action? OnRestore;
         public int Enables;
         public int Restores;
 
@@ -294,6 +320,7 @@ internal static class SystemProxyTests
         public void Restore(SystemProxy.Snapshot snapshot)
         {
             Interlocked.Increment(ref Restores);
+            OnRestore?.Invoke();
             if (RestoreFailure is { } failure) throw failure;
             Current = snapshot;
         }
