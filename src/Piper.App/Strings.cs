@@ -411,6 +411,15 @@ internal static class Strings
         public static string SystemProxyRestoreFailed(string message) =>
             I18n.T("log.systemProxyRestoreFailed", ("message", message));
         public static string ShutdownFailed(string message) => I18n.T("log.shutdownFailed", ("message", message));
+        public static string LeftoverProxyCorrupt(string reason) => I18n.T("log.leftoverProxyCorrupt", ("reason", reason));
+        public static string LeftoverProxyUnreadable(string message) =>
+            I18n.T("log.leftoverProxyUnreadable", ("message", message));
+        public static string LeftoverProxyRestoreFailed(string endpoint, string message) =>
+            I18n.T("log.leftoverProxyRestoreFailed", ("endpoint", endpoint), ("message", message));
+        public static string LeftoverProxyMalformed(string message) =>
+            I18n.T("log.leftoverProxyMalformed", ("message", message));
+        public static string LeftoverProxyTooLarge(int max) => I18n.T("log.leftoverProxyTooLarge", ("max", max));
+        public static string LeftoverProxyIncomplete => I18n.T("log.leftoverProxyIncomplete");
 
         public static string HostPatternsIgnored(int count) => I18n.T("log.hostPatternsIgnored", ("count", count));
 
@@ -453,6 +462,16 @@ internal static class Strings
     {
         public static string ProxyRestoreFailed(string message) =>
             I18n.T("shutdown.proxyRestoreFailed", ("message", message));
+    }
+
+    /// <summary>What startup tells the user when it could not undo a proxy an earlier run left behind.</summary>
+    public static class LeftoverProxy
+    {
+        public static string Corrupt => I18n.T("leftoverProxy.corrupt");
+        public static string CorruptKept(string path) => I18n.T("leftoverProxy.corruptKept", ("path", path));
+        public static string Unreadable(string message) => I18n.T("leftoverProxy.unreadable", ("message", message));
+        public static string RestoreFailed(string endpoint, string message) =>
+            I18n.T("leftoverProxy.restoreFailed", ("endpoint", endpoint), ("message", message));
     }
 
     /// <summary>

@@ -54,7 +54,11 @@ public sealed partial class MainForm : Form, IMessageFilter
     private static Image BreakpointIcon = CreateBreakpointIcon();
     private static Image SessionsIcon = CreateSessionsIcon();
 
-    private SystemProxy.Snapshot? _proxySnapshot;
+    private readonly SystemProxySession _systemProxy = new(SystemProxy.Settings);
+
+    // The latest system-proxy change running on a worker thread, so shutdown can wait for one still
+    // in flight before deciding whether there is anything to restore.
+    private Task _systemProxyChange = Task.CompletedTask;
     private CaptureScope _captureScope = CaptureScope.AllProcesses;
     private bool _captureEnabledOnStartup = true;
     private bool _captureToggleInProgress;
@@ -380,9 +384,23 @@ public sealed partial class MainForm : Form, IMessageFilter
 
         // A run that was killed, crashed, or was still open when Windows shut down leaves the
         // machine pointed at a Piper that is no longer listening, which the user sees as having
-        // lost their connection. Undo it before anything else touches the settings.
-        if (SystemProxy.RestoreLeftovers() is { } leftover)
-            AppendLog(Strings.Log.RestoredLeftoverProxy(leftover));
+        // lost their connection. Undo it before anything else touches the settings: the capture
+        // toggle stays disabled until it is done, and the registry work runs off the UI thread.
+        _captureToggleInProgress = true;
+        _captureStatusLabel.Enabled = false;
+        LeftoverResult leftover;
+        try
+        {
+            leftover = await RunSystemProxyChangeAsync(() => _systemProxy.RecoverLeftovers(setAsideCorrupt: true));
+        }
+        finally
+        {
+            _captureToggleInProgress = false;
+            _captureStatusLabel.Enabled = true;
+        }
+
+        if (IsDisposed) return;
+        ReportLeftoverProxy(leftover);
 
         // After the restore, not before: this dialog stays up until it is dismissed, and behind it
         // the user's connection must already be back.
@@ -422,7 +440,28 @@ public sealed partial class MainForm : Form, IMessageFilter
 
         // Runs after the window is already visible (StartCapture doesn't block), so unlike the
         // constructor this is a safe place for something that could pop a dialog on failure.
-        if (_proxy.IsRunning) EnableSystemProxy();
+        if (_proxy.IsRunning && !_captureToggleInProgress)
+        {
+            // The same guard as the toggle, so a click while this is still in flight cannot start a
+            // second change; the label says what is happening meanwhile.
+            _captureToggleInProgress = true;
+            _captureStatusLabel.Text = Strings.StatusBar.EnablingProxy;
+            _captureStatusLabel.ForeColor = Palette.TextDim;
+            _captureStatusLabel.Enabled = false;
+            try
+            {
+                await EnableSystemProxyAsync();
+            }
+            finally
+            {
+                _captureToggleInProgress = false;
+                _captureStatusLabel.Enabled = true;
+                UpdateCaptureStatus();
+            }
+
+            if (IsDisposed) return;
+        }
+
         QueueStartupUpdateCheck();
     }
 
@@ -1475,13 +1514,13 @@ public sealed partial class MainForm : Form, IMessageFilter
             if (_proxy.IsRunning)
             {
                 await _proxy.StopAsync();
-                if (RestoreSystemProxy())
+                if (await RunSystemProxyChangeAsync(_systemProxy.Restore))
                     AppendLog(Strings.Log.CaptureStoppedProxyRestored);
             }
             else
             {
                 StartCapture();
-                if (_proxy.IsRunning && _proxySnapshot is null) EnableSystemProxy();
+                if (_proxy.IsRunning) await EnableSystemProxyAsync();
             }
         }
         catch (Exception ex)
@@ -1578,43 +1617,77 @@ public sealed partial class MainForm : Form, IMessageFilter
     private static bool IsBrowserProcess(string processName) => processName.ToLowerInvariant() is
         "chrome" or "msedge" or "firefox" or "brave" or "opera" or "vivaldi" or "iexplore" or "browser";
 
-    private void EnableSystemProxy()
+    /// <summary>
+    /// Points the system proxy at the listener. The session captures the current settings against
+    /// Piper's own endpoint (so a previous Piper's leftovers are never taken for the user's own),
+    /// writes the undo record before touching the registry, undoes a partial change itself, and does
+    /// nothing if Piper already holds the proxy.
+    /// </summary>
+    private async Task EnableSystemProxyAsync()
     {
         var endpoint = $"127.0.0.1:{_proxy.Endpoint!.Port}";
         try
         {
-            // Captured against our own endpoint so settings a previous Piper left behind are never
-            // mistaken for the user's own, and written to disk before the registry changes so an
-            // abrupt exit still leaves something to undo.
-            _proxySnapshot = SystemProxy.Capture(endpoint);
-            SystemProxyBackupStore.Save(SystemProxyBackup.From(endpoint, _proxySnapshot));
-            SystemProxy.Enable(endpoint);
-            AppendLog(Strings.Log.SystemProxySet(endpoint));
+            if (await RunSystemProxyChangeAsync(() => _systemProxy.Enable(endpoint)))
+                AppendLog(Strings.Log.SystemProxySet(endpoint));
         }
         catch (Exception ex)
         {
-            // Enable writes several values, so put back whatever was captured rather than leaving
-            // the machine half-pointed at a proxy that is not running.
-            try { RestoreSystemProxy(); }
-            catch (Exception restoreFailure) { AppendLog(Strings.Log.PartialChangeUndoFailed(restoreFailure.Message)); }
+            if (ex is SystemProxyEnableException { UndoFailure: { } undoFailure })
+                AppendLog(Strings.Log.PartialChangeUndoFailed(undoFailure.Message));
 
             AppendLog(Strings.Log.SystemProxyFailed(ex.Message));
-            MessageBox.Show(this, ex.Message, Strings.App.Name, MessageBoxButtons.OK, MessageBoxIcon.Error);
+            if (!IsDisposed) MessageBox.Show(this, ex.Message, Strings.App.Name, MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
     }
 
     /// <summary>
-    /// Puts the system proxy back to what it was before Piper took it over and drops the on-disk
-    /// undo record. Returns false when Piper was not holding it. Safe to call more than once.
+    /// Runs a system-proxy change on a worker thread - the registry writes and WinINET's notification
+    /// of every running application can take long enough to freeze the window - and remembers it so
+    /// shutdown can wait for it.
     /// </summary>
-    private bool RestoreSystemProxy()
+    private Task<T> RunSystemProxyChangeAsync<T>(Func<T> change)
     {
-        if (_proxySnapshot is not { } snapshot) return false;
+        var task = Task.Run(change);
+        _systemProxyChange = task;
+        return task;
+    }
 
-        SystemProxy.Restore(snapshot);
-        _proxySnapshot = null;
-        SystemProxyBackupStore.Clear();
-        return true;
+    /// <summary>Logs, and tells the user about, whatever startup found an earlier run had left behind.</summary>
+    private void ReportLeftoverProxy(LeftoverResult leftover)
+    {
+        string? notice = null;
+        switch (leftover.Outcome)
+        {
+            case LeftoverOutcome.Restored:
+                AppendLog(Strings.Log.RestoredLeftoverProxy(leftover.Endpoint!));
+                break;
+
+            case LeftoverOutcome.Corrupt:
+                AppendLog(Strings.Log.LeftoverProxyCorrupt(leftover.BackupStatus switch
+                {
+                    SystemProxyBackupStatus.TooLarge => Strings.Log.LeftoverProxyTooLarge(SystemProxyBackupStore.MaxBytes),
+                    SystemProxyBackupStatus.Incomplete => Strings.Log.LeftoverProxyIncomplete,
+                    _ => Strings.Log.LeftoverProxyMalformed(leftover.Detail ?? string.Empty),
+                }));
+                notice = leftover.SetAsidePath is { } kept
+                    ? Strings.LeftoverProxy.CorruptKept(kept)
+                    : Strings.LeftoverProxy.Corrupt;
+                break;
+
+            case LeftoverOutcome.Unreadable:
+                AppendLog(Strings.Log.LeftoverProxyUnreadable(leftover.Detail ?? string.Empty));
+                notice = Strings.LeftoverProxy.Unreadable(leftover.Detail ?? string.Empty);
+                break;
+
+            case LeftoverOutcome.RestoreFailed:
+                AppendLog(Strings.Log.LeftoverProxyRestoreFailed(leftover.Endpoint!, leftover.Detail ?? string.Empty));
+                notice = Strings.LeftoverProxy.RestoreFailed(leftover.Endpoint!, leftover.Detail ?? string.Empty);
+                break;
+        }
+
+        if (notice is not null)
+            MessageBox.Show(this, notice, Strings.App.Name, MessageBoxButtons.OK, MessageBoxIcon.Warning);
     }
 
     private void TrustRootCertificate()
@@ -2078,7 +2151,10 @@ public sealed partial class MainForm : Form, IMessageFilter
             _closeAfterShutdown = true;
             FilterSettingsStore.Save(_filterPanel.Settings);
             SaveStatusBarSettings();
-            try { RestoreSystemProxy(); }
+            // Synchronous on purpose (see above). The session's lock is never released by a UI
+            // continuation, so this waits for a change still running on a worker thread rather
+            // than deadlocking on it.
+            try { _systemProxy.Restore(); }
             catch (Exception ex) { AppendLog(Strings.Log.SystemProxyRestoreFailed(ex.Message)); }
 
             base.OnFormClosing(e);
@@ -2110,15 +2186,17 @@ public sealed partial class MainForm : Form, IMessageFilter
 
         try
         {
-            if (_proxySnapshot is { } snapshot)
+            // A capture toggle may still be changing the proxy on a worker thread; let it finish so
+            // what it set is seen and undone here. Its own failure was already reported by the toggle.
+            await Task.WhenAny(_systemProxyChange);
+
+            if (_systemProxy.IsHeld)
             {
                 _statusLabel.Text = Strings.StatusBar.RestoringSystemProxy;
                 _sessionsLabel.Text = Strings.StatusBar.PleaseWait;
                 await Task.Yield(); // Let the status change paint before WinINET is notified.
 
-                await Task.Run(() => SystemProxy.Restore(snapshot));
-                _proxySnapshot = null;
-                SystemProxyBackupStore.Clear();
+                await Task.Run(_systemProxy.Restore);
             }
 
             if (_proxy.IsRunning)
