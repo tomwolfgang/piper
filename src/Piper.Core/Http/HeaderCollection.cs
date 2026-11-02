@@ -208,6 +208,9 @@ internal sealed class HeaderBlockBuilder(HeaderRules rules)
 
     private const string ForbiddenValueChar = "A header value contains a NUL or CR.";
 
+    // One array, not one per call: Trim(' ', '\t') allocates its params array on every header.
+    private static readonly char[] Ows = [' ', '\t'];
+
     private readonly HeaderCollection _headers = new();
     private readonly bool _skipOddLines = rules == HeaderRules.Lenient;
     private readonly bool _checkFields = rules is HeaderRules.Request or HeaderRules.Response;
@@ -251,9 +254,9 @@ internal sealed class HeaderBlockBuilder(HeaderRules rules)
 
         // RFC 9112 5.1: a proxy removes whitespace between a response's field name and the colon, and
         // a server refuses a request that has it, which the token check below does.
-        var name = rules == HeaderRules.Response ? line[..colon].TrimEnd(' ', '\t') : line[..colon];
+        var name = rules == HeaderRules.Response ? line[..colon].TrimEnd(Ows) : line[..colon];
         // OWS is SP and HTAB only (RFC 9110 5.6.3); anything else at either end is part of the value.
-        var value = line[(colon + 1)..].Trim(' ', '\t');
+        var value = line[(colon + 1)..].Trim(Ows);
 
         // The rules the HTTP/2 and HTTP/3 adapter applies (Http2MessageAdapter.ValidateRegularField),
         // so the three protocols refuse the same fields. The name and value are re-emitted verbatim by

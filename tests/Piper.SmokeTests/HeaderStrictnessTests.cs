@@ -1,6 +1,5 @@
-using System.Net;
-using System.Net.Sockets;
 using System.Text;
+using static ParserBoundsTests;
 using Piper.Core.Http;
 using Piper.Core.Http2;
 using Piper.Core.Proxy;
@@ -390,71 +389,9 @@ internal static class HeaderStrictnessTests
         catch (HttpParseException) { return true; }
     }
 
-    private static string ExceptionName(Action action)
-    {
-        try { action(); return "(none)"; }
-        catch (Exception ex) { return ex.GetType().Name; }
-    }
-
-    private static async Task<string> ExceptionNameAsync(Func<Task> action)
-    {
-        try { await action(); return "(none)"; }
-        catch (Exception ex) { return ex.GetType().Name; }
-    }
-
     private static string Show(string text)
     {
         var shown = text.Replace("\r", "\\r").Replace("\0", "\\0");
         return shown.Length <= 32 ? shown : shown[..32] + "...";
-    }
-
-    private sealed class Harness : IDisposable
-    {
-        public Harness(CertificateAuthority ca)
-        {
-            Store = new SessionStore();
-            Proxy = new ProxyServer(new ProxyOptions { Port = 0 }, ca, Store);
-            Proxy.Start();
-            Port = Proxy.Endpoint!.Port;
-        }
-
-        public ProxyServer Proxy { get; }
-        public int Port { get; }
-        public SessionStore Store { get; }
-
-        public void Dispose() => Proxy.StopAsync().GetAwaiter().GetResult();
-    }
-
-    private static string Get(int port, string path) =>
-        $"GET http://127.0.0.1:{port}{path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n";
-
-    private static async Task<TcpClient> ConnectAsync(int port)
-    {
-        var client = new TcpClient { NoDelay = true };
-        await client.ConnectAsync(IPAddress.Loopback, port);
-        return client;
-    }
-
-    private static Task WriteAsync(Stream stream, string text) =>
-        stream.WriteAsync(Encoding.Latin1.GetBytes(text)).AsTask();
-
-    private static string FirstLine(string text) =>
-        text.Split('\n', 2)[0].TrimEnd('\r') is { Length: > 0 } line ? line : "(nothing)";
-
-    private static async Task<(string Text, bool Eof)> ReadAsync(Stream stream, string? until, TimeSpan limit)
-    {
-        using var cts = new CancellationTokenSource(limit);
-        var text = new StringBuilder();
-        var buffer = new byte[4096];
-        while (until is null || !text.ToString().Contains(until, StringComparison.Ordinal))
-        {
-            int n;
-            try { n = await stream.ReadAsync(buffer, cts.Token); }
-            catch (OperationCanceledException) { return (text.ToString(), false); }
-            catch (IOException) { return (text.ToString(), true); }
-            if (n == 0) return (text.ToString(), true);
-            text.Append(Encoding.Latin1.GetString(buffer, 0, n));
-        }
-        return (text.ToString(), false);
     }
 }

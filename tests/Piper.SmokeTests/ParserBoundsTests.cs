@@ -663,19 +663,19 @@ internal static class ParserBoundsTests
 
     private static string Show(string text) => text.Length <= 24 ? text : text[..24] + "...";
 
-    private static string ExceptionName(Action action)
+    internal static string ExceptionName(Action action)
     {
         try { action(); return "(none)"; }
         catch (Exception ex) { return ex.GetType().Name; }
     }
 
-    private static async Task<string> ExceptionNameAsync(Func<Task> action)
+    internal static async Task<string> ExceptionNameAsync(Func<Task> action)
     {
         try { await action(); return "(none)"; }
         catch (Exception ex) { return ex.GetType().Name; }
     }
 
-    private sealed class Harness : IDisposable
+    internal sealed class Harness : IDisposable
     {
         public Harness(CertificateAuthority ca, System.Collections.Concurrent.ConcurrentQueue<string>? log = null)
         {
@@ -693,25 +693,25 @@ internal static class ParserBoundsTests
         public void Dispose() => Proxy.StopAsync().GetAwaiter().GetResult();
     }
 
-    private static string Get(int port, string path) =>
+    internal static string Get(int port, string path) =>
         $"GET http://127.0.0.1:{port}{path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n";
 
-    private static async Task<TcpClient> ConnectAsync(int port)
+    internal static async Task<TcpClient> ConnectAsync(int port)
     {
         var client = new TcpClient { NoDelay = true };
         await client.ConnectAsync(IPAddress.Loopback, port);
         return client;
     }
 
-    private static Task WriteAsync(Stream stream, string text) =>
+    internal static Task WriteAsync(Stream stream, string text) =>
         stream.WriteAsync(Encoding.Latin1.GetBytes(text)).AsTask();
 
-    private static string FirstLine(string text) =>
+    internal static string FirstLine(string text) =>
         text.Split('\n', 2)[0].TrimEnd('\r') is { Length: > 0 } line ? line : "(nothing)";
 
     /// <summary>Reads until <paramref name="until"/> has arrived (or, when null, until the peer closes),
     /// the limit passes, or the connection ends. Never throws on a closed peer.</summary>
-    private static async Task<(string Text, bool Eof)> ReadAsync(Stream stream, string? until, TimeSpan limit)
+    internal static async Task<(string Text, bool Eof)> ReadAsync(Stream stream, string? until, TimeSpan limit)
     {
         using var cts = new CancellationTokenSource(limit);
         var text = new StringBuilder();
