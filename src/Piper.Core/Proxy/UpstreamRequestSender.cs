@@ -18,6 +18,34 @@ internal readonly record struct UpstreamResponse(
     HttpResponseData Head, HttpBodyDescriptor Body, bool IsBuffered, HttpStreamReader? BodyReader = null);
 
 /// <summary>
+/// How far one exchange got, for deciding whether a failure on a reused connection can be retried
+/// on a fresh one without the origin seeing the request twice or the client half an answer.
+/// </summary>
+internal sealed class UpstreamSendProgress
+{
+    /// <summary>Every byte of the request was handed to the connection.</summary>
+    public bool RequestWritten { get; set; }
+
+    /// <summary>At least one byte of the answer arrived.</summary>
+    public bool ResponseStarted { get; set; }
+
+    /// <summary>
+    /// True when the exchange can go again on a fresh connection: nothing of an answer arrived, and
+    /// either the request never fully left or repeating it is harmless (an idempotent method, RFC 9110
+    /// 9.2.2). A request whose write failed part way is incomplete, so the origin cannot have acted on
+    /// it; one that was written in full may have been, and a POST must not be sent twice.
+    /// </summary>
+    public bool CanRetry(string method) =>
+        !ResponseStarted && (!RequestWritten || IsIdempotent(method));
+
+    private static bool IsIdempotent(string method) => method.ToUpperInvariant() switch
+    {
+        "GET" or "HEAD" or "OPTIONS" or "TRACE" or "PUT" or "DELETE" => true,
+        _ => false,
+    };
+}
+
+/// <summary>
 /// Sends one request over an already-connected <see cref="UpstreamConnection"/>, branching on
 /// whichever protocol ALPN actually negotiated. Shared by every downstream direction that can
 /// reach an ALPN-h2-capable upstream (the HTTP/1.1 loop in <see cref="ProxyServer"/> and
@@ -32,11 +60,16 @@ internal static class UpstreamRequestSender
     /// <c>AwaitingResponse</c> and start timing time-to-first-byte. For HTTP/2, sending and
     /// receiving are fused into one call on <see cref="Http2ClientConnection"/>, so this fires
     /// immediately before that call rather than after only the request bytes are flushed.</param>
+    /// <param name="progress">Filled in as the exchange gets further, for a caller deciding whether a
+    /// failure can be retried on another connection.</param>
     public static async Task<UpstreamResponse> SendAsync(
-        UpstreamConnection upstream, HttpRequestData outbound, Action onRequestSent, CancellationToken ct)
+        UpstreamConnection upstream, HttpRequestData outbound, Action onRequestSent, CancellationToken ct,
+        UpstreamSendProgress? progress = null)
     {
         if (upstream.IsHttp2)
         {
+            // Sending and receiving are one call here, so the request counts as delivered from the start.
+            if (progress is not null) progress.RequestWritten = true;
             onRequestSent();
             var h2 = new Http2ClientConnection(upstream.Stream, upstream.Reader.IdleTimeout);
             var h2Head = await h2.SendRequestHeadAsync(outbound, ct).ConfigureAwait(false);
@@ -48,8 +81,17 @@ internal static class UpstreamRequestSender
         MakeValidHttp11(outbound);
 
         await outbound.WriteOriginFormAsync(upstream.Stream, ct).ConfigureAwait(false);
+        // Before the flush: once the last write has returned, the bytes may reach the origin even if
+        // the flush then fails.
+        if (progress is not null) progress.RequestWritten = true;
         await upstream.Stream.FlushAsync(ct).ConfigureAwait(false);
         onRequestSent();
+
+        // The first read on its own, so a caller can tell an origin that closed without answering at
+        // all from one that failed part way through its answer: only the first is safe to retry.
+        if (!await upstream.Reader.HasMoreDataAsync(ct).ConfigureAwait(false))
+            throw new HttpParseException("Connection closed before a response was received.");
+        if (progress is not null) progress.ResponseStarted = true;
 
         // Head only. The body stays on the connection so the caller can decide whether to relay it
         // onward as it arrives or buffer it, which is a decision that has to be made here -- once

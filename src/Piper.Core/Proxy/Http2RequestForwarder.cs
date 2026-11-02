@@ -1,6 +1,5 @@
 using System.Diagnostics;
 using System.Net.Sockets;
-using System.Security.Authentication;
 using Piper.Core.Http;
 using Piper.Core.Http2;
 using Piper.Core.Sessions;
@@ -220,8 +219,10 @@ internal static class Http2RequestForwarder
                 }
             });
         }
-        catch (Exception ex) when (ex is SocketException or IOException or AuthenticationException
-                                       or HttpParseException or Http2ProtocolException or OperationCanceledException)
+        // Every failure, as on the HTTP/1.1 path: anything else (a host name too long for DNS, an object
+        // disposed under a race) would reset the stream with no answer and leave the session in
+        // SendingRequest for good.
+        catch (Exception ex)
         {
             var detail = ProxyServer.Describe(ex);
             var failure = ex is ProxyLoopException loop
