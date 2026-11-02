@@ -272,7 +272,13 @@ Close other programs first, use `--wait-quiet 10`, and report the median and ran
   its first byte or sitting between kept-alive requests; there is no per-address quota, because
   every local process connects from 127.0.0.1. A connection's first byte must arrive within
   `RequestHeadTimeout` (30 s); from that first byte, the request line and headers have a further
-  `RequestHeadTimeout` in total (so dripping bytes does not help) and at most 64 KB. Only a
+  `RequestHeadTimeout` in total (so dripping bytes does not help) and at most 64 KB and 200 headers
+  (past that a `431`, or a `414` for a request line that long). A header name must be a token and a
+  value may not hold a CR or NUL, the rules HTTP/2 and HTTP/3 apply too: a request that breaks them
+  gets a `400` and a failed session, and such a response from an origin is a `502`; obsolete line
+  folding is joined with a space. The Composer (what it sends and the response it shows), SAZ import
+  and AutoResponder response files keep such headers as written. A chunked body's size lines may
+  carry 16 KB of extensions in total and its trailers 64 KB (`400` and `431` past them). Only a
   connection reused for a further request waits `IdleTimeout` (120 s) for its next one. A body may
   pause for at most `IdleTimeout` and must deliver `MinRequestBodyBytesPerWindow` (1,024) bytes in
   each such window (or the rest of the body, when less is left, with whatever arrived along with the

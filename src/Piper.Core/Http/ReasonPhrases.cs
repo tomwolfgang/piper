@@ -20,6 +20,7 @@ public static class ReasonPhrases
         [405] = "Method Not Allowed", [406] = "Not Acceptable", [408] = "Request Timeout", [409] = "Conflict",
         [410] = "Gone", [412] = "Precondition Failed", [413] = "Payload Too Large", [414] = "URI Too Long",
         [415] = "Unsupported Media Type", [418] = "I'm a teapot", [429] = "Too Many Requests",
+        [431] = "Request Header Fields Too Large",
         [500] = "Internal Server Error", [501] = "Not Implemented", [502] = "Bad Gateway",
         [503] = "Service Unavailable", [504] = "Gateway Timeout",
     };

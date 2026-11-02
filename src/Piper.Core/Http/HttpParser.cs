@@ -53,10 +53,19 @@ public static class HttpParser
         // Tolerate leading blank lines between pipelined requests (RFC 9112 2.2), within the head's budget.
         do
         {
-            line = await reader.ReadLineAsync(ct).ConfigureAwait(false);
+            try
+            {
+                line = await reader.ReadLineAsync(ct, MaxRequestHeadBytes - consumed - 2).ConfigureAwait(false);
+            }
+            catch (HttpLineTooLongException)
+            {
+                // Almost always a long URI, which has a status of its own (RFC 9110 15.5.15).
+                throw new HttpTooLargeException($"Request line exceeded the {MaxRequestHeadBytes} byte head limit.", 414);
+            }
             if (line is null) return null;
             consumed += line.Length + 2;
-            if (consumed > MaxRequestHeadBytes) throw new HttpParseException($"Request head exceeded {MaxRequestHeadBytes} bytes.");
+            if (consumed > MaxRequestHeadBytes)
+                throw new HttpTooLargeException($"Request head exceeded {MaxRequestHeadBytes} bytes.", 431);
         } while (line.Length == 0);
 
         if (!HttpSyntax.TryParseRequestLine(line, lenient: false, "HTTP/1.0", out var start, out var startError))
@@ -69,15 +78,19 @@ public static class HttpParser
             HttpVersion = start.Version,
         };
 
-        request.Headers = await ReadHeadersAsync(reader, ct, MaxRequestHeadBytes - consumed, "Request").ConfigureAwait(false);
+        request.Headers = await ReadHeadersAsync(
+            reader, ct, MaxRequestHeadBytes - consumed, "Request", HeaderRules.Request).ConfigureAwait(false);
         request.Url = ResolveUrl(request);
         return request;
     }
 
     /// <summary>Reads a response head and body. <paramref name="requestMethod"/> is needed because HEAD has no body.</summary>
-    public static async Task<HttpResponseData> ReadResponseAsync(HttpStreamReader reader, string requestMethod, CancellationToken ct)
+    /// <param name="lenientFields">Keep header names and values the proxy path refuses (see
+    /// <see cref="ReadResponseHeadAsync"/>). Only for a response that is shown, never relayed.</param>
+    public static async Task<HttpResponseData> ReadResponseAsync(
+        HttpStreamReader reader, string requestMethod, CancellationToken ct, bool lenientFields = false)
     {
-        var (response, body) = await ReadResponseHeadAsync(reader, requestMethod, ct).ConfigureAwait(false);
+        var (response, body) = await ReadResponseHeadAsync(reader, requestMethod, ct, lenientFields).ConfigureAwait(false);
         response.Body = await ReadBodyAsync(reader, body, ct).ConfigureAwait(false);
         return response;
     }
@@ -90,8 +103,14 @@ public static class HttpParser
     /// This is the point at which a caller still has a free choice between buffering the body and
     /// relaying it onward as it arrives; see <see cref="HttpBodyDescriptor"/>.
     /// </remarks>
+    /// <param name="lenientFields">
+    /// False (the proxy path): a header name that is not a token, or a CR or NUL in a value, is a
+    /// <see cref="HttpParseException"/>, because the head is relayed to a client that may read those
+    /// bytes differently from Piper. True only for a response that is shown and never relayed (the
+    /// Composer's), which keeps them as the origin sent them. The framing rules apply either way.
+    /// </param>
     public static async Task<(HttpResponseData Head, HttpBodyDescriptor Body)> ReadResponseHeadAsync(
-        HttpStreamReader reader, string requestMethod, CancellationToken ct)
+        HttpStreamReader reader, string requestMethod, CancellationToken ct, bool lenientFields = false)
     {
         // A loop rather than recursion: an origin that never stops sending 1xx would otherwise grow
         // the stack until the process dies on an uncatchable StackOverflowException.
@@ -119,7 +138,8 @@ public static class HttpParser
             };
 
             response.Headers = await ReadHeadersAsync(
-                reader, ct, MaxResponseHeadBytes - line.Length - 2, "Response").ConfigureAwait(false);
+                reader, ct, MaxResponseHeadBytes - line.Length - 2, "Response",
+                lenientFields ? HeaderRules.LenientFields : HeaderRules.Response).ConfigureAwait(false);
 
             // 1xx are interim: consume and read the real response that follows. 101 is the
             // exception -- it shares the 1xx range but is final, because it hands the connection
@@ -220,21 +240,32 @@ public static class HttpParser
     }
 
     /// <summary>Reads header lines up to the blank line, within <paramref name="budget"/> bytes in
-    /// total (folded lines included) and <see cref="HttpSyntax.MaxHeaderCount"/> headers.</summary>
+    /// total (folded lines included) and <see cref="HttpSyntax.MaxHeaderCount"/> headers. Going past
+    /// either is an <see cref="HttpTooLargeException"/> (431); a field the rules refuse is a plain
+    /// <see cref="HttpParseException"/> (400).</summary>
     private static async Task<HeaderCollection> ReadHeadersAsync(
-        HttpStreamReader reader, CancellationToken ct, long budget, string what)
+        HttpStreamReader reader, CancellationToken ct, int budget, string what, HeaderRules rules)
     {
-        var builder = new HeaderBlockBuilder(lenient: false);
+        var builder = new HeaderBlockBuilder(rules);
         while (true)
         {
-            var line = await reader.ReadLineAsync(ct).ConfigureAwait(false);
+            string? line;
+            try
+            {
+                line = await reader.ReadLineAsync(ct, budget - 2).ConfigureAwait(false);
+            }
+            catch (HttpLineTooLongException)
+            {
+                throw new HttpTooLargeException($"{what} head exceeded its size limit.", 431);
+            }
             if (line is null) throw new HttpPeerClosedException("Connection closed inside the header block.");
             if (line.Length == 0) return builder.Complete();
 
             budget -= line.Length + 2;
-            if (budget < 0) throw new HttpParseException($"{what} head exceeded its size limit.");
+            if (budget < 0) throw new HttpTooLargeException($"{what} head exceeded its size limit.", 431);
 
-            if (builder.AddLine(line) is { } problem) throw new HttpParseException(problem);
+            if (builder.AddLine(line) is { } problem)
+                throw problem == HeaderBlockBuilder.TooManyHeaders ? new HttpTooLargeException(problem, 431) : new HttpParseException(problem);
         }
     }
 
@@ -261,10 +292,8 @@ public static class HttpParser
                 return await ReadChunkedAsync(reader, limit, ct).ConfigureAwait(false);
 
             case HttpBodyFraming.Length:
-                // A length no array can hold stays the parse error it has always been (400); one an array
-                // could hold but the limit does not allow is a 413.
-                if (body.Length > Array.MaxLength)
-                    throw new HttpParseException($"Body of {body.Length} bytes is more than can be held.");
+                // A well-formed length over the cap is a 413 (RFC 9110 15.5.14), however large: one no
+                // array could hold is over the cap too (the limit is clamped to Array.MaxLength above).
                 if (body.Length > limit)
                     throw new HttpBodyTooLargeException($"Body of {body.Length} bytes exceeds the {limit} byte cap.");
                 return await reader.ReadExactlyAsync((int)body.Length, ct).ConfigureAwait(false);
@@ -278,10 +307,12 @@ public static class HttpParser
     {
         // Each chunk is read straight into the one array being built, not into one of its own.
         var body = new BodyBuffer(ceiling: (int)limit);
+        var extensionBytes = 0;
         while (true)
         {
-            var sizeLine = await reader.ReadLineAsync(ct).ConfigureAwait(false);
+            var sizeLine = await ReadChunkSizeLineAsync(reader, extensionBytes, ct).ConfigureAwait(false);
             if (sizeLine is null) throw new HttpPeerClosedException("Connection closed inside a chunked body.");
+            extensionBytes += ChunkLineExtensionBytes(sizeLine);
 
             if (!HttpSyntax.TryParseChunkSize(sizeLine, out var chunkSize))
                 throw new HttpParseException($"Bad chunk size: '{Truncate(sizeLine)}'");
@@ -293,8 +324,7 @@ public static class HttpParser
                 return body.ToArray();
             }
 
-            if (chunkSize > Array.MaxLength)
-                throw new HttpParseException($"Chunk of {chunkSize} bytes is more than can be held.");
+            // Also a chunk no array could hold: the limit is clamped to Array.MaxLength.
             if (body.Length + chunkSize > limit)
                 throw new HttpBodyTooLargeException($"Chunked body exceeded the {limit} byte cap.");
 
@@ -336,20 +366,76 @@ public static class HttpParser
     }
 
     /// <summary>
-    /// Reads and discards a chunked body's trailer section. Bounded like a header block, or an
-    /// origin could keep sending trailer lines for ever and the body would never end.
+    /// Reads and discards a chunked body's trailer section. Bounded like a header block, by lines and
+    /// by bytes, or a peer could keep sending trailer lines for ever and the body would never end.
+    /// Going past either is an <see cref="HttpTooLargeException"/> (431: trailers are fields).
     /// </summary>
     internal static async Task SkipTrailersAsync(HttpStreamReader reader, CancellationToken ct)
     {
+        var budget = MaxTrailerBytes;
         for (var lines = 0; ; lines++)
         {
-            if (lines > MaxTrailerLines) throw new HttpParseException("Too many trailer lines.");
-            var trailer = await reader.ReadLineAsync(ct).ConfigureAwait(false);
+            if (lines > MaxTrailerLines) throw new HttpTooLargeException("Too many trailer lines.", 431);
+            string? trailer;
+            try
+            {
+                // A blank line still fits when the budget is spent: it is the end of the section.
+                trailer = await reader.ReadLineAsync(ct, Math.Max(budget - 2, 0)).ConfigureAwait(false);
+            }
+            catch (HttpLineTooLongException)
+            {
+                throw new HttpTooLargeException($"Trailers exceeded {MaxTrailerBytes} bytes.", 431);
+            }
             if (trailer is null || trailer.Length == 0) return;
+            budget -= trailer.Length + 2;
+            if (budget < 0) throw new HttpTooLargeException($"Trailers exceeded {MaxTrailerBytes} bytes.", 431);
         }
     }
 
     private const int MaxTrailerLines = 200;
+
+    /// <summary>The most a trailer section may add up to, each line's CRLF included (the blank line
+    /// ending it is not counted). As much as a request head: trailers are fields too, and the line
+    /// cap alone allowed 200 lines of 64 KiB each.</summary>
+    internal const int MaxTrailerBytes = 64 * 1024;
+
+    /// <summary>
+    /// What a chunk-size line may hold before it starts to count against
+    /// <see cref="MaxChunkExtensionBytes"/>: room for any size Piper accepts (11 hex digits for
+    /// <see cref="HttpSyntax.MaxChunkSize"/>) with leading zeros and padding to spare. A long stream
+    /// of ordinary chunks (server-sent events, a long poll) therefore never runs into the cap.
+    /// </summary>
+    internal const int ChunkLineFreeBytes = 32;
+
+    /// <summary>
+    /// The most one chunked body's size lines may hold beyond <see cref="ChunkLineFreeBytes"/> each,
+    /// added up over the whole body: chunk extensions (RFC 9112 7.1.1), padding and leading zeros.
+    /// Nothing uses extensions in practice and Piper discards them, while each line could carry 64 KiB
+    /// of them, so a body of one-byte chunks made the parser read 64 KiB of nothing per byte.
+    /// </summary>
+    internal const int MaxChunkExtensionBytes = 16 * 1024;
+
+    /// <summary>
+    /// Reads a chunk-size line within what is left of <see cref="MaxChunkExtensionBytes"/> after
+    /// <paramref name="extensionBytesSoFar"/>, so an over-long line is refused when it gets there.
+    /// Shared by <see cref="ReadBodyAsync"/> and <see cref="HttpBodyRelay"/>.
+    /// </summary>
+    internal static async ValueTask<string?> ReadChunkSizeLineAsync(
+        HttpStreamReader reader, int extensionBytesSoFar, CancellationToken ct)
+    {
+        try
+        {
+            return await reader.ReadLineAsync(ct, ChunkLineFreeBytes + MaxChunkExtensionBytes - extensionBytesSoFar)
+                .ConfigureAwait(false);
+        }
+        catch (HttpLineTooLongException)
+        {
+            throw new HttpParseException($"Chunk extensions exceeded {MaxChunkExtensionBytes} bytes in one body.");
+        }
+    }
+
+    /// <summary>What a chunk-size line costs against <see cref="MaxChunkExtensionBytes"/>.</summary>
+    internal static int ChunkLineExtensionBytes(string sizeLine) => Math.Max(sizeLine.Length - ChunkLineFreeBytes, 0);
 
     internal static string Truncate(string value) => value.Length <= 120 ? value : value[..120] + "...";
 }

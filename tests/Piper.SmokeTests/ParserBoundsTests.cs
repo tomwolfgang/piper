@@ -45,7 +45,9 @@ internal static class ParserBoundsTests
             foreach (var size in sizes)
             {
                 var wire = $"POST / HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n{size}\r\nabc\r\n0\r\n\r\n";
-                runner.AreEqual("HttpParseException", await ExceptionNameAsync(async () =>
+                // A well-formed size over the body cap is a body too large (413), still a parse error.
+                var tooLarge = size is "FFFFFFFF" or "80000000" or "7FFFFFFF" or "100000000";
+                runner.AreEqual(tooLarge ? "HttpBodyTooLargeException" : "HttpParseException", await ExceptionNameAsync(async () =>
                 {
                     using var reader = ReaderFor(wire);
                     await HttpParser.ReadRequestAsync(reader, CancellationToken.None);
@@ -112,7 +114,9 @@ internal static class ParserBoundsTests
             });
             using var harness = new Harness(ca, lines);
 
-            foreach (var size in new[] { "FFFFFFFF", "80000000", "-1", "zz", "FFFFFFFFFFFFFFFF" })
+            // A well-formed size over the body cap (4 GiB, 2 GiB) is a body too large, 413 (RFC 9110
+            // 15.5.14); one that is not a size at all is a 400.
+            foreach (var (size, status) in new[] { ("FFFFFFFF", 413), ("80000000", 413), ("-1", 400), ("zz", 400), ("FFFFFFFFFFFFFFFF", 400) })
             {
                 using var client = await ConnectAsync(harness.Port);
                 await WriteAsync(client.GetStream(),
@@ -120,15 +124,15 @@ internal static class ParserBoundsTests
                     + $"Transfer-Encoding: chunked\r\n\r\n{size}\r\nabc");
                 var reply = await ReadAsync(client.GetStream(), null, Patience);
 
-                runner.IsTrue(reply.Text.StartsWith("HTTP/1.1 400", StringComparison.Ordinal),
-                    $"chunk size '{size}' is answered 400 (got: {FirstLine(reply.Text)})");
+                runner.IsTrue(reply.Text.StartsWith($"HTTP/1.1 {status}", StringComparison.Ordinal),
+                    $"chunk size '{size}' is answered {status} (got: {FirstLine(reply.Text)})");
                 runner.IsTrue(reply.Eof, $"and the connection is closed after chunk size '{size}'");
             }
 
             runner.IsTrue(await Poll.UntilAsync(() => harness.Store.Snapshot().Count(s => s.State == SessionState.Failed) == 5),
                 $"each of them left a failed session ({harness.Store.Snapshot().Length} sessions, "
                 + $"{harness.Store.Snapshot().Count(s => s.State == SessionState.Failed)} failed)");
-            var failed = harness.Store.Snapshot().First(s => s.State == SessionState.Failed);
+            var failed = harness.Store.Snapshot().First(s => s.State == SessionState.Failed && s.Response?.StatusCode == 400);
             runner.AreEqual("POST", failed.Request?.Method,"the failed session carries the request");
             runner.AreEqual(400, failed.Response?.StatusCode ?? 0, "and the 400 that was sent");
             runner.IsTrue(!string.IsNullOrEmpty(failed.Error), "and says why");
@@ -218,12 +222,12 @@ internal static class ParserBoundsTests
         await runner.RunAsync("the stream parser and the SAZ importer refuse too many headers too", async () =>
         {
             var overCap = HeaderBlock(Cap + 1);
-            runner.AreEqual("HttpParseException", await ExceptionNameAsync(async () =>
+            runner.AreEqual("HttpTooLargeException", await ExceptionNameAsync(async () =>
             {
                 using var reader = ReaderFor("GET /x HTTP/1.1\r\nHost: h\r\n" + overCap + "\r\n");
                 await HttpParser.ReadRequestAsync(reader, CancellationToken.None);
             }), "a request with too many headers");
-            runner.AreEqual("HttpParseException", await ExceptionNameAsync(async () =>
+            runner.AreEqual("HttpTooLargeException", await ExceptionNameAsync(async () =>
             {
                 using var reader = ReaderFor("HTTP/1.1 200 OK\r\n" + overCap + "\r\n");
                 await HttpParser.ReadResponseAsync(reader, "GET", CancellationToken.None);
@@ -295,13 +299,13 @@ internal static class ParserBoundsTests
             watch.Stop();
             runner.IsTrue(watch.ElapsedMilliseconds < 15_000, $"and in bounded time ({watch.ElapsedMilliseconds} ms)");
 
-            runner.AreEqual("HttpParseException", await ExceptionNameAsync(async () =>
+            runner.AreEqual("HttpTooLargeException", await ExceptionNameAsync(async () =>
             {
                 using var reader = ReaderFor("HTTP/1.1 200 OK\r\nX-Long: a\r\n" + string.Concat(Enumerable.Repeat(" a\r\n", 200_000)) + "\r\n");
                 await HttpParser.ReadResponseAsync(reader, "GET", CancellationToken.None);
             }), "a response head past the cap is refused");
 
-            runner.AreEqual("HttpParseException", await ExceptionNameAsync(async () =>
+            runner.AreEqual("HttpTooLargeException", await ExceptionNameAsync(async () =>
             {
                 using var reader = ReaderFor("GET / HTTP/1.1\r\nX-Long: a\r\n" + string.Concat(Enumerable.Repeat(" a\r\n", 40_000)) + "\r\n");
                 await HttpParser.ReadRequestAsync(reader, CancellationToken.None);
@@ -490,25 +494,26 @@ internal static class ParserBoundsTests
 
             var bad = new[]
             {
-                "GET /a b HTTP/1.1\r\nHost: h\r\n\r\n",
-                "G@T / HTTP/1.1\r\nHost: h\r\n\r\n",
-                "GET / HTTP/x\r\nHost: h\r\n\r\n",
-                "GET / HTTP/1.1\r\n" + HeaderBlock(Cap + 1) + "\r\n",
+                ("GET /a b HTTP/1.1\r\nHost: h\r\n\r\n", 400),
+                ("G@T / HTTP/1.1\r\nHost: h\r\n\r\n", 400),
+                ("GET / HTTP/x\r\nHost: h\r\n\r\n", 400),
+                // Too many headers is fields too large (RFC 6585 5), not malformed.
+                ("GET / HTTP/1.1\r\n" + HeaderBlock(Cap + 1) + "\r\n", 431),
             };
-            foreach (var wire in bad)
+            foreach (var (wire, status) in bad)
             {
                 using var client = await ConnectAsync(harness.Port);
                 await WriteAsync(client.GetStream(), wire);
                 var reply = await ReadAsync(client.GetStream(), null, Patience);
-                runner.IsTrue(reply.Text.StartsWith("HTTP/1.1 400", StringComparison.Ordinal),
-                    $"'{Show(wire)}' is answered 400 (got: {FirstLine(reply.Text)})");
+                runner.IsTrue(reply.Text.StartsWith($"HTTP/1.1 {status}", StringComparison.Ordinal),
+                    $"'{Show(wire)}' is answered {status} (got: {FirstLine(reply.Text)})");
                 runner.IsTrue(reply.Eof, "and the connection is closed");
             }
 
             runner.IsTrue(await Poll.UntilAsync(() => harness.Store.Snapshot().Count(s => s.State == SessionState.Failed) == bad.Length),
                 "each malformed head is recorded as a failed session");
-            runner.IsTrue(harness.Store.Snapshot().Where(s => s.State == SessionState.Failed).All(s => s.Request is not null && s.Response?.StatusCode == 400),
-                "with the 400 that was sent");
+            runner.IsTrue(harness.Store.Snapshot().Where(s => s.State == SessionState.Failed).All(s => s.Request is not null && s.Response?.StatusCode is 400 or 431),
+                "with the status that was sent");
         });
 
         await runner.RunAsync("an HTTP/1 origin's 999 reaches the client and the session list as sent", async () =>
@@ -624,20 +629,21 @@ internal static class ParserBoundsTests
             using var harness = new Harness(ca);
             var attempts = new[]
             {
-                "Content-Length: 5\r\nContent-Length: 40",
-                "Content-Length: +5",
-                "Content-Length: 5\r\nTransfer-Encoding: chunked",
-                "Content-Length: 999999999999",
+                ("Content-Length: 5\r\nContent-Length: 40", 400),
+                ("Content-Length: +5", 400),
+                ("Content-Length: 5\r\nTransfer-Encoding: chunked", 400),
+                // Well-formed, just over the body cap: 413 (RFC 9110 15.5.14).
+                ("Content-Length: 999999999999", 413),
             };
-            foreach (var headers in attempts)
+            foreach (var (headers, status) in attempts)
             {
                 using var client = await ConnectAsync(harness.Port);
                 await WriteAsync(client.GetStream(),
                     $"POST http://127.0.0.1:{origin.Port}/s HTTP/1.1\r\nHost: 127.0.0.1:{origin.Port}\r\n{headers}\r\n\r\nhello"
                     + Get(origin.Port, "/smuggled"));
                 var reply = await ReadAsync(client.GetStream(), null, Patience);
-                runner.IsTrue(reply.Text.StartsWith("HTTP/1.1 400", StringComparison.Ordinal),
-                    $"'{headers.Replace("\r\n", " | ")}' is answered 400 (got: {FirstLine(reply.Text)})");
+                runner.IsTrue(reply.Text.StartsWith($"HTTP/1.1 {status}", StringComparison.Ordinal),
+                    $"'{headers.Replace("\r\n", " | ")}' is answered {status} (got: {FirstLine(reply.Text)})");
                 runner.IsTrue(reply.Eof && !reply.Text.Contains("200 OK", StringComparison.Ordinal),
                     "the bytes after it are not served as a second request");
             }
@@ -657,19 +663,19 @@ internal static class ParserBoundsTests
 
     private static string Show(string text) => text.Length <= 24 ? text : text[..24] + "...";
 
-    private static string ExceptionName(Action action)
+    internal static string ExceptionName(Action action)
     {
         try { action(); return "(none)"; }
         catch (Exception ex) { return ex.GetType().Name; }
     }
 
-    private static async Task<string> ExceptionNameAsync(Func<Task> action)
+    internal static async Task<string> ExceptionNameAsync(Func<Task> action)
     {
         try { await action(); return "(none)"; }
         catch (Exception ex) { return ex.GetType().Name; }
     }
 
-    private sealed class Harness : IDisposable
+    internal sealed class Harness : IDisposable
     {
         public Harness(CertificateAuthority ca, System.Collections.Concurrent.ConcurrentQueue<string>? log = null)
         {
@@ -687,25 +693,25 @@ internal static class ParserBoundsTests
         public void Dispose() => Proxy.StopAsync().GetAwaiter().GetResult();
     }
 
-    private static string Get(int port, string path) =>
+    internal static string Get(int port, string path) =>
         $"GET http://127.0.0.1:{port}{path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n";
 
-    private static async Task<TcpClient> ConnectAsync(int port)
+    internal static async Task<TcpClient> ConnectAsync(int port)
     {
         var client = new TcpClient { NoDelay = true };
         await client.ConnectAsync(IPAddress.Loopback, port);
         return client;
     }
 
-    private static Task WriteAsync(Stream stream, string text) =>
+    internal static Task WriteAsync(Stream stream, string text) =>
         stream.WriteAsync(Encoding.Latin1.GetBytes(text)).AsTask();
 
-    private static string FirstLine(string text) =>
+    internal static string FirstLine(string text) =>
         text.Split('\n', 2)[0].TrimEnd('\r') is { Length: > 0 } line ? line : "(nothing)";
 
     /// <summary>Reads until <paramref name="until"/> has arrived (or, when null, until the peer closes),
     /// the limit passes, or the connection ends. Never throws on a closed peer.</summary>
-    private static async Task<(string Text, bool Eof)> ReadAsync(Stream stream, string? until, TimeSpan limit)
+    internal static async Task<(string Text, bool Eof)> ReadAsync(Stream stream, string? until, TimeSpan limit)
     {
         using var cts = new CancellationTokenSource(limit);
         var text = new StringBuilder();
