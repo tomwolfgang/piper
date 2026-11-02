@@ -147,8 +147,8 @@ internal static class UpstreamRequestSender
     /// <summary>
     /// Joins the <c>cookie</c> fields of an HTTP/2 or HTTP/3 request into the single field HTTP/1.1
     /// expects, in their original order and at the position of the first one. Browsers split the
-    /// cookie into one field per pair ("crumbs") so each compresses on its own, and RFC 9113 Â§8.2.3
-    /// and RFC 9114 Â§4.2.1 require the crumbs to be concatenated with "; " before the request
+    /// cookie into one field per pair ("crumbs") so each compresses on its own, and RFC 9113 §8.2.3
+    /// and RFC 9114 §4.2.1 require the crumbs to be concatenated with "; " before the request
     /// reaches an HTTP/1.1 context. Sent as separate lines, an origin may read only the first one, or
     /// join them with commas and misread every cookie after it.
     /// </summary>
