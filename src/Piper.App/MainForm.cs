@@ -1665,7 +1665,7 @@ public sealed partial class MainForm : Form, IMessageFilter
             var removal = RootRemoval.RemoveIfConfirmed(
                 () => MessageBox.Show(this, Strings.Certificates.RemoveBody, Strings.Certificates.RemoveCaption,
                     MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) == DialogResult.Yes,
-                TrustStore.Uninstall);
+                () => TrustStore.Uninstall(_ca.RootCertificate));
             if (removal is not { } removed) return;
 
             RefreshTrustState();

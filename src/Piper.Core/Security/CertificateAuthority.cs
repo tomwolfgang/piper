@@ -26,6 +26,12 @@ public sealed class CertificateAuthority : IDisposable
     /// </summary>
     public const string RootCommonName = "Piper Root CA - DO NOT TRUST";
 
+    /// <summary>The full subject of the root this version makes.</summary>
+    internal const string RootSubject = $"CN={RootCommonName}, O=Piper, OU=Generated locally";
+
+    /// <summary>The subject of the roots Piper made before <see cref="RootCommonName"/> was introduced.</summary>
+    internal const string LegacyRootSubject = "CN=Piper Root CA, O=Piper, OU=Generated locally - do not trust elsewhere";
+
     private readonly ConcurrentDictionary<string, X509Certificate2> _leafCache = new(StringComparer.OrdinalIgnoreCase);
     private readonly object _mintLock = new();
     private bool _disposed;
@@ -101,7 +107,7 @@ public sealed class CertificateAuthority : IDisposable
     {
         using var rsa = RSA.Create(2048);
         var request = new CertificateRequest(
-            $"CN={RootCommonName}, O=Piper, OU=Generated locally",
+            RootSubject,
             rsa, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
 
         request.CertificateExtensions.Add(new X509BasicConstraintsExtension(true, false, 0, true));
