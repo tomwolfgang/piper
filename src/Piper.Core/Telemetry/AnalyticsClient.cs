@@ -281,8 +281,10 @@ public sealed class AnalyticsClient : IDisposable
         {
             try
             {
+                // Guarded because a missing directory throws DirectoryNotFoundException, an
+                // IOException, and nothing there is not a failure to erase.
                 if (File.Exists(path)) File.Delete(path);
-                return !File.Exists(path);
+                return true;
             }
             catch (IOException)
             {

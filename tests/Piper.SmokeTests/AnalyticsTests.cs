@@ -668,6 +668,7 @@ internal static class AnalyticsTests
             File.SetAttributes(temp.SettingsPath, FileAttributes.ReadOnly);
             try
             {
+                runner.AreEqual(false, client.SetEnabled(true), "an opt-in that did not persist is reported too");
                 runner.AreEqual(false, client.SetEnabled(false), "the opt-out reports that it did not persist");
                 runner.AreEqual(false, client.Settings.Enabled, "while this run still stops collecting");
             }

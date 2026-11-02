@@ -466,9 +466,9 @@ public sealed partial class MainForm : Form, IMessageFilter
         // Recorded either way, with this version: a yes is never asked again, and a no is asked
         // again only after the next update, never twice on the same version.
         Analytics.RecordNoticeShown(version);
-        AppendLog(optedIn ? Strings.Log.AnalyticsConsentOn
-            : persisted ? Strings.Log.AnalyticsConsentOff
-            : Strings.Log.AnalyticsOffNotPersisted);
+        AppendLog(!persisted ? (optedIn ? Strings.Log.AnalyticsOnNotPersisted : Strings.Log.AnalyticsOffNotPersisted)
+            : optedIn ? Strings.Log.AnalyticsConsentOn
+            : Strings.Log.AnalyticsConsentOff);
     }
 
     /// <summary>
@@ -932,9 +932,9 @@ public sealed partial class MainForm : Form, IMessageFilter
             // Logging success regardless would tell the user the opposite of the truth about a
             // privacy control, and the setting would be back to its old value next time they look.
             AppendLog(Analytics.SpoolPath is null ? Strings.Log.AnalyticsUnavailable
+                : !persisted ? (dialog.AnalyticsEnabled ? Strings.Log.AnalyticsOnNotPersisted : Strings.Log.AnalyticsOffNotPersisted)
                 : dialog.AnalyticsEnabled ? Strings.Log.AnalyticsOn
-                : persisted ? Strings.Log.AnalyticsOff
-                : Strings.Log.AnalyticsOffNotPersisted);
+                : Strings.Log.AnalyticsOff);
         }
 
         AppendLog(Strings.Log.ConfigurationsSaved);

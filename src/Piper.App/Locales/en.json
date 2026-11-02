@@ -256,6 +256,7 @@
     "analyticsOn": "Anonymous feedback is on.",
     "analyticsOff": "Anonymous feedback is off. The identifiers and any pending reports were discarded.",
     "analyticsOffNotPersisted": "Anonymous feedback is off for this session, but Piper could not save that choice or erase everything it stored. Check that the Piper folder in your local app data is not read-only or locked by another program; until then, Piper may ask again or resume sending the next time it starts.",
+    "analyticsOnNotPersisted": "Anonymous feedback is on for this session, but Piper could not save that choice. Check that the Piper folder in your local app data is not read-only or locked by another program; until then, it will be off again the next time Piper starts.",
     "analyticsUnavailable": "Anonymous feedback could not be changed: reporting failed to start for this session.",
 
     "globalUserAgentCleared": "Global User-Agent override cleared.",
