@@ -1311,7 +1311,7 @@ public sealed class ProxyServer : IAsyncDisposable
                     upstream = null;
                 }
 
-                if (upstream is null)
+                async Task<UpstreamConnection> ConnectUpstreamAsync()
                 {
                     var connectStart = stopwatch.Elapsed;
                     // An upgrade stays on HTTP/1.1: an h2 request has no Connection/Upgrade, so an origin
@@ -1319,14 +1319,38 @@ public sealed class ProxyServer : IAsyncDisposable
                     // speaks HTTP/1.1, and an h2 upstream is one-shot (below), so by default the origin
                     // is asked for HTTP/1.1 too and the slot's connection is kept for the next request.
                     var allowHttp2 = !isUpgrade && !_options.PreferHttp11UpstreamForHttp11Clients;
-                    upstream = await UpstreamConnection.ConnectAsync(
+                    var connected = await UpstreamConnection.ConnectAsync(
                         host, port, targetIsTls, _options, ct, allowHttp2).ConfigureAwait(false);
-                    slot.Connection = upstream;
+                    slot.Connection = connected;
                     session.ConnectTime = stopwatch.Elapsed - connectStart;
+                    session.ServerEndpoint = connected.RemoteEndpoint;
+                    return connected;
                 }
 
-                session.ServerEndpoint = upstream.RemoteEndpoint;
-                upstreamResponse = await UpstreamRequestSender.SendAsync(upstream, outbound, MarkSent, ct).ConfigureAwait(false);
+                var reused = upstream is not null;
+                if (upstream is null) upstream = await ConnectUpstreamAsync().ConfigureAwait(false);
+                else session.ServerEndpoint = upstream.RemoteEndpoint;
+
+                var progress = new UpstreamSendProgress();
+                try
+                {
+                    upstreamResponse = await UpstreamRequestSender.SendAsync(upstream, outbound, MarkSent, ct, progress)
+                        .ConfigureAwait(false);
+                }
+                catch (Exception ex) when (reused && progress.CanRetry(outbound.Method) && !ct.IsCancellationRequested
+                                           && ex is SocketException or IOException
+                                               or (HttpParseException and not HttpStalledException))
+                {
+                    // An origin may close an idle keep-alive connection at the moment the next request
+                    // reaches it, which no check beforehand can see. Clients retry that case on a fresh
+                    // connection (RFC 9112 9.3.1), and they would if Piper were not in the way, so Piper
+                    // does it for them: once, and only when the origin cannot have seen the request
+                    // twice or the client half an answer. Any failure on the fresh one is final.
+                    Log?.Invoke(this, $"Reused connection to {host}:{port} closed before answering ({ex.GetType().Name}); retrying {outbound.Method} once on a new one.");
+                    slot.Reset();
+                    upstream = await ConnectUpstreamAsync().ConfigureAwait(false);
+                    upstreamResponse = await UpstreamRequestSender.SendAsync(upstream, outbound, MarkSent, ct).ConfigureAwait(false);
+                }
 
                 // Http2ClientConnection is one-shot, so an h2 upstream can never be pooled. It is let
                 // go once the body has been relayed off it, not before.
@@ -1465,8 +1489,10 @@ public sealed class ProxyServer : IAsyncDisposable
 
             return !clientWantsClose && !serverWantsClose && !clientCloseAfterBody;
         }
-        catch (Exception ex) when (ex is SocketException or IOException or AuthenticationException
-                                       or HttpParseException or Http2ProtocolException or OperationCanceledException)
+        // Every failure, not only the network and protocol ones: anything else (a host name too long
+        // for DNS, an object disposed under a race) used to escape to the connection loop, which closed
+        // the client without an answer and left the session in SendingRequest for good.
+        catch (Exception ex)
         {
             session.State = SessionState.Failed;
             session.Error = Describe(ex);
