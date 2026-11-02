@@ -397,7 +397,7 @@ public static class HttpParser
     /// <summary>The most a trailer section may add up to, each line's CRLF included (the blank line
     /// ending it is not counted). As much as a request head: trailers are fields too, and the line
     /// cap alone allowed 200 lines of 64 KiB each.</summary>
-    internal const int MaxTrailerBytes = MaxRequestHeadBytes;
+    internal const int MaxTrailerBytes = 64 * 1024;
 
     /// <summary>
     /// What a chunk-size line may hold before it starts to count against

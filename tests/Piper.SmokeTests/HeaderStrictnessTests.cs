@@ -233,6 +233,10 @@ internal static class HeaderStrictnessTests
 
         await runner.RunAsync("chunk-size line bytes are capped per body, extensions and padding included", async () =>
         {
+            runner.AreEqual(ChunkLineFreeBytes, HttpParser.ChunkLineFreeBytes, "the free bytes per size line are the ones tested here");
+            runner.AreEqual(MaxChunkExtensionBytes, HttpParser.MaxChunkExtensionBytes, "and so is the extension cap");
+            runner.AreEqual(MaxTrailerBytes, HttpParser.MaxTrailerBytes, "and the trailer cap");
+
             // Four chunks whose lines carry exactly the cap between them, then the same plus one byte.
             var atCap = ChunkedBody(MaxChunkExtensionBytes / 4, MaxChunkExtensionBytes / 4, MaxChunkExtensionBytes / 4, MaxChunkExtensionBytes / 4);
             var overCap = ChunkedBody(MaxChunkExtensionBytes / 4, MaxChunkExtensionBytes / 4, MaxChunkExtensionBytes / 4, MaxChunkExtensionBytes / 4 + 1);
