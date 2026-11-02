@@ -19,6 +19,7 @@ internal static class RootKeyAtRestTests
         await RunFreshRootAsync(runner);
         await RunMigrationAsync(runner);
         await RunInterruptedMigrationAsync(runner);
+        await RunMigrationReadBackFailsAsync(runner);
         await RunAfterDowngradeAsync(runner);
         await RunNotOpenableWithOldPasswordAsync(runner);
         await RunTruncatedLegacyAsync(runner);
@@ -112,6 +113,39 @@ internal static class RootKeyAtRestTests
             runner.AreEqual(legacy.Thumbprint, ca.RootCertificate.Thumbprint, "the same root is loaded");
             runner.IsTrue(ca.Replacement is null, "nothing is reported");
             runner.IsTrue(!File.Exists(LegacyPath(directory)), "the old file is removed this time");
+        }
+        finally
+        {
+            Delete(directory);
+        }
+
+        return Task.CompletedTask;
+    });
+
+    private static Task RunMigrationReadBackFailsAsync(TestRunner runner) => runner.RunAsync("a migrated key that does not read back keeps the old file and the same root", () =>
+    {
+        var directory = NewDirectory();
+        try
+        {
+            using var legacy = NewRoot(CurrentSubject);
+            File.WriteAllBytes(LegacyPath(directory), legacy.Export(X509ContentType.Pfx, LegacyPassword));
+
+            RootKeyStore.AfterMigrationWriteForTests.Value = path => File.WriteAllText(path, "torn");
+            try
+            {
+                using var ca = CertificateAuthority.LoadOrCreate(directory);
+                runner.AreEqual(legacy.Thumbprint, ca.RootCertificate.Thumbprint, "the old root is still used this run");
+                runner.IsTrue(ca.Replacement is null, "nothing is reported as replaced");
+                runner.IsTrue(File.Exists(LegacyPath(directory)), "the old file is kept so the migration can run again");
+            }
+            finally
+            {
+                RootKeyStore.AfterMigrationWriteForTests.Value = null;
+            }
+
+            using var next = CertificateAuthority.LoadOrCreate(directory);
+            runner.AreEqual(legacy.Thumbprint, next.RootCertificate.Thumbprint, "the next run migrates the same root");
+            runner.IsTrue(!File.Exists(LegacyPath(directory)), "and then removes the old file");
         }
         finally
         {

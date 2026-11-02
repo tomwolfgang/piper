@@ -91,10 +91,12 @@ internal static class RootKeyStore
         switch (TryRead(keyPath, LoadProtected, isUsable, out var saved))
         {
             case Outcome.Usable:
-                // A rejected old file beside a good key is obsolete; it is weakly protected, so it goes.
-                if (rejected) File.Delete(legacyPath);
-                EnsurePublicCertificate(cerPath, saved!);
-                return saved!;
+                return DisposeIfThrows(saved!, loaded =>
+                {
+                    // A rejected old file beside a good key is obsolete; it is weakly protected, so it goes.
+                    if (rejected) File.Delete(legacyPath);
+                    EnsurePublicCertificate(cerPath, loaded);
+                });
             case Outcome.Unreadable:
                 if (SetAside(keyPath) is { } keyAside) setAside.Add(keyAside);
                 break;
@@ -106,12 +108,14 @@ internal static class RootKeyStore
         var pfx = createRootPfx();
         try
         {
-            var root = LoadUnprotectedPfx(pfx);
-            // The public certificate first: until the key is swapped in, the old key (if any) is still
-            // what loads, and a run that dies here simply makes a new root again next time.
-            WriteAtomic(cerPath, Encoding.ASCII.GetBytes(CertificateAuthority.ExportPem(root)));
-            WriteAtomic(keyPath, Protect(pfx));
-            if (rejected && File.Exists(legacyPath)) File.Delete(legacyPath);
+            var root = DisposeIfThrows(LoadUnprotectedPfx(pfx), created =>
+            {
+                // The public certificate first: until the key is swapped in, the old key (if any) is still
+                // what loads, and a run that dies here simply makes a new root again next time.
+                WriteAtomic(cerPath, Encoding.ASCII.GetBytes(CertificateAuthority.ExportPem(created)));
+                WriteAtomic(keyPath, Protect(pfx));
+                if (rejected && File.Exists(legacyPath)) File.Delete(legacyPath);
+            });
 
             replacement = setAside.Count > 0 ? new RootReplacement(RootReplacementReason.Unreadable, setAside)
                 : rejected ? new RootReplacement(RootReplacementReason.Replaced, [])
@@ -153,12 +157,10 @@ internal static class RootKeyStore
             }
 
             WriteAtomic(keyPath, Protect(pfx));
+            AfterMigrationWriteForTests.Value?.Invoke(keyPath);
 
             if (TryRead(keyPath, LoadProtected, isUsable, out var saved) == Outcome.Usable && saved!.Thumbprint == legacy.Thumbprint)
-            {
-                File.Delete(legacyPath);
-                return saved;
-            }
+                return DisposeIfThrows(saved, _ => File.Delete(legacyPath));
 
             // The file just written does not read back as the same root. Keep the old file so the
             // migration runs again next time, and use the root it holds.
@@ -168,6 +170,27 @@ internal static class RootKeyStore
         finally
         {
             CryptographicOperations.ZeroMemory(pfx);
+        }
+    }
+
+    /// <summary>
+    /// Test seam: runs between writing the migrated key and reading it back, so a test can make the
+    /// read-back fail the way a concurrent writer or a bad disk would. Null outside tests.
+    /// </summary>
+    internal static readonly AsyncLocal<Action<string>?> AfterMigrationWriteForTests = new();
+
+    /// <summary>Runs <paramref name="then"/> and returns <paramref name="certificate"/>, disposing it if <paramref name="then"/> throws.</summary>
+    private static X509Certificate2 DisposeIfThrows(X509Certificate2 certificate, Action<X509Certificate2> then)
+    {
+        try
+        {
+            then(certificate);
+            return certificate;
+        }
+        catch
+        {
+            certificate.Dispose();
+            throw;
         }
     }
 
