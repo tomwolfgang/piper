@@ -76,9 +76,15 @@ existing proxy settings are saved and restored when you turn it off or close the
 ### HTTPS
 
 Decrypting HTTPS needs the generated root CA trusted, via **Tools > Configurations > HTTPS >
-Trust root certificate**. Read the dialog before accepting: the private key sits unencrypted in
-`%LOCALAPPDATA%\Piper\Certificates`, so anything able to read it can impersonate any
-TLS site to your Windows account. **Remove trusted root** on the same page reverses it (after a
+Trust root certificate**. Read the dialog before accepting: anything holding the root's private key
+can impersonate any TLS site to your Windows account. The key sits in
+`%LOCALAPPDATA%\Piper\Certificates`, in a folder only your Windows account can open, encrypted with
+Windows DPAPI to your account, so a copy taken to another account or machine is useless - but any
+program running as you can still read it. A key saved by an older Piper is converted on first start
+and keeps the same root, so a root you already trust keeps working (an older Piper cannot read the
+converted key, so going back to one makes a new root you have to trust). If the saved key cannot be read,
+Piper makes a new root, says so, and keeps the unreadable file next to it; you then trust the new
+root again. **Remove trusted root** on the same page reverses it (after a
 confirmation), and that page shows whether the root is trusted right now.
 
 Nothing installs the root implicitly - it is only ever a deliberate click. While the root is not

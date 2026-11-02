@@ -124,6 +124,30 @@ public sealed partial class MainForm
     }
 
     /// <summary>
+    /// Tells the user, once at startup, that the saved root had to be replaced. Whatever trusted the
+    /// old root now rejects Piper's certificates, and with Don't ask again on nothing else would say
+    /// so. Shown before the trust prompt so the prompt reads as the fix.
+    /// </summary>
+    private void ReportRootReplacement()
+    {
+        if (_ca.Replacement is not { } replacement) return;
+
+        string log, notice;
+        if (replacement.Reason == RootReplacementReason.Unreadable)
+        {
+            var paths = string.Join(Environment.NewLine, replacement.SetAsidePaths);
+            (log, notice) = (Strings.Log.RootCaUnreadable(paths), Strings.Certificates.RootUnreadable(paths));
+        }
+        else
+        {
+            (log, notice) = (Strings.Log.RootCaReplaced, Strings.Certificates.RootReplaced);
+        }
+
+        AppendLog(log);
+        MessageBox.Show(this, notice, Strings.App.Name, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+    }
+
+    /// <summary>
     /// Saves Don't ask again. The settings store is best-effort and swallows I/O failures, so this
     /// reads the file back: when it did not stick the user is told the prompt will return.
     /// </summary>

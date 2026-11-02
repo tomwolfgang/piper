@@ -295,6 +295,9 @@ internal static class Strings
         public static string TrustBody(string privateKeyPath, string? thumbprint) =>
             I18n.T("certificates.trustBody", ("privateKeyPath", privateKeyPath), ("thumbprint", thumbprint));
 
+        public static string RootUnreadable(string paths) => I18n.T("certificates.rootUnreadable", ("paths", paths));
+        public static string RootReplaced => I18n.T("certificates.rootReplaced");
+
         public static string RemoveCaption => I18n.T("certificates.removeCaption");
         public static string RemoveBody => I18n.T("certificates.removeBody");
 
@@ -352,6 +355,9 @@ internal static class Strings
         public static string RootCaPath(string path) => I18n.T("log.rootCaPath", ("path", path));
         public static string RootCaTrusted => I18n.T("log.rootCaTrusted");
         public static string RootCaNotTrusted => I18n.T("log.rootCaNotTrusted");
+        public static string RootCaUnreadable(string paths) => I18n.T("log.rootCaUnreadable", ("paths", paths));
+        public static string RootCaReplaced => I18n.T("log.rootCaReplaced");
+        public static string RootCaFolderNotRestricted(string message) => I18n.T("log.rootCaFolderNotRestricted", ("message", message));
         public static string UpstreamValidationOffAtStartup => I18n.T("log.upstreamValidationOffAtStartup");
         public static string UpstreamValidationOffAfterSave => I18n.T("log.upstreamValidationOffAfterSave");
 
