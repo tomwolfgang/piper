@@ -454,7 +454,7 @@ public sealed partial class MainForm : Form, IMessageFilter
             optedIn = dialog.AnalyticsEnabled;
         }
 
-        Analytics.SetEnabled(optedIn);
+        var persisted = Analytics.SetEnabled(optedIn);
         if (optedIn)
         {
             // Startup already tried to record this and was correctly refused, reporting being off
@@ -466,7 +466,9 @@ public sealed partial class MainForm : Form, IMessageFilter
         // Recorded either way, with this version: a yes is never asked again, and a no is asked
         // again only after the next update, never twice on the same version.
         Analytics.RecordNoticeShown(version);
-        AppendLog(optedIn ? Strings.Log.AnalyticsConsentOn : Strings.Log.AnalyticsConsentOff);
+        AppendLog(optedIn ? Strings.Log.AnalyticsConsentOn
+            : persisted ? Strings.Log.AnalyticsConsentOff
+            : Strings.Log.AnalyticsOffNotPersisted);
     }
 
     /// <summary>
@@ -918,7 +920,7 @@ public sealed partial class MainForm : Form, IMessageFilter
         SaveFontScaleSettings();
         if (dialog.AnalyticsEnabled != Analytics.IsEnabled)
         {
-            var forgotten = Analytics.SetEnabled(dialog.AnalyticsEnabled);
+            var persisted = Analytics.SetEnabled(dialog.AnalyticsEnabled);
 
             // Replayed for the same reason the consent dialog replays it: startup recorded this and
             // was correctly refused while reporting was off, so without it a run where someone opts
@@ -931,8 +933,8 @@ public sealed partial class MainForm : Form, IMessageFilter
             // privacy control, and the setting would be back to its old value next time they look.
             AppendLog(Analytics.SpoolPath is null ? Strings.Log.AnalyticsUnavailable
                 : dialog.AnalyticsEnabled ? Strings.Log.AnalyticsOn
-                : forgotten ? Strings.Log.AnalyticsOff
-                : Strings.Log.AnalyticsOffIdentifierKept);
+                : persisted ? Strings.Log.AnalyticsOff
+                : Strings.Log.AnalyticsOffNotPersisted);
         }
 
         AppendLog(Strings.Log.ConfigurationsSaved);

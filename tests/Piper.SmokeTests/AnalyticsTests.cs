@@ -594,6 +594,162 @@ internal static class AnalyticsTests
             runner.IsTrue(!File.Exists(temp.SpoolPath + ".sending"), "and the undelivered remainder with it");
         });
 
+        await runner.RunAsync("analytics: opting out and back in mid-flush does not resume the old batch", async () =>
+        {
+            using var server = new LoopbackCollector();
+            using var temp = new TempAnalytics();
+            temp.Settings.Enabled = true;
+            temp.Settings.NoticeShownVersion = "0.4.0";
+            using var client = temp.CreateClient(server.Endpoint);
+
+            client.Track(AnalyticsEvents.AppStarted);
+            client.Track(AnalyticsEvents.CertTrusted, (AnalyticsProperties.Source, "manual"));
+            client.Track(AnalyticsEvents.FirstSessionCaptured);
+
+            // Enabled is true again by the time the loop looks, so only the opt-out having happened
+            // at all can stop the rest: those events were discarded with the user's consent.
+            var toggled = false;
+            server.BeforeRespond = () =>
+            {
+                if (toggled) return;
+                toggled = true;
+                client.SetEnabled(false);
+                client.SetEnabled(true);
+            };
+            await client.FlushAsync();
+
+            runner.AreEqual(1, server.RequestCount, "no event from the batch claimed before the opt-out is sent");
+            runner.IsTrue(!File.Exists(temp.SpoolPath + ".sending"), "and nothing of it is kept for later");
+        });
+
+        await runner.RunAsync("analytics: concurrent flushes send each event exactly once", async () =>
+        {
+            using var server = new LoopbackCollector();
+            using var temp = new TempAnalytics();
+            temp.Settings.Enabled = true;
+            temp.Settings.NoticeShownVersion = "0.4.0";
+            using var client = temp.CreateClient(server.Endpoint);
+
+            client.Track(AnalyticsEvents.AppStarted);
+            client.Track(AnalyticsEvents.CertTrusted, (AnalyticsProperties.Source, "manual"));
+            client.Track(AnalyticsEvents.FirstSessionCaptured);
+
+            // A second flush starts while the first is mid-request - the timer tick racing a direct
+            // call. It is given time to claim and send before the first request is answered.
+            Task? second = null;
+            server.BeforeRespond = () =>
+            {
+                if (second is not null) return;
+                second = Task.Run(() => client.FlushAsync());
+                second.Wait(TimeSpan.FromMilliseconds(500));
+            };
+            await client.FlushAsync();
+            await second!;
+
+            var names = server.Requests
+                .Where(request => request.Contains("Name=", StringComparison.Ordinal))
+                .Select(request => request.Split("Name=")[1].Split('&')[0])
+                .ToArray();
+            runner.AreEqual(3, names.Length, "three events, three requests");
+            runner.AreEqual(3, names.Distinct().Count(), "none of them sent twice");
+            runner.IsTrue(!File.Exists(temp.SpoolPath + ".sending"), "and the delivered batch is cleared");
+        });
+
+        await runner.RunAsync("analytics: opting out reports a settings file that could not be written", () =>
+        {
+            using var temp = new TempAnalytics();
+            temp.Settings.Enabled = true;
+            temp.Settings.NoticeShownVersion = "0.4.0";
+            AnalyticsSettingsStore.Save(temp.Settings, temp.SettingsPath);
+            using var client = temp.CreateClient();
+
+            // Read-only stands in for antivirus or a sync tool holding the file. The file still says
+            // Enabled, so the next launch would collect again; the user must be told.
+            File.SetAttributes(temp.SettingsPath, FileAttributes.ReadOnly);
+            try
+            {
+                runner.AreEqual(false, client.SetEnabled(false), "the opt-out reports that it did not persist");
+                runner.AreEqual(false, client.Settings.Enabled, "while this run still stops collecting");
+            }
+            finally
+            {
+                File.SetAttributes(temp.SettingsPath, FileAttributes.Normal);
+            }
+
+            runner.AreEqual(true, client.SetEnabled(false), "and succeeds once the file is writable again");
+            return Task.CompletedTask;
+        });
+
+        await runner.RunAsync("analytics: opting out reports a spool that could not be discarded", () =>
+        {
+            using var temp = new TempAnalytics();
+            temp.Settings.Enabled = true;
+            temp.Settings.NoticeShownVersion = "0.4.0";
+            using var client = temp.CreateClient();
+
+            client.Track(AnalyticsEvents.AppStarted);
+            client.FlushToDisk();
+            runner.IsTrue(File.Exists(temp.SpoolPath), "an event is pending");
+
+            // A surviving spool is delivered after a later opt-in, so it cannot be passed off as gone.
+            bool result;
+            using (new FileStream(temp.SpoolPath, FileMode.Open, FileAccess.Read, FileShare.None))
+            {
+                result = client.SetEnabled(false);
+            }
+
+            runner.AreEqual(false, result, "the opt-out reports the spool it could not delete");
+            runner.AreEqual(true, client.SetEnabled(false), "and succeeds once the lock is gone");
+            runner.IsTrue(!File.Exists(temp.SpoolPath), "taking the spool with it");
+            return Task.CompletedTask;
+        });
+
+        await runner.RunAsync("analytics: starting with reporting off erases what an earlier opt-out left", () =>
+        {
+            using var temp = new TempAnalytics();
+
+            // What a failed opt-out on an earlier run leaves behind: a spool, a claimed batch, the
+            // installation identifier and the machine identifier, with the choice recorded as off.
+            temp.Settings.Enabled = false;
+            temp.Settings.NoticeShownVersion = "0.4.0";
+            temp.Settings.InstallId = "aaaabbbbccccddddeeeeffff00001111";
+            AnalyticsSettingsStore.Save(temp.Settings, temp.SettingsPath);
+            Directory.CreateDirectory(Path.GetDirectoryName(temp.SpoolPath)!);
+            var line = "{\"name\":\"piper_usage_app_started\",\"time\":\"2026-01-01T00:00:00+00:00\",\"run\":\"r\",\"props\":{}}\n";
+            File.WriteAllText(temp.SpoolPath, line);
+            File.WriteAllText(temp.SpoolPath + ".sending", line);
+
+            string? machineId = "11112222333344445555666677778888";
+            using (var client = temp.CreateClient(
+                machineId: () => machineId, forgetMachineId: () => { machineId = null; return true; }))
+            {
+                client.Start();
+            }
+
+            runner.IsTrue(!File.Exists(temp.SpoolPath), "the leftover spool is erased");
+            runner.IsTrue(!File.Exists(temp.SpoolPath + ".sending"), "and the leftover claimed batch");
+            runner.IsTrue(machineId is null, "and the machine identifier");
+            runner.IsTrue(temp.Settings.InstallId is null, "and the installation identifier");
+            runner.IsTrue(AnalyticsSettingsStore.Load(temp.SettingsPath)?.InstallId is null, "on disk too");
+
+            // The same start with reporting on is a normal launch, and must keep everything.
+            using var enabled = new TempAnalytics();
+            enabled.Settings.Enabled = true;
+            enabled.Settings.NoticeShownVersion = "0.4.0";
+            Directory.CreateDirectory(Path.GetDirectoryName(enabled.SpoolPath)!);
+            File.WriteAllText(enabled.SpoolPath, line);
+            string? kept = "11112222333344445555666677778888";
+            using (var client = enabled.CreateClient(
+                machineId: () => kept, forgetMachineId: () => { kept = null; return true; }))
+            {
+                client.Start();
+            }
+
+            runner.IsTrue(File.Exists(enabled.SpoolPath), "an opted-in start keeps its spool");
+            runner.IsTrue(kept is not null, "and its identifier");
+            return Task.CompletedTask;
+        });
+
         await runner.RunAsync("analytics: an oversized spool is discarded rather than read", async () =>
         {
             using var server = new LoopbackCollector();
