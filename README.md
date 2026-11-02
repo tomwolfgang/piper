@@ -72,6 +72,10 @@ It listens on `127.0.0.1:8888` and starts capturing when the window opens.
 
 To route the machine's traffic through it, use **Capture > Use as system proxy**. Your
 existing proxy settings are saved and restored when you turn it off or close the app.
+If Piper is killed outright (End Task in Task Manager, power loss) it cannot restore
+them until the next time it starts, so until then websites may not load; start Piper again, or
+turn off **Use a proxy server** in Windows Settings > Network & internet > Proxy. If the saved
+record is damaged, Piper tells you at startup and leaves your proxy settings unchanged.
 
 ### HTTPS
 

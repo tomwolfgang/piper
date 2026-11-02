@@ -290,6 +290,12 @@
     "systemProxyFailed": "Could not set the system proxy: {{message}}",
     "systemProxyRestoreFailed": "Could not restore the system proxy: {{message}}",
     "shutdownFailed": "Could not finish shutdown: {{message}}",
+    "leftoverProxyCorrupt": "The record of your system proxy settings from a previous session is damaged ({{reason}}), so Piper did not change your proxy settings.",
+    "leftoverProxyUnreadable": "Could not read the record of your system proxy settings from a previous session, so Piper did not change your proxy settings: {{message}}",
+    "leftoverProxyRestoreFailed": "Could not restore the system proxy that a previous session left pointing at {{endpoint}}: {{message}}",
+    "leftoverProxyMalformed": "not valid JSON: {{message}}",
+    "leftoverProxyTooLarge": "larger than {{max, N0}} bytes",
+    "leftoverProxyIncomplete": "the proxy address Piper had set is missing",
 
     "hostPatternsIgnored_one": "Filters: {{count, N0}} Hosts entry is not a usable host pattern and was ignored. A list whose entries are all ignored filters no hosts.",
     "hostPatternsIgnored_other": "Filters: {{count, N0}} Hosts entries are not usable host patterns and were ignored. A list whose entries are all ignored filters no hosts.",
@@ -320,6 +326,13 @@
 
   "shutdown": {
     "proxyRestoreFailed": "Piper could not restore the system proxy, so it will remain open.\n\n{{message}}"
+  },
+
+  "leftoverProxy": {
+    "corrupt": "Piper's record of your proxy settings from its last session is damaged, so it could not put them back and has not changed them.\n\nIf websites do not load when Piper is closed, open Windows Settings > Network & internet > Proxy and turn off \"Use a proxy server\" (or set it back to the proxy you normally use).",
+    "corruptKept": "Piper's record of your proxy settings from its last session is damaged, so it could not put them back and has not changed them.\n\nIf websites do not load when Piper is closed, open Windows Settings > Network & internet > Proxy and turn off \"Use a proxy server\" (or set it back to the proxy you normally use).\n\nThe damaged record was kept as {{path}}.",
+    "unreadable": "Piper could not read its record of your proxy settings from its last session, so it has not changed them. It will try again the next time it starts.\n\nIf websites do not load when Piper is closed, open Windows Settings > Network & internet > Proxy and turn off \"Use a proxy server\" (or set it back to the proxy you normally use).\n\n{{message}}",
+    "restoreFailed": "Piper's last session left your system proxy pointing at {{endpoint}}, and putting your previous settings back failed. Piper will try again the next time it starts.\n\nIf websites do not load when Piper is closed, open Windows Settings > Network & internet > Proxy and turn off \"Use a proxy server\" (or set it back to the proxy you normally use).\n\n{{message}}"
   },
 
   "diagnostics": {

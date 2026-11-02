@@ -10,12 +10,14 @@ namespace Piper.App;
 /// </summary>
 /// <remarks>
 /// Called when capture starts and undone when it stops, so the previous settings are captured
-/// first and <see cref="Restore"/> puts them back exactly. Every change covers both places
+/// first and <c>Restore</c> puts them back exactly. Every change covers both places
 /// Windows keeps the configuration - the legacy ProxyEnable/ProxyServer values and the binary
 /// connection settings - because leaving the two disagreeing points applications at a proxy that
 /// is no longer listening, which the user experiences as having lost their internet connection.
+/// Every call here blocks on the registry and on WinINET notifying other processes, so callers on
+/// the UI thread go through <see cref="SystemProxySession"/> on a worker thread.
 /// </remarks>
-public static class SystemProxy
+public static partial class SystemProxy
 {
     private const string KeyPath = @"Software\Microsoft\Windows\CurrentVersion\Internet Settings";
     private const string ConnectionsKeyPath = KeyPath + @"\Connections";
@@ -33,55 +35,29 @@ public static class SystemProxy
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool InternetSetOption(IntPtr hInternet, int dwOption, IntPtr lpBuffer, int dwBufferLength);
 
-    public sealed record Snapshot(
-        int? ProxyEnable,
-        string? ProxyServer,
-        string? ProxyOverride,
-        byte[]? DefaultConnectionSettings,
-        byte[]? SavedLegacySettings)
+    /// <summary>The current user's real WinINET settings. Tests use their own <see cref="ISystemProxySettings"/>.</summary>
+    public static ISystemProxySettings Settings { get; } = new WinInetSettings();
+
+    private sealed class WinInetSettings : ISystemProxySettings
     {
-        /// <summary>True when these settings route traffic through <paramref name="endpoint"/>.</summary>
-        public bool PointsAt(string endpoint) =>
-            (ProxyEnable is int enabled && enabled != 0 && MatchesEndpoint(ProxyServer, endpoint))
-            || (ConnectionSettingsBlob.TryParse(DefaultConnectionSettings, out var blob)
-                && (blob.Flags & ConnectionSettingsBlob.ProxyFlag) != 0
-                && MatchesEndpoint(blob.ProxyServer, endpoint));
+        public Snapshot Read() => Capture();
 
-        /// <summary>The same settings with the manual proxy taken out of them.</summary>
-        public Snapshot AsDirectConnection() => new(
-            0, null, ProxyOverride, AsDirectBlob(DefaultConnectionSettings), AsDirectBlob(SavedLegacySettings));
+        public void Enable(string endpoint) => SystemProxy.Enable(endpoint);
 
-        private static byte[]? AsDirectBlob(byte[]? value) =>
-            ConnectionSettingsBlob.TryParse(value, out var blob)
-                ? (blob with
-                {
-                    Flags = (blob.Flags & ~ConnectionSettingsBlob.ProxyFlag) | ConnectionSettingsBlob.DirectFlag,
-                    ProxyServer = string.Empty,
-                }).ToBytes()
-                : value;
+        public void Restore(Snapshot snapshot) => SystemProxy.Restore(snapshot);
     }
 
-    /// <summary>
-    /// Captures the current settings so they can be restored later. Pass the endpoint Piper is
-    /// about to listen on: settings already pointing there belong to a previous Piper that never
-    /// got to clean up, and recording them as the user's own would make every close from now on
-    /// put a dead proxy back.
-    /// </summary>
-    public static Snapshot Capture(string? ownEndpoint = null)
+    private static Snapshot Capture()
     {
         using var key = Registry.CurrentUser.OpenSubKey(KeyPath, writable: false);
         using var connections = Registry.CurrentUser.OpenSubKey(ConnectionsKeyPath, writable: false);
 
-        var snapshot = new Snapshot(
+        return new Snapshot(
             key?.GetValue("ProxyEnable") as int?,
             key?.GetValue("ProxyServer") as string,
             key?.GetValue("ProxyOverride") as string,
             connections?.GetValue(DefaultConnectionValue) as byte[],
             connections?.GetValue(LegacyConnectionValue) as byte[]);
-
-        return ownEndpoint is not null && snapshot.PointsAt(ownEndpoint)
-            ? snapshot.AsDirectConnection()
-            : snapshot;
     }
 
     public static bool IsEnabled()
@@ -97,7 +73,7 @@ public static class SystemProxy
     }
 
     /// <summary>Points WinINET at <paramref name="endpoint"/> (e.g. "127.0.0.1:8888").</summary>
-    public static void Enable(string endpoint, string bypassList = "<local>")
+    private static void Enable(string endpoint, string bypassList = "<local>")
     {
         using var key = Registry.CurrentUser.OpenSubKey(KeyPath, writable: true)
                         ?? throw new InvalidOperationException("Could not open Internet Settings for writing.");
@@ -113,7 +89,7 @@ public static class SystemProxy
     }
 
     /// <summary>Restores exactly what <see cref="Capture"/> recorded.</summary>
-    public static void Restore(Snapshot snapshot)
+    private static void Restore(Snapshot snapshot)
     {
         ArgumentNullException.ThrowIfNull(snapshot);
 
@@ -135,87 +111,6 @@ public static class SystemProxy
         RestoreConnectionSettings(snapshot);
         Notify();
     }
-
-    public static void Disable()
-    {
-        using (var key = Registry.CurrentUser.OpenSubKey(KeyPath, writable: true))
-        {
-            if (key is null) return;
-            key.SetValue("ProxyEnable", 0, RegistryValueKind.DWord);
-        }
-
-        WriteConnectionSettings((existing, counter) => (existing with
-        {
-            Counter = counter,
-            Flags = (existing.Flags & ~ConnectionSettingsBlob.ProxyFlag) | ConnectionSettingsBlob.DirectFlag,
-        }).ToBytes());
-
-        Notify();
-    }
-
-    /// <summary>
-    /// Undoes a proxy left behind by a run that ended without restoring - a crash, a kill from
-    /// Task Manager, or a Windows shutdown. Returns the endpoint that was cleaned up, or null if
-    /// there was nothing to undo. Best effort by design: it runs on paths where nothing useful
-    /// can be reported to the user.
-    /// </summary>
-    public static string? RestoreLeftovers()
-    {
-        SystemProxyBackup? backup;
-        try
-        {
-            backup = SystemProxyBackupStore.Load();
-        }
-        catch (Exception)
-        {
-            return null;
-        }
-
-        if (backup is null) return null;
-
-        try
-        {
-            // Only undo Piper's own leftovers. If the machine points somewhere else the user has
-            // since changed it themselves, and putting the recorded settings back would undo that.
-            if (!Capture().PointsAt(backup.AppliedEndpoint)) return null;
-
-            Restore(backup.ToSnapshot());
-            return backup.AppliedEndpoint;
-        }
-        catch (Exception)
-        {
-            return null;
-        }
-        finally
-        {
-            SystemProxyBackupStore.Clear();
-        }
-    }
-
-    /// <summary>Compares a ProxyServer value ("host:port", or a per-scheme list) with one endpoint.</summary>
-    private static bool MatchesEndpoint(string? proxyServer, string endpoint)
-    {
-        if (string.IsNullOrWhiteSpace(proxyServer) || string.IsNullOrWhiteSpace(endpoint)) return false;
-
-        foreach (var entry in proxyServer.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
-        {
-            var value = entry;
-
-            var scheme = value.IndexOf('=');            // "http=127.0.0.1:8888"
-            if (scheme >= 0) value = value[(scheme + 1)..];
-
-            var separator = value.IndexOf("://", StringComparison.Ordinal);
-            if (separator >= 0) value = value[(separator + 3)..];
-
-            if (Normalize(value) == Normalize(endpoint)) return true;
-        }
-
-        return false;
-    }
-
-    private static string Normalize(string endpoint) => endpoint.Trim().ToLowerInvariant()
-        .Replace("localhost:", "127.0.0.1:", StringComparison.Ordinal)
-        .Replace("[::1]:", "127.0.0.1:", StringComparison.Ordinal);
 
     /// <summary>Rewrites both copies WinINET keeps of the connection settings.</summary>
     private static void WriteConnectionSettings(Func<ConnectionSettingsBlob, int, byte[]> update)
