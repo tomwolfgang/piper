@@ -395,8 +395,9 @@ public sealed partial class MainForm : Form, IMessageFilter
         }
         finally
         {
+            // A forced close can dispose the window while the restore runs on its worker thread.
             _captureToggleInProgress = false;
-            _captureStatusLabel.Enabled = true;
+            if (!IsDisposed) _captureStatusLabel.Enabled = true;
         }
 
         if (IsDisposed) return;
@@ -455,8 +456,11 @@ public sealed partial class MainForm : Form, IMessageFilter
             finally
             {
                 _captureToggleInProgress = false;
-                _captureStatusLabel.Enabled = true;
-                UpdateCaptureStatus();
+                if (!IsDisposed)
+                {
+                    _captureStatusLabel.Enabled = true;
+                    UpdateCaptureStatus();
+                }
             }
 
             if (IsDisposed) return;
@@ -1514,7 +1518,7 @@ public sealed partial class MainForm : Form, IMessageFilter
             if (_proxy.IsRunning)
             {
                 await _proxy.StopAsync();
-                if (await RunSystemProxyChangeAsync(_systemProxy.Restore))
+                if (await RunSystemProxyChangeAsync(_systemProxy.Restore) && !IsDisposed)
                     AppendLog(Strings.Log.CaptureStoppedProxyRestored);
             }
             else
@@ -1525,14 +1529,23 @@ public sealed partial class MainForm : Form, IMessageFilter
         }
         catch (Exception ex)
         {
-            AppendLog(Strings.Log.CaptureStateFailed(ex.Message));
-            MessageBox.Show(this, ex.Message, Strings.App.Name, MessageBoxButtons.OK, MessageBoxIcon.Error);
+            // The proxy change runs on a worker thread, so a forced close (Windows shutdown, Task
+            // Manager) can dispose the window before this resumes.
+            if (!IsDisposed)
+            {
+                AppendLog(Strings.Log.CaptureStateFailed(ex.Message));
+                MessageBox.Show(this, ex.Message, Strings.App.Name, MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
         }
         finally
         {
             _captureToggleInProgress = false;
-            _captureStatusLabel.Enabled = true;
-            UpdateCaptureStatus();
+            if (!IsDisposed)
+            {
+                _captureStatusLabel.Enabled = true;
+                UpdateCaptureStatus();
+            }
+
             SaveStatusBarSettings();
         }
     }
@@ -1628,16 +1641,20 @@ public sealed partial class MainForm : Form, IMessageFilter
         var endpoint = $"127.0.0.1:{_proxy.Endpoint!.Port}";
         try
         {
-            if (await RunSystemProxyChangeAsync(() => _systemProxy.Enable(endpoint)))
+            if (await RunSystemProxyChangeAsync(() => _systemProxy.Enable(endpoint)) && !IsDisposed)
                 AppendLog(Strings.Log.SystemProxySet(endpoint));
         }
         catch (Exception ex)
         {
+            // A forced close can dispose the window while the change runs on its worker thread;
+            // the session still holds the undo record, and the exit hook restores from it.
+            if (IsDisposed) return;
+
             if (ex is SystemProxyEnableException { UndoFailure: { } undoFailure })
                 AppendLog(Strings.Log.PartialChangeUndoFailed(undoFailure.Message));
 
             AppendLog(Strings.Log.SystemProxyFailed(ex.Message));
-            if (!IsDisposed) MessageBox.Show(this, ex.Message, Strings.App.Name, MessageBoxButtons.OK, MessageBoxIcon.Error);
+            MessageBox.Show(this, ex.Message, Strings.App.Name, MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
     }
 
