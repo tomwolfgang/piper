@@ -174,6 +174,29 @@ internal static class UpstreamReuseSafetyTests
             runner.AreEqual(SessionState.Failed, session.State, "the session is Failed");
             runner.IsTrue(!string.IsNullOrEmpty(session.Error), $"the session carries the error ({session.Error})");
         });
+
+        await runner.RunAsync("an HTTP/2 client refetched to a host name over 255 characters gets a 502 and a Failed row", async () =>
+        {
+            // The HTTP/2 path has its own catch. The over-long name arrives through an AutoResponder
+            // refetch, since an h2 request's authority is the decrypted tunnel's own.
+            var label = new string('a', 63);
+            var host = $"{label}.{label}.{label}.{label}.test";
+            await using var origin = new ScriptedOrigin(ca.GetCertificateFor("127.0.0.1"),
+                (_, stream, reader, ct) => ServeKeepAliveAsync(stream, reader, ct));
+            await using var proxy = StartProxy(ca, out var store, new AutoResponderSettings
+            {
+                Enabled = true,
+                Rules = [new AutoResponderRule { Match = "/longh2", Action = $"https://{host}/x" }],
+            });
+            using var client = CreateClient(proxy.Endpoint!.Port, root, HttpVersion.Version20);
+
+            using var response = await client.GetAsync($"https://127.0.0.1:{origin.Port}/longh2");
+            runner.AreEqual(HttpVersion.Version20, response.Version, "the client spoke h2 to the proxy");
+            runner.AreEqual(HttpStatusCode.BadGateway, response.StatusCode, "the client is answered 502");
+            var session = await WaitForSessionAsync(store, s => s.Path == "/longh2");
+            runner.AreEqual(SessionState.Failed, session.State, "the session is Failed");
+            runner.IsTrue(!string.IsNullOrEmpty(session.Error), $"the session carries the error ({session.Error})");
+        });
     }
 
     private static HttpResponseData KeepAliveResponse(HttpRequestData request)
@@ -221,21 +244,24 @@ internal static class UpstreamReuseSafetyTests
         return Encoding.Latin1.GetString(received.ToArray());
     }
 
-    private static ProxyServer StartProxy(CertificateAuthority ca, out SessionStore store)
+    private static ProxyServer StartProxy(CertificateAuthority ca, out SessionStore store, AutoResponderSettings? rules = null)
     {
         store = new SessionStore();
-        var proxy = new ProxyServer(new ProxyOptions
+        var options = new ProxyOptions
         {
             Port = 0,
             DecryptHttps = true,
             ValidateUpstreamCertificates = false, // the origin's leaf is from the test CA, trusted nowhere
+            EnableHttp2Downstream = true,
             EnableHttp2Upstream = true,
-        }, ca, store);
+        };
+        if (rules is not null) options.AutoResponder.Apply(rules);
+        var proxy = new ProxyServer(options, ca, store);
         proxy.Start();
         return proxy;
     }
 
-    private static HttpClient CreateClient(int proxyPort, X509Certificate2 root) =>
+    private static HttpClient CreateClient(int proxyPort, X509Certificate2 root, Version? version = null) =>
         new(new SocketsHttpHandler
         {
             Proxy = new WebProxy($"http://127.0.0.1:{proxyPort}"),
@@ -247,7 +273,7 @@ internal static class UpstreamReuseSafetyTests
             },
         })
         {
-            DefaultRequestVersion = HttpVersion.Version11,
+            DefaultRequestVersion = version ?? HttpVersion.Version11,
             DefaultVersionPolicy = HttpVersionPolicy.RequestVersionExact,
             Timeout = TimeSpan.FromSeconds(20),
         };

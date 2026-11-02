@@ -1,6 +1,5 @@
 using System.Diagnostics;
 using System.Net.Sockets;
-using System.Security.Authentication;
 using Piper.Core.Http;
 using Piper.Core.Http2;
 using Piper.Core.Sessions;

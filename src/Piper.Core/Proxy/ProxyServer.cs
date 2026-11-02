@@ -1282,11 +1282,13 @@ public sealed class ProxyServer : IAsyncDisposable
             }
             var beforeResponse = stopwatch.Elapsed;
 
+            // Can run twice when a reused connection is retried; only the clock restarts the second time.
             void MarkSent()
             {
+                beforeResponse = stopwatch.Elapsed;
+                if (session.State == SessionState.AwaitingResponse) return;
                 session.State = SessionState.AwaitingResponse;
                 _store.NotifyUpdated(session);
-                beforeResponse = stopwatch.Elapsed;
             }
 
             // HTTP/3 first when this origin has advertised it, falling through to TCP on any
