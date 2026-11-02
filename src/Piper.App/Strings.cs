@@ -344,7 +344,8 @@ internal static class Strings
     {
         public static string AnalyticsOn => I18n.T("log.analyticsOn");
         public static string AnalyticsOff => I18n.T("log.analyticsOff");
-        public static string AnalyticsOffIdentifierKept => I18n.T("log.analyticsOffIdentifierKept");
+        public static string AnalyticsOffNotPersisted => I18n.T("log.analyticsOffNotPersisted");
+        public static string AnalyticsOnNotPersisted => I18n.T("log.analyticsOnNotPersisted");
         public static string AnalyticsUnavailable => I18n.T("log.analyticsUnavailable");
         public static string AnalyticsConsentOn => I18n.T("log.analyticsConsentOn");
         public static string AnalyticsConsentOff => I18n.T("log.analyticsConsentOff");

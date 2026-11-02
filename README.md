@@ -675,7 +675,9 @@ own code. Counts are reported as buckets rather than exact figures.
 
 Reports wait in `%LOCALAPPDATA%\Piper\analytics\pending.jsonl`, a plain text file you can read before
 it is sent. **Tools > Configurations > Privacy** holds the switch and a button that opens that
-folder. Turning reporting off deletes the identifiers and discards anything not yet sent.
+folder. Turning reporting off deletes the identifiers and discards anything not yet sent. If a locked
+or read-only file stops that from finishing, the Log tab says so, and each later start with reporting
+off tries the deletion again.
 
 ## Why is nothing captured?
 
