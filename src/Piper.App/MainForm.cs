@@ -277,6 +277,7 @@ public sealed partial class MainForm : Form, IMessageFilter
         // "drag and drop does nothing" report can be read.
         if (IsElevated()) AppendLog(Strings.Log.RunningElevated);
         AppendLog(Strings.Log.RootCaPath(_ca.RootPfxPath));
+        if (_ca.FolderRestrictionError is { } restriction) AppendLog(Strings.Log.RootCaFolderNotRestricted(restriction));
         AppendLog(_trust.IsTrusted
             ? Strings.Log.RootCaTrusted
             : Strings.Log.RootCaNotTrusted);
@@ -403,6 +404,7 @@ public sealed partial class MainForm : Form, IMessageFilter
         }
 
         AskAnalyticsConsentIfNeeded();
+        ReportRootReplacement();
 
         if (!EnsureTrustedRootForStartup(out var startCapture))
         {
@@ -1665,7 +1667,7 @@ public sealed partial class MainForm : Form, IMessageFilter
             var removal = RootRemoval.RemoveIfConfirmed(
                 () => MessageBox.Show(this, Strings.Certificates.RemoveBody, Strings.Certificates.RemoveCaption,
                     MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) == DialogResult.Yes,
-                TrustStore.Uninstall);
+                () => TrustStore.Uninstall(_ca.RootCertificate));
             if (removal is not { } removed) return;
 
             RefreshTrustState();

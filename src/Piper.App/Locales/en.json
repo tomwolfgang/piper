@@ -184,7 +184,10 @@
 
     "alreadyTrusted": "The Piper root certificate is already trusted.",
     "trustCaption": "Trust the Piper root certificate",
-    "trustBody": "Add the Piper root certificate to your user's Trusted Root store?\n\nThis is required to inspect HTTPS traffic, and it is a real security tradeoff: anything holding the matching private key - which is stored unencrypted in your user profile - can impersonate any HTTPS site to this Windows account.\n\nOnly do this on a machine you control, and use Tools > Configurations > HTTPS > Remove trusted root when you are finished.\n\nPrivate key location:\n{{privateKeyPath}}\n\nThumbprint:\n{{thumbprint}}",
+    "trustBody": "Add the Piper root certificate to your user's Trusted Root store?\n\nThis is required to inspect HTTPS traffic, and it is a real security tradeoff: anything holding the matching private key can impersonate any HTTPS site to this Windows account. The key is stored in your user profile, encrypted only to your Windows account, so any program running as you can still read it.\n\nOnly do this on a machine you control, and use Tools > Configurations > HTTPS > Remove trusted root when you are finished.\n\nPrivate key location:\n{{privateKeyPath}}\n\nThumbprint:\n{{thumbprint}}",
+
+    "rootUnreadable": "Piper could not read its saved root certificate key, so it made a new root certificate.\n\nAnything that trusted the old root - Windows, browsers, other apps - rejects Piper's HTTPS certificates until you trust the new one. HTTPS is not decrypted until then: choose Install certificate when asked, or Tools > Configurations > HTTPS > Trust root certificate. Trusting it also removes the old Piper root from Windows.\n\nThe unreadable file was kept, not deleted:\n{{paths}}",
+    "rootReplaced": "Piper made a new root certificate because the saved one was about to expire or was made by an older version of Piper.\n\nAnything that trusted the old root - Windows, browsers, other apps - rejects Piper's HTTPS certificates until you trust the new one. HTTPS is not decrypted until then: choose Install certificate when asked, or Tools > Configurations > HTTPS > Trust root certificate. Trusting it also removes the old Piper root from Windows.",
 
     "removeCaption": "Remove the Piper root certificate",
     "removeBody": "Remove Piper's root certificate from this Windows user's Trusted Root store?\n\nPiper stops decrypting HTTPS right away and passes it through unread until you trust the certificate again.",
@@ -235,6 +238,9 @@
     "rootCaPath": "Root CA: {{path}}",
     "rootCaTrusted": "Root CA is trusted by the current user. HTTPS decryption will work.",
     "rootCaNotTrusted": "Root CA is NOT trusted. HTTPS is not decrypted until you trust it (Tools > Configurations > HTTPS).",
+    "rootCaUnreadable": "Root CA key could not be read, so a new root was made; it must be trusted again. The unreadable file was kept: {{paths}}",
+    "rootCaReplaced": "Root CA was expiring or made by an older Piper, so a new root was made; it must be trusted again.",
+    "rootCaFolderNotRestricted": "Could not limit the root CA folder to the current Windows user: {{message}}",
     "upstreamValidationOffAtStartup": "Origin server certificate verification is OFF (Configurations > HTTPS). Piper cannot tell a real origin from something impersonating it.",
     "upstreamValidationOffAfterSave": "Origin server certificate verification is OFF. Piper cannot tell a real origin from something impersonating it. Turn it back on when you are done testing.",
 
