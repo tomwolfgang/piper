@@ -313,6 +313,10 @@ internal static class RootKeyAtRestTests
             using (var other = NewRoot(CurrentSubject)) File.WriteAllText(CerPath(directory), CertificateAuthority.ExportPem(other));
             using (CertificateAuthority.LoadOrCreate(directory)) { }
             runner.AreEqual(pem, File.ReadAllText(CerPath(directory)), "a .cer for another root is corrected");
+
+            File.WriteAllBytes(CerPath(directory), new byte[CertificateAuthority.MaxKeyFileBytes + 1]);
+            using (CertificateAuthority.LoadOrCreate(directory)) { }
+            runner.AreEqual(pem, File.ReadAllText(CerPath(directory)), "an oversized .cer is replaced without being read whole");
         }
         finally
         {

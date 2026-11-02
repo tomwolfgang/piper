@@ -81,7 +81,7 @@ internal static class RootKeyStore
                 using (legacy)
                     return Migrate(legacy!, keyPath, legacyPath, cerPath, isUsable);
             case Outcome.Unreadable:
-                setAside.Add(SetAside(legacyPath));
+                if (SetAside(legacyPath) is { } legacyAside) setAside.Add(legacyAside);
                 break;
             case Outcome.Rejected:
                 rejected = true;
@@ -96,7 +96,7 @@ internal static class RootKeyStore
                 EnsurePublicCertificate(cerPath, saved!);
                 return saved!;
             case Outcome.Unreadable:
-                setAside.Add(SetAside(keyPath));
+                if (SetAside(keyPath) is { } keyAside) setAside.Add(keyAside);
                 break;
             case Outcome.Rejected:
                 rejected = true;
@@ -175,18 +175,18 @@ internal static class RootKeyStore
         out X509Certificate2? certificate)
     {
         certificate = null;
-        byte[] bytes;
+        byte[]? bytes;
         try
         {
-            var length = new FileInfo(path).Length;
-            if (length is 0 or > MaxKeyFileBytes) return Outcome.Unreadable;
-            bytes = File.ReadAllBytes(path);
+            bytes = ReadBounded(path);
         }
         catch (FileNotFoundException)
         {
             // Covers both "never existed" and "another Piper starting at the same time just migrated it".
             return Outcome.Missing;
         }
+
+        if (bytes is null) return Outcome.Unreadable;
 
         try
         {
@@ -205,6 +205,32 @@ internal static class RootKeyStore
         certificate.Dispose();
         certificate = null;
         return Outcome.Rejected;
+    }
+
+    /// <summary>
+    /// Reads a whole file of 1 to <see cref="MaxKeyFileBytes"/> bytes in one pass, or returns null when
+    /// it is empty or larger. The bound is enforced on what is read, not on a size checked beforehand,
+    /// so a file swapped for a bigger one in between cannot make this read more.
+    /// </summary>
+    private static byte[]? ReadBounded(string path)
+    {
+        var buffer = new byte[MaxKeyFileBytes + 1];
+        try
+        {
+            var total = 0;
+            using (var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read))
+            {
+                int read;
+                while (total < buffer.Length && (read = stream.Read(buffer, total, buffer.Length - total)) > 0)
+                    total += read;
+            }
+
+            return total is 0 or > MaxKeyFileBytes ? null : buffer[..total];
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(buffer);
+        }
     }
 
     private static X509Certificate2 LoadLegacy(byte[] bytes) =>
@@ -248,17 +274,17 @@ internal static class RootKeyStore
     /// <summary>Rewrites the public certificate when it is missing or describes another root.</summary>
     private static void EnsurePublicCertificate(string cerPath, X509Certificate2 root)
     {
-        var pem = CertificateAuthority.ExportPem(root);
+        var pem = Encoding.ASCII.GetBytes(CertificateAuthority.ExportPem(root));
         try
         {
-            if (File.ReadAllText(cerPath, Encoding.ASCII) == pem) return;
+            if (ReadBounded(cerPath) is { } current && current.AsSpan().SequenceEqual(pem)) return;
         }
         catch (FileNotFoundException)
         {
             // Rewritten below.
         }
 
-        WriteAtomic(cerPath, Encoding.ASCII.GetBytes(pem));
+        WriteAtomic(cerPath, pem);
     }
 
     /// <summary>
@@ -294,13 +320,22 @@ internal static class RootKeyStore
         }
     }
 
-    /// <summary>Renames a file aside (never deletes it) and returns the new path.</summary>
-    private static string SetAside(string path, string tag = "corrupt")
+    /// <summary>
+    /// Renames a file aside (never deletes it) and returns the new path, or null when the file is
+    /// already gone (another Piper starting at the same time moved it first, and reports it).
+    /// </summary>
+    private static string? SetAside(string path, string tag = "corrupt")
     {
-        var target = $"{path}.{tag}-{DateTime.UtcNow:yyyyMMdd'T'HHmmssfff'Z'}";
-        if (File.Exists(target)) target += "-" + Guid.NewGuid().ToString("N")[..8];
-        File.Move(path, target);
-        return target;
+        var target = $"{path}.{tag}-{DateTime.UtcNow:yyyyMMdd'T'HHmmssfff'Z'}-{Guid.NewGuid().ToString("N")[..8]}";
+        try
+        {
+            File.Move(path, target);
+            return target;
+        }
+        catch (FileNotFoundException)
+        {
+            return null;
+        }
     }
 
     /// <summary>
