@@ -4,8 +4,10 @@ on:
   pull_request_target:
     types: [labeled]
 
+# Only claude-review label events share the per-PR group, so re-labelling replaces a running review.
+# Any other label gets a group of its own run and skips the job without cancelling anything.
 concurrency:
-  group: claude-review-${{ github.event.pull_request.number }}
+  group: ${{ github.event.label.name == 'claude-review' && format('claude-review-{0}', github.event.pull_request.number) || format('claude-review-other-{0}', github.run_id) }}
   cancel-in-progress: true
 
 permissions:

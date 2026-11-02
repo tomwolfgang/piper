@@ -8,5 +8,9 @@
 /publish/
 /artifacts/
 
+# Local session scratch: a drafted pull-request body and Claude Code worktrees
+/PR-BODY.md
+/.claude/worktrees/
+
 # BenchmarkDotNet output (tests/Piper.Benchmarks, run on demand)
 **/BenchmarkDotNet.Artifacts/

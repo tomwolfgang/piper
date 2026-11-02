@@ -11,7 +11,8 @@
 
   <ItemGroup>
     <!-- Development tool only: not referenced by the app, the tests or the installer, never shipped. This
-         project is deliberately NOT in Piper.slnx, so eng/verify.ps1 and CI neither restore nor build it. -->
+         project is deliberately NOT in Piper.slnx; eng/verify.ps1 (and so CI and CodeQL) restores and builds it
+         on its own so it keeps compiling, but nothing runs it. -->
     <PackageReference Include="BenchmarkDotNet" Version="0.15.8" />
   </ItemGroup>
 

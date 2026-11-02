@@ -1,8 +1,8 @@
 # Piper.Benchmarks
 
 [BenchmarkDotNet](https://benchmarkdotnet.org) micro-benchmarks of `Piper.Core`'s hot paths. On demand
-only: the project is **not** in `Piper.slnx`, so `eng/verify.ps1`, CI, CodeQL and the installer never
-restore or build it, and nothing ships it. For whole-proxy numbers (requests per second, downloads,
+only: the project is **not** in `Piper.slnx`, and nothing runs or ships it. `eng/verify.ps1` (and so CI
+and CodeQL) restores and builds it on its own, so it keeps compiling; the installer never touches it. For whole-proxy numbers (requests per second, downloads,
 TLS) use `tools/Piper.Bench` instead.
 
 ```powershell
