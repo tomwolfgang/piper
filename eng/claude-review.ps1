@@ -68,9 +68,15 @@ be fixed before merge; otherwise approve. Every finding needs a precise file, li
 impact, and concrete fix direction. Return the required structured result.
 "@
 
+# Claude runs in the working tree under review, so everything that tree can configure is untrusted.
+# --safe-mode drops its CLAUDE.md, hooks, skills, MCP servers and agents. --setting-sources user drops
+# its .claude/settings.json and settings.local.json, whose permission rules could otherwise widen the
+# tools below. The git commands allowed below all accept --output=<file>, which writes a file, so
+# any command containing --output is denied (deny rules win over allow rules).
 $arguments = @(
     '-p', $prompt,
     '--safe-mode',
+    '--setting-sources', 'user',
     '--no-session-persistence',
     '--output-format', 'json',
     '--json-schema', $schemaArgument,
@@ -78,7 +84,7 @@ $arguments = @(
     '--permission-mode', 'dontAsk',
     '--tools', 'Read,Glob,Grep,Bash',
     '--allowedTools', 'Read,Glob,Grep,Bash(git diff:*),Bash(git status:*),Bash(git show:*),Bash(git log:*),Bash(git ls-files:*)',
-    '--disallowedTools', 'Edit,Write,NotebookEdit,WebFetch,WebSearch,mcp__*'
+    '--disallowedTools', 'Edit,Write,NotebookEdit,WebFetch,WebSearch,mcp__*,Bash(*--output*)'
 )
 
 Push-Location $RepositoryRoot

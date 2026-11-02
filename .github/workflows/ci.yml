@@ -27,10 +27,15 @@ jobs:
       - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
           dotnet-version: 10.0.x
+          # No lock files, so the key hashes the project files. A stale cache only costs downloads:
+          # packages are immutable per version, and restore still audits them.
+          cache: true
+          cache-dependency-path: "**/*.csproj"
 
+      # Pinned, and identical to release.yml, so every pull request proves the release's tool installs.
       - name: Install NSIS
         shell: pwsh
-        run: choco install nsis --yes --no-progress
+        run: choco install nsis --version=3.13.0 --allow-downgrade --yes --no-progress
 
       # The Copy as smoke tests exercise Git for Windows' ANSI curl.exe. Install it explicitly:
       # hosted runner images are mutable, and a missing tool is a test failure under CI by design.
@@ -38,7 +43,7 @@ jobs:
       # uses the same installation before it runs the same smoke tests.
       - name: Install Git for Windows for the Copy as round trips
         shell: pwsh
-        run: choco install git --yes --no-progress
+        run: choco install git --version=2.56.0.4 --allow-downgrade --yes --no-progress
 
       # Test-only. The Copy as smoke tests run the generated Python snippet against the real `requests`
       # package, and a missing tool fails under CI by design so the security evidence cannot silently

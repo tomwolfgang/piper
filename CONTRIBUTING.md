@@ -9,7 +9,9 @@ can install a local certificate authority, security and failure behavior are par
 2. Add a regression or behavior test under `tests/Piper.SmokeTests`, or under `tests/Piper.UiTests`
    when the behavior lives in a native WinForms control. The UI tests open windows, so they need
    an interactive desktop session; where there is none, pass `-SkipUiTests` to the gate below and
-   let CI run them.
+   let CI run them. CI runs them at 96 DPI. At 150% display scaling one grid test, "hiding a host
+   from a grid scrolled a few rows shows the rest from the top", currently fails on `main`; it is a
+   known layout issue in the session grid, so say so in your pull request rather than hiding it.
 3. Run the same deterministic gate as CI:
 
    ```powershell
@@ -22,7 +24,9 @@ can install a local certificate authority, security and failure behavior are par
 4. Complete the pull-request template. Explain security impact and manual verification rather than
    checking boxes without evidence.
 
-CI builds with warnings as errors, runs analyzer diagnostics and the full smoke suite, reviews new
+Warnings are errors in every build (`Directory.Build.props`), and `global.json` requires a .NET 10 SDK
+(10.0.103 or a later 10.0 release). CI runs the gate above, so it audits NuGet packages, runs
+analyzer diagnostics and the full smoke and UI suites, reviews new
 dependencies, and performs CodeQL analysis. A maintainer can request the separate Claude review by
 applying the `claude-review` label after the normal checks pass; it checks the diff against the
 repository rules and blocks on actionable defects.

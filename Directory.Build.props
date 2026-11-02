@@ -1,0 +1,12 @@
+<Project>
+
+  <!-- Applies to every project under the repository, so IDE builds, `dotnet build` and the release
+       hold the same gate as eng/verify.ps1 rather than relying on its command-line -p: switch. -->
+  <PropertyGroup>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <!-- Pinned rather than "latest", so a newer SDK cannot add analyzer rules unannounced. The
+         default analysis mode is kept; a stricter mode is the analyzer gate's decision (H4). -->
+    <AnalysisLevel>10.0</AnalysisLevel>
+  </PropertyGroup>
+
+</Project>

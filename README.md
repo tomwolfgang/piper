@@ -745,8 +745,11 @@ If dropping a `.saz` file onto the window does nothing, the log usually names th
 
 Set the `<Version>` in `src/Piper.App/Piper.App.csproj`, commit it, then create and push a
 matching tag (for example, `v0.2.0`). The GitHub release workflow verifies the tag matches the
-project version, runs the smoke tests, and publishes an NSIS installer, a portable Windows x64
-ZIP, a source ZIP, and SHA-256 checksums.
+project version, runs the same gate as pull requests (`eng/verify.ps1 -IncludeInstaller`: NuGet audit,
+analyzers, warnings as errors, smoke and UI tests), and publishes an NSIS installer, a portable Windows
+x64 ZIP, a source ZIP, and SHA-256 checksums, with a GitHub build-provenance attestation for each.
+Check a download with `gh attestation verify <file> --repo tomwolfgang/piper`. Releases are not
+Authenticode-signed yet.
 
 To build an installer from Visual Studio, open `Piper.slnx`, choose the `Release` configuration,
 then right-click `installer/Piper.Installer` and select **Build**. The installer is written to
