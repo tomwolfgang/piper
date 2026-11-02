@@ -114,8 +114,13 @@ public sealed class HttpStreamReader : IDisposable
     /// Reads one CRLF- (or bare LF-) terminated line, returning it without the terminator.
     /// Returns null at end of stream.
     /// </summary>
-    public async ValueTask<string?> ReadLineAsync(CancellationToken ct)
+    /// <param name="maxLength">The longest line accepted, terminator excluded; never more than
+    /// 64 KiB. A caller with a smaller budget left (a head, chunk extensions, trailers) passes what
+    /// remains of it, so an over-long line is refused when it gets there rather than read whole.</param>
+    /// <exception cref="HttpLineTooLongException">The line is longer than <paramref name="maxLength"/>.</exception>
+    public async ValueTask<string?> ReadLineAsync(CancellationToken ct, int maxLength = MaxLineLength)
     {
+        maxLength = Math.Clamp(maxLength, 0, MaxLineLength);
         // Offset relative to _start of the run already known to hold no LF. Compaction
         // and growth both preserve the run's layout relative to _start, so this stays
         // valid across FillAsync calls where an absolute index would not.
@@ -130,6 +135,7 @@ public sealed class HttpStreamReader : IDisposable
                 {
                     var lineEnd = lf;
                     if (lineEnd > _start && _buffer[lineEnd - 1] == (byte)'\r') lineEnd--;
+                    if (lineEnd - _start > maxLength) throw LineTooLong(maxLength);
                     var line = Encoding.Latin1.GetString(_buffer, _start, lineEnd - _start);
                     _start = lf + 1;
                     return line;
@@ -137,18 +143,22 @@ public sealed class HttpStreamReader : IDisposable
             }
 
             scanned = _end - _start;
-            if (scanned > MaxLineLength)
-                throw new HttpParseException($"Header line exceeded {MaxLineLength} bytes.");
+            // One byte of slack: the CR of a CRLF may already be here with its LF still to come.
+            if (scanned > maxLength + 1) throw LineTooLong(maxLength);
 
             if (!await FillAsync(ct).ConfigureAwait(false))
             {
                 if (_end == _start) return null;
+                if (_end - _start > maxLength) throw LineTooLong(maxLength);
                 var tail = Encoding.Latin1.GetString(_buffer, _start, _end - _start);
                 _start = _end;
                 return tail;
             }
         }
     }
+
+    private static HttpLineTooLongException LineTooLong(int maxLength) =>
+        new($"Line exceeded {maxLength} bytes.");
 
     /// <summary>Reads exactly <paramref name="count"/> bytes, throwing if the stream ends early.</summary>
     /// <remarks>Sized by what arrives (see <see cref="BodyBuffer"/>), not by <paramref name="count"/>.</remarks>
@@ -255,6 +265,22 @@ public class HttpParseException : Exception
 /// handlers still treat it as a failed read; a type of its own so a proxy can answer 413, not 400.
 /// </summary>
 public sealed class HttpBodyTooLargeException(string message) : HttpParseException(message);
+
+/// <summary>
+/// A request line, a header section or a trailer section is over its size or count cap. A
+/// <see cref="HttpParseException"/>, so every existing handler still treats it as a failed read (an
+/// origin's is a 502); a type of its own so a proxy can answer a client with
+/// <see cref="StatusCode"/>: 414 for a request line, 431 for header or trailer fields (RFC 9110
+/// 15.5.15, RFC 6585 5), not a plain 400.
+/// </summary>
+public sealed class HttpTooLargeException(string message, int statusCode) : HttpParseException(message)
+{
+    public int StatusCode { get; } = statusCode;
+}
+
+/// <summary>A line is longer than the caller allowed (<see cref="HttpStreamReader.ReadLineAsync"/>).
+/// The parser turns it into the error the line's place in the message calls for.</summary>
+public sealed class HttpLineTooLongException(string message) : HttpParseException(message);
 
 /// <summary>
 /// The peer sent nothing for longer than <see cref="HttpStreamReader.IdleTimeout"/>. A

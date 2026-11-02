@@ -778,8 +778,9 @@ public sealed class ProxyServer : IAsyncDisposable
 
         return request;
 
-        static HttpResponseData BadRequest(HttpParseException ex) =>
-            HttpResponseData.Simple(400, "Bad Request", $"Piper closed this connection: {ex.Message}");
+        static HttpResponseData BadRequest(HttpParseException ex) => ex is HttpTooLargeException big // 414 or 431
+            ? HttpResponseData.Simple(big.StatusCode, ReasonPhrases.For(big.StatusCode), $"Piper closed this connection: {ex.Message}")
+            : HttpResponseData.Simple(400, "Bad Request", $"Piper closed this connection: {ex.Message}");
 
         async Task FailRequestAsync(HttpRequestData failedRequest, HttpResponseData reply, string error)
         {

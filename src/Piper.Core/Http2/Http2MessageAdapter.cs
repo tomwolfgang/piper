@@ -195,20 +195,20 @@ public static class Http2MessageAdapter
     }
 
     // RFC 9113 §8.2.1: a name is a lowercase token; a value has no NUL, CR or LF and no leading or
-    // trailing SP/HTAB.
+    // trailing SP/HTAB. The token and NUL/CR/LF rules are HttpSyntax's, which the HTTP/1.1 parser
+    // applies too (HeaderBlockBuilder), so both refuse the same fields.
     private static void ValidateRegularField(string name, string value)
     {
         if (!IsToken(name) || name.Any(char.IsAsciiLetterUpper))
             throw Malformed("field name is not a lowercase token");
-        if (value.Any(c => c is '\0' or '\r' or '\n'))
+        if (HttpSyntax.HasForbiddenFieldValueChar(value))
             throw Malformed($"field '{name}' value contains NUL, CR or LF");
         if (value.Length > 0 && (value[0] is ' ' or '\t' || value[^1] is ' ' or '\t'))
             throw Malformed($"field '{name}' value has leading or trailing whitespace");
     }
 
     // RFC 9110 §5.6.2 tchar.
-    private static bool IsToken(string s) =>
-        s.Length > 0 && s.All(c => char.IsAsciiLetterOrDigit(c) || "!#$%&'*+-.^_`|~".Contains(c));
+    private static bool IsToken(string s) => HttpSyntax.IsToken(s);
 
     // Names only, never values: a value is captured data and must stay out of diagnostics.
     private static HttpParseException Malformed(string what) => new($"Malformed HTTP/2 message: {what}.");

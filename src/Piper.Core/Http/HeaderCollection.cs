@@ -121,7 +121,9 @@ public sealed class HeaderCollection : IEnumerable<HttpHeader>
 
     /// <summary>
     /// Parses a "Name: Value" block, tolerating what a hand-edited or archived block contains: blank
-    /// lines, lines with no colon (skipped) and obsolete line folding. Throws
+    /// lines, lines with no colon (skipped), obsolete line folding, and names and values the proxy
+    /// path would refuse (a name that is not a token, a CR or NUL in a value; see
+    /// <see cref="HeaderRules.Lenient"/>). Throws
     /// <see cref="HttpParseException"/> past <see cref="MaxParsedHeaders"/> headers or
     /// <see cref="MaxParsedBlockLength"/> characters. The input is a SAZ archive, a multipart part, a
     /// file or text the user pasted, so it is bounded like anything else a peer sends.
@@ -141,7 +143,7 @@ public sealed class HeaderCollection : IEnumerable<HttpHeader>
             return false;
         }
 
-        var builder = new HeaderBlockBuilder(lenient: true);
+        var builder = new HeaderBlockBuilder(HeaderRules.Lenient);
         foreach (var line in block.Replace("\r\n", "\n").Split('\n'))
         {
             if (line.Length == 0) continue;
@@ -161,6 +163,33 @@ public sealed class HeaderCollection : IEnumerable<HttpHeader>
     IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
 }
 
+/// <summary>Which field rules a <see cref="HeaderBlockBuilder"/> applies.</summary>
+internal enum HeaderRules
+{
+    /// <summary>
+    /// What a user typed or archived: the Composer's request, SAZ import, AutoResponder response
+    /// files, multipart parts (<see cref="HeaderCollection.Parse"/>). Odd lines are skipped, and names
+    /// and values are kept as written (a non-token name, a CR or NUL in a value), because reproducing
+    /// exactly that is the point. Nothing a peer sent through the proxy is parsed this way.
+    /// </summary>
+    Lenient,
+
+    /// <summary>
+    /// A response that is shown and never relayed (the Composer's): the line structure is held to the
+    /// proxy's rules (a malformed line or a leading fold is refused), but names and values are kept as
+    /// the origin sent them, as the Composer always showed them.
+    /// </summary>
+    LenientFields,
+
+    /// <summary>A request from a client on the proxy path (RFC 9112 5): a name must be a token with
+    /// nothing between it and the colon, a value holds no CR or NUL.</summary>
+    Request,
+
+    /// <summary>A response from an origin on the proxy path: as <see cref="Request"/>, except that
+    /// whitespace before the colon is removed rather than refused (RFC 9112 5.1).</summary>
+    Response,
+}
+
 /// <summary>
 /// Builds a <see cref="HeaderCollection"/> from header lines one at a time, so the stream parser
 /// (which reads lines off a socket) and <see cref="HeaderCollection.Parse"/> (which has a whole
@@ -171,35 +200,71 @@ public sealed class HeaderCollection : IEnumerable<HttpHeader>
 /// continuation to a <see cref="StringBuilder"/> rather than rebuilding the value as a new string
 /// every time, which took time proportional to the square of the number of folded lines.
 /// </remarks>
-internal sealed class HeaderBlockBuilder(bool lenient)
+internal sealed class HeaderBlockBuilder(HeaderRules rules)
 {
+    /// <summary>What <see cref="AddLine"/> returns past <see cref="HttpSyntax.MaxHeaderCount"/>, so the
+    /// stream parser can answer it as fields too large (431) rather than malformed.</summary>
+    internal const string TooManyHeaders = "Too many headers.";
+
+    private const string ForbiddenValueChar = "A header value contains a NUL or CR.";
+
     private readonly HeaderCollection _headers = new();
+    private readonly bool _skipOddLines = rules == HeaderRules.Lenient;
+    private readonly bool _checkFields = rules is HeaderRules.Request or HeaderRules.Response;
     private string? _name;
     private string _value = string.Empty;
     private StringBuilder? _folded;
 
     /// <summary>Takes one non-blank line. Returns null, or the reason the block must be refused.</summary>
+    /// <remarks>A field refusal quotes neither the name nor the value: either can be captured data or
+    /// carry the very bytes refused, and the reason ends up in the session error and the log.</remarks>
     public string? AddLine(string line)
     {
         if (line[0] is ' ' or '\t' && _name is not null)
         {
-            // Obsolete line folding (RFC 9112 5.2): the line continues the previous value.
+            // Obsolete line folding (RFC 9112 5.2): the line continues the previous value. A server or
+            // proxy may refuse it or replace it with SP; Piper replaces it, on purpose, so old clients
+            // keep working, and the joined value is re-emitted on one line. The continuation is held to
+            // the same value rules as the line it continues.
+            var continuation = _checkFields ? line.AsSpan().Trim(" \t") : line.AsSpan().Trim();
+            if (_checkFields && continuation.IndexOfAny('\0', '\r') >= 0) return ForbiddenValueChar;
             _folded ??= new StringBuilder(_value);
-            _folded.Append(' ').Append(line.AsSpan().Trim());
+            _folded.Append(' ').Append(continuation);
             return null;
         }
 
-        if (line[0] is ' ' or '\t' && !lenient) return "Header block starts with a folded line.";
+        if (line[0] is ' ' or '\t' && !_skipOddLines) return "Header block starts with a folded line.";
 
         var colon = line.IndexOf(':');
         if (colon <= 0)
-            return lenient ? null : $"Malformed header line: '{HttpParser.Truncate(line)}'";
+            return _skipOddLines ? null : $"Malformed header line: '{HttpParser.Truncate(line)}'";
 
         Flush();
-        if (_headers.Count >= HttpSyntax.MaxHeaderCount) return "Too many headers.";
+        if (_headers.Count >= HttpSyntax.MaxHeaderCount) return TooManyHeaders;
 
-        _name = lenient ? line[..colon].Trim() : line[..colon].TrimEnd();
-        _value = line[(colon + 1)..].Trim();
+        if (!_checkFields)
+        {
+            _name = _skipOddLines ? line[..colon].Trim() : line[..colon].TrimEnd();
+            _value = line[(colon + 1)..].Trim();
+            return null;
+        }
+
+        // RFC 9112 5.1: a proxy removes whitespace between a response's field name and the colon, and
+        // a server refuses a request that has it, which the token check below does.
+        var name = rules == HeaderRules.Response ? line[..colon].TrimEnd(' ', '\t') : line[..colon];
+        // OWS is SP and HTAB only (RFC 9110 5.6.3); anything else at either end is part of the value.
+        var value = line[(colon + 1)..].Trim(' ', '\t');
+
+        // The rules the HTTP/2 and HTTP/3 adapter applies (Http2MessageAdapter.ValidateRegularField),
+        // so the three protocols refuse the same fields. The name and value are re-emitted verbatim by
+        // HeaderCollection.ToRawString, to the origin for a request and to the client for a response,
+        // and a next hop that reads a lone CR as a line end, or a name with a space in it differently
+        // from Piper, would see headers Piper never saw.
+        if (!HttpSyntax.IsToken(name)) return "A header name is not a token (RFC 9110 5.1).";
+        if (HttpSyntax.HasForbiddenFieldValueChar(value)) return ForbiddenValueChar;
+
+        _name = name;
+        _value = value;
         return null;
     }
 
