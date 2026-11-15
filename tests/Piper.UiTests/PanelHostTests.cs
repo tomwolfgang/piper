@@ -23,6 +23,33 @@ internal static class PanelHostTests
         ShowPanelKeepsFocus(check, pumpUntil);
         ArrowKeysKeepFocus(check, pumpUntil);
         SetTabChecked(check, pumpUntil);
+        RevealHiddenPanel(check, pumpUntil);
+    }
+
+    private static void RevealHiddenPanel(Action<bool, string> check, Action<Func<bool>> pumpUntil)
+    {
+        Console.WriteLine("== a Passive reveal leaves a hidden panel hidden; an Explicit one shows it in its last area");
+        var layout = PanelLayout.Default();
+        layout.Hide(PanelId.Log);
+        using var rig = new Rig(layout);
+        rig.Form.Show();
+        pumpUntil(() => rig.Grid.Width > 0);
+
+        var log = rig.Registry.PageOf(PanelId.Log);
+        check(log.Parent is null, "setup: the hidden Log is in no strip");
+
+        rig.Host.ShowPanel(PanelId.Log, PanelReveal.Passive);
+        PumpFor(pumpUntil, 100);
+        check(log.Parent is null, "after a Passive reveal the Log is still in no strip");
+        check(rig.Host.Snapshot().IsHidden(PanelId.Log), "and the layout still has it hidden");
+        check(rig.Host.SelectedPanel(DockArea.Right) == PanelId.Inspectors, "and the right area's selection is unchanged");
+
+        rig.Host.ShowPanel(PanelId.Log, PanelReveal.Explicit);
+        PumpFor(pumpUntil, 100);
+        var strip = StripOf(rig, PanelId.Log);
+        check(strip is not null && strip == StripOf(rig, PanelId.Inspectors), "an Explicit reveal puts the Log back in its last area, the right");
+        check(strip?.SelectedTab == log && rig.Host.SelectedPanel(DockArea.Right) == PanelId.Log, "and selects it");
+        check(!rig.Host.Snapshot().IsHidden(PanelId.Log), "and the layout no longer has it hidden");
     }
 
     private static void DefaultLayout(Action<bool, string> check, Action<Func<bool>> pumpUntil)
@@ -191,7 +218,7 @@ internal static class PanelHostTests
         public readonly PanelRegistry Registry;
         public readonly PanelHost Host;
 
-        public Rig()
+        public Rig(PanelLayout? layout = null)
         {
             var options = new ProxyOptions();
             Grid = new SessionListView(Store) { Dock = DockStyle.Fill };
@@ -204,7 +231,7 @@ internal static class PanelHostTests
                 [PanelId.AutoResponder] = (new AutoResponderPanel(options.AutoResponder) { Dock = DockStyle.Fill }, "AutoResponder"),
                 [PanelId.Log] = (new TextBox { Dock = DockStyle.Fill, Multiline = true, ReadOnly = true }, "Log"),
             });
-            Host = new PanelHost(Registry, PanelLayout.Default()) { Dock = DockStyle.Fill };
+            Host = new PanelHost(Registry, layout ?? PanelLayout.Default()) { Dock = DockStyle.Fill };
             Form.Controls.Add(Host);
             // As MainForm does: the Sessions strip comes before the grid in tab order and would otherwise take the first focus.
             Form.ActiveControl = Grid;
