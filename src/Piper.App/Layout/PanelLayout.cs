@@ -220,6 +220,20 @@ internal sealed class PanelLayout
     // ---- repair ----------------------------------------------------------------------------
 
     /// <summary>
+    /// Sets one panel's stored state verbatim, for rebuilding a layout read from disk. Nothing is
+    /// validated here: the caller must run <see cref="Normalise"/> before the layout is shown.
+    /// </summary>
+    internal void Restore(PanelId id, DockArea area, int order, bool hidden, bool selected, Rectangle? floating, int dpi, bool topMost)
+    {
+        _entries[id] = new Entry
+        {
+            Area = area, Order = order, Hidden = hidden, Floating = floating is not null,
+            Bounds = floating, Dpi = dpi, TopMost = topMost,
+        };
+        if (selected && floating is null && !hidden && Enum.IsDefined(area)) _areas[area].Selected = id;
+    }
+
+    /// <summary>
     /// Makes the layout safe to show: sessions visible and its area never auto-hidden, dense tab order,
     /// a valid selection per area, every visible panel docked or floating, and every floating window
     /// reachable on one of <paramref name="workAreas"/> (docked instead when there are none).

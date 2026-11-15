@@ -5,6 +5,7 @@ using System.Security;
 using System.Security.Principal;
 using System.Windows.Forms;
 using Piper.App.Controls;
+using Piper.App.Layout;
 using Piper.App.Theme;
 using Piper.Core.Proxy;
 using Piper.Core.Security;
@@ -1265,7 +1266,8 @@ public sealed partial class MainForm : Form, IMessageFilter
     {
         var bounds = WindowState == FormWindowState.Normal ? Bounds : RestoreBounds;
         if (bounds.Width >= MinimumSize.Width && bounds.Height >= MinimumSize.Height)
-            WindowLayoutStore.Save(bounds, WindowState == FormWindowState.Maximized);
+            WindowLayoutStore.Save(new WindowLayoutStore.WindowLayout(bounds, WindowState == FormWindowState.Maximized,
+                WindowLayoutStore.Load()?.Panels ?? PanelLayout.Default()));
     }
 
     private static ToolStripStatusLabel NewStatusAction(string text, Image image, string tooltip) => new(text, image)
