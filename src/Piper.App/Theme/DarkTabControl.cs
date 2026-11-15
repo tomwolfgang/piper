@@ -125,4 +125,6 @@ internal sealed class DarkTabControl : TabControl
         else _checkedTabs.Remove(tab);
         Invalidate();
     }
+
+    internal bool IsTabChecked(TabPage tab) => _checkedTabs.Contains(tab);
 }

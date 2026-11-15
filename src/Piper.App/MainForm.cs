@@ -30,9 +30,9 @@ public sealed partial class MainForm : Form, IMessageFilter
     private readonly ComposerPanel _composer;
     private readonly FilterPanel _filterPanel;
     private readonly AutoResponderPanel _autoResponder;
-    private TabPage _autoResponderPage = null!;
     private readonly TextBox _logView;
-    private readonly DarkTabControl _rightTabs;
+    private readonly PanelRegistry _panels;
+    private readonly PanelHost _panelHost;
 
     private readonly ToolStripStatusLabel _zoomLabel;
     private ToolStripMenuItem? _zoomInItem;
@@ -84,7 +84,7 @@ public sealed partial class MainForm : Form, IMessageFilter
         Height = 950;
         StartPosition = FormStartPosition.CenterScreen;
         MinimumSize = new Size(900, 600);
-        RestoreWindowBounds();
+        var savedPanels = RestoreWindowBounds();
         if (_restoreMaximized) WindowState = FormWindowState.Maximized;
 
         if (StatusBarSettingsStore.Load() is { } statusBarSettings)
@@ -130,25 +130,16 @@ public sealed partial class MainForm : Form, IMessageFilter
             BorderStyle = BorderStyle.None,
         };
 
-        _rightTabs = new DarkTabControl { Dock = DockStyle.Fill, Font = Palette.UiFont };
-        var inspectorsPage = NewPage(Strings.Tabs.Inspectors, _inspector);
-        _rightTabs.TabPages.Add(inspectorsPage);
-        _rightTabs.TabPages.Add(NewPage(Strings.Tabs.Composer, _composer));
-        var filtersPage = NewPage(Strings.Tabs.Filters, _filterPanel);
-        _rightTabs.TabPages.Add(filtersPage);
-        _autoResponderPage = NewPage(Strings.Tabs.AutoResponder, _autoResponder);
-        _rightTabs.TabPages.Add(_autoResponderPage);
-        _rightTabs.TabPages.Add(NewPage(Strings.Tabs.Log, _logView));
-
-        var split = new SplitContainer
+        _panels = new PanelRegistry(new Dictionary<PanelId, (Control Content, string Title)>
         {
-            Dock = DockStyle.Fill,
-            Orientation = Orientation.Vertical,
-            SplitterWidth = 4,
-        };
-        split.Panel1.Controls.Add(_sessionList);
-        split.Panel2.Controls.Add(_rightTabs);
-        _mainSplit = split;
+            [PanelId.Sessions] = (_sessionList, Strings.Tabs.Sessions),
+            [PanelId.Inspectors] = (_inspector, Strings.Tabs.Inspectors),
+            [PanelId.Composer] = (_composer, Strings.Tabs.Composer),
+            [PanelId.Filters] = (_filterPanel, Strings.Tabs.Filters),
+            [PanelId.AutoResponder] = (_autoResponder, Strings.Tabs.AutoResponder),
+            [PanelId.Log] = (_logView, Strings.Tabs.Log),
+        });
+        _panelHost = new PanelHost(_panels, savedPanels) { Dock = DockStyle.Fill };
 
         var toolbar = BuildToolbar();
         var statusBar = BuildStatusBar(out _statusLabel, out _captureStatusLabel, out _captureScopeLabel,
@@ -157,12 +148,17 @@ public sealed partial class MainForm : Form, IMessageFilter
         _captureScopeLabel.Click += (_, _) => ShowCaptureScopeMenu();
         var trustBar = BuildTrustUi(statusBar);
         ApplyCaptureScope();
-        _rightTabs.AllowDrop = true;
-        _rightTabs.DragEnter += OnSessionDragEnter;
-        _rightTabs.DragOver += OnSessionDragOver;
-        _rightTabs.DragDrop += OnSessionDragDrop;
+        _panelHost.StripCreated += (_, strip) =>
+        {
+            strip.AllowDrop = true;
+            strip.DragEnter += OnSessionDragEnter;
+            strip.DragOver += OnSessionDragOver;
+            strip.DragDrop += OnSessionDragDrop;
+        };
 
-        Controls.Add(split);
+        Controls.Add(_panelHost);
+        // The Sessions tab comes before the grid in tab order; without this it, not the grid, takes the first focus.
+        ActiveControl = _sessionList;
         Controls.Add(trustBar);
         Controls.Add(toolbar);
         Controls.Add(BuildMenu());
@@ -179,7 +175,7 @@ public sealed partial class MainForm : Form, IMessageFilter
         };
         _sessionList.SendToComposerRequested += (_, session) =>
         {
-            _rightTabs.SelectedIndex = 1;
+            _panelHost.ShowPanel(PanelId.Composer, PanelReveal.Explicit);
             _composer.LoadSession(session);
         };
         _sessionList.ResendRequested += (_, session) => _ = _composer.ResendAsync(session);
@@ -187,7 +183,7 @@ public sealed partial class MainForm : Form, IMessageFilter
         // already been loaded into. Sending the row to the Composer instead made the gesture a
         // duplicate of middle-click and Ctrl+E, and left no row gesture that brought the
         // inspector back.
-        _sessionList.SessionActivated += (_, _) => _rightTabs.SelectedTab = inspectorsPage;
+        _sessionList.SessionActivated += (_, _) => _panelHost.ShowPanel(PanelId.Inspectors, PanelReveal.Explicit);
 
         // The filterset gets its own visibility slot rather than the grid's ad-hoc filter box.
         // Writing it into FilterText destroyed whatever the user had typed there, and worse, let
@@ -211,7 +207,7 @@ public sealed partial class MainForm : Form, IMessageFilter
             // on a non-empty query would stop unticking from being written, and the filterset
             // would come back applied on the next start.
             FilterSettingsStore.Save(_filterPanel.Settings);
-            _rightTabs.SetTabChecked(filtersPage, !admissionQuery.IsEmpty);
+            _panelHost.SetTabChecked(PanelId.Filters, !admissionQuery.IsEmpty);
         };
         _filterPanel.SettingsChanged += (_, _) => FilterSettingsStore.Save(_filterPanel.Settings);
         _sessionList.CopyAsNotice += (_, message) => AppendLog(message);
@@ -233,7 +229,7 @@ public sealed partial class MainForm : Form, IMessageFilter
                 NotifyRulesProblemOnce(Strings.AutoResponder.RulesNotSavedProtected(AutoResponderSettingsStore.DefaultPath));
             else
                 ReportAutoResponderSave(AutoResponderSettingsStore.Save(settings));
-            _rightTabs.SetTabChecked(_autoResponderPage, settings.Enabled && settings.Rules.Count > 0);
+            _panelHost.SetTabChecked(PanelId.AutoResponder, settings.Enabled && settings.Rules.Count > 0);
             foreach (var warning in _options.AutoResponder.Warnings) AppendLog(Strings.Log.AutoResponderWarning(warning));
         };
 
@@ -251,7 +247,7 @@ public sealed partial class MainForm : Form, IMessageFilter
 
         _sessionList.SendToAutoResponderRequested += (_, session) =>
         {
-            _rightTabs.SelectedTab = _autoResponderPage;
+            _panelHost.ShowPanel(PanelId.AutoResponder, PanelReveal.Explicit);
             _autoResponder.AddRuleFromSession(session);
         };
 
@@ -291,7 +287,6 @@ public sealed partial class MainForm : Form, IMessageFilter
         // app comes up with no visible main form at all.
     }
 
-    private readonly SplitContainer _mainSplit;
     private readonly System.Windows.Forms.Timer _statusTimer;
 
     protected override void OnHandleCreated(EventArgs e)
@@ -377,7 +372,6 @@ public sealed partial class MainForm : Form, IMessageFilter
     protected override async void OnShown(EventArgs e)
     {
         base.OnShown(e);
-        _mainSplit.SplitterDistance = (int)(_mainSplit.Width * 0.55);
 
         // A run that was killed, crashed, or was still open when Windows shut down leaves the
         // machine pointed at a Piper that is no longer listening, which the user sees as having
@@ -573,39 +567,33 @@ public sealed partial class MainForm : Form, IMessageFilter
         }
     }
 
-    private static TabPage NewPage(string title, Control content)
+    private void OnSessionDragEnter(object? sender, DragEventArgs e) => SetSessionDragEffect(sender, e);
+
+    private void OnSessionDragOver(object? sender, DragEventArgs e) => SetSessionDragEffect(sender, e);
+
+    private void SetSessionDragEffect(object? sender, DragEventArgs e)
     {
-        var page = new TabPage(title);
-        page.Controls.Add(content);
-        return page;
-    }
-
-    private void OnSessionDragEnter(object? sender, DragEventArgs e) => SetSessionDragEffect(e);
-
-    private void OnSessionDragOver(object? sender, DragEventArgs e) => SetSessionDragEffect(e);
-
-    private void SetSessionDragEffect(DragEventArgs e)
-    {
-        if (!HasCapturedRequest(e.Data) || SessionDropTarget(e) is not { } target)
+        if (!HasCapturedRequest(e.Data) || sender is not DarkTabControl strip || SessionDropTarget(strip, e) is not { } target)
         {
             e.Effect = DragDropEffects.None;
             return;
         }
 
         // Selecting on hover makes the target clear even when it was not the active tab.
-        _rightTabs.SelectedTab = target;
+        strip.SelectedTab = target;
         e.Effect = DragDropEffects.Copy;
     }
 
     private void OnSessionDragDrop(object? sender, DragEventArgs e)
     {
-        if (SessionDropTarget(e) is not { } target
+        if (sender is not DarkTabControl strip
+            || SessionDropTarget(strip, e) is not { } target
             || e.Data?.GetData(typeof(Session)) is not Session session
             || session.Request is null)
             return;
 
-        _rightTabs.SelectedTab = target;
-        if (target == _autoResponderPage) _autoResponder.AddRuleFromSession(session);
+        strip.SelectedTab = target;
+        if (_panels.IdOf(target) == PanelId.AutoResponder) _autoResponder.AddRuleFromSession(session);
         else _composer.LoadSession(session);
     }
 
@@ -684,24 +672,24 @@ public sealed partial class MainForm : Form, IMessageFilter
     /// The tab a dragged session would land on, or null where a drop means nothing. Composer and
     /// AutoResponder both take sessions; every other tab refuses them.
     /// </summary>
-    private TabPage? SessionDropTarget(DragEventArgs e)
+    private TabPage? SessionDropTarget(DarkTabControl strip, DragEventArgs e)
     {
-        var point = _rightTabs.PointToClient(new Point(e.X, e.Y));
+        var point = strip.PointToClient(new Point(e.X, e.Y));
 
-        for (var i = 0; i < _rightTabs.TabCount; i++)
+        for (var i = 0; i < strip.TabCount; i++)
         {
-            if (!_rightTabs.GetTabRect(i).Contains(point)) continue;
-            var tab = _rightTabs.TabPages[i];
+            if (!strip.GetTabRect(i).Contains(point)) continue;
+            var tab = strip.TabPages[i];
             return AcceptsSessions(tab) ? tab : null;
         }
 
         // Once hover has activated a tab that takes sessions, keep accepting the drop on its page too.
-        var stripBottom = _rightTabs.TabCount > 0 ? _rightTabs.GetTabRect(0).Bottom : 0;
-        return point.Y >= stripBottom && AcceptsSessions(_rightTabs.SelectedTab) ? _rightTabs.SelectedTab : null;
+        var stripBottom = strip.TabCount > 0 ? strip.GetTabRect(0).Bottom : 0;
+        return point.Y >= stripBottom && AcceptsSessions(strip.SelectedTab) ? strip.SelectedTab : null;
     }
 
     private bool AcceptsSessions(TabPage? tab) =>
-        tab is not null && (tab == _autoResponderPage || tab.Controls.Contains(_composer));
+        tab is not null && _panels.IdOf(tab) is PanelId.Composer or PanelId.AutoResponder;
 
     // ------------------------------------------------------------------ chrome
 
@@ -827,7 +815,7 @@ public sealed partial class MainForm : Form, IMessageFilter
             passthrough.Click += (_, _) => _autoResponder.SetPassthroughUnmatched(passthrough.Checked);
             rules.DropDownItems.Add(passthrough);
 
-            rules.DropDownItems.Add(Strings.Menu.AutoResponderRules, null, (_, _) => _rightTabs.SelectedTab = _autoResponderPage);
+            rules.DropDownItems.Add(Strings.Menu.AutoResponderRules, null, (_, _) => _panelHost.ShowPanel(PanelId.AutoResponder, PanelReveal.Explicit));
         };
         return rules;
     }
@@ -1104,7 +1092,7 @@ public sealed partial class MainForm : Form, IMessageFilter
             MessageBox.Show(this, string.Join("\n\n", shown), Strings.App.Name, MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
         if (IsDisposed) return;
-        _rightTabs.SelectedIndex = importedToComposer ? 1 : 0;
+        _panelHost.ShowPanel(importedToComposer ? PanelId.Composer : PanelId.Inspectors, PanelReveal.Explicit);
     }
 
     private ToolStrip BuildToolbar()
@@ -1117,7 +1105,7 @@ public sealed partial class MainForm : Form, IMessageFilter
         var composer = new ToolStripButton(Strings.Toolbar.Composer) { DisplayStyle = ToolStripItemDisplayStyle.Text };
         composer.Click += (_, _) =>
         {
-            _rightTabs.SelectedIndex = 1;
+            _panelHost.ShowPanel(PanelId.Composer, PanelReveal.Explicit);
             _composer.FocusSearch();
         };
 
@@ -1244,22 +1232,26 @@ public sealed partial class MainForm : Form, IMessageFilter
         return bar;
     }
 
-    private void RestoreWindowBounds()
+    /// <summary>Restores the saved window bounds and returns the saved panel layout, made safe to show.</summary>
+    private PanelLayout RestoreWindowBounds()
     {
-        if (WindowLayoutStore.Load() is not { } layout) return;
+        if (WindowLayoutStore.Load() is not { } layout) return PanelLayout.Default();
+        var panels = layout.Panels;
+        panels.Normalise(Screen.AllScreens.Select(screen => screen.WorkingArea).ToList());
         var bounds = layout.ToRectangle();
-        if (bounds.Width < MinimumSize.Width || bounds.Height < MinimumSize.Height) return;
+        if (bounds.Width < MinimumSize.Width || bounds.Height < MinimumSize.Height) return panels;
 
         // A monitor may have been disconnected since the last run. Require a meaningful visible
         // portion before restoring, otherwise retain the centred default window.
         var visible = Screen.AllScreens
             .Select(screen => Rectangle.Intersect(screen.WorkingArea, bounds))
             .Any(area => area.Width >= 48 && area.Height >= 48);
-        if (!visible) return;
+        if (!visible) return panels;
 
         StartPosition = FormStartPosition.Manual;
         Bounds = bounds;
         _restoreMaximized = layout.Maximized;
+        return panels;
     }
 
     private void SaveWindowBounds()
@@ -1267,7 +1259,7 @@ public sealed partial class MainForm : Form, IMessageFilter
         var bounds = WindowState == FormWindowState.Normal ? Bounds : RestoreBounds;
         if (bounds.Width >= MinimumSize.Width && bounds.Height >= MinimumSize.Height)
             WindowLayoutStore.Save(new WindowLayoutStore.WindowLayout(bounds, WindowState == FormWindowState.Maximized,
-                WindowLayoutStore.Load()?.Panels ?? PanelLayout.Default()));
+                _panelHost.Snapshot()));
     }
 
     private static ToolStripStatusLabel NewStatusAction(string text, Image image, string tooltip) => new(text, image)
@@ -1454,7 +1446,7 @@ public sealed partial class MainForm : Form, IMessageFilter
             AppendLog(Strings.Log.ListenFailed(_options.Port, ex.GetType().Name, ex.Message));
             AppendLog(Strings.Log.PortInUseHint);
             UpdateCaptureStatus();
-            _rightTabs.SelectedIndex = 4; // surface the Log tab (Inspectors, Composer, Filters, AutoResponder, Log)
+            _panelHost.ShowPanel(PanelId.Log, PanelReveal.Passive);
         }
     }
 
@@ -1735,7 +1727,7 @@ public sealed partial class MainForm : Form, IMessageFilter
         }
         else if (e.Control && e.KeyCode == Keys.K)
         {
-            _rightTabs.SelectedIndex = 1;
+            _panelHost.ShowPanel(PanelId.Composer, PanelReveal.Explicit);
             _composer.FocusSearch();
             e.Handled = true;
         }
@@ -2170,5 +2162,7 @@ public sealed partial class MainForm : Form, IMessageFilter
             _ca.Dispose();
         }
         base.Dispose(disposing);
+        // Last: the panels the window's own disposal did not reach, such as a hidden one.
+        if (disposing) _panels.Dispose();
     }
 }

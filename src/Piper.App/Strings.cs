@@ -112,6 +112,7 @@ internal static class Strings
 
     public static class Tabs
     {
+        public static string Sessions => I18n.T("tabs.sessions");
         public static string Inspectors => I18n.T("tabs.inspectors");
         public static string Composer => I18n.T("tabs.composer");
         public static string Filters => I18n.T("tabs.filters");

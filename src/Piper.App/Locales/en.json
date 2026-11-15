@@ -45,6 +45,7 @@
   },
 
   "tabs": {
+    "sessions": "Sessions",
     "inspectors": "Inspectors",
     "composer": "Composer",
     "filters": "Filters",
