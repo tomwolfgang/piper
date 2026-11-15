@@ -259,6 +259,11 @@ public static class Palette
                 break;
         }
 
+        // Scrollbars and tree glyphs are drawn by the OS, which ignores BackColor: in the dark theme
+        // they stayed system-white beside every grid, editor and tree.
+        if (control is ListView or TreeView or ListBox or RichTextBox or ScrollBar or TextBox { Multiline: true })
+            ApplyNativeTheme(control);
+
         // A context menu is attached to a control, not parented by it, so the walk below never
         // reaches it: every right-click menu stayed system-light in dark mode and kept the font size
         // it was built with after a zoom change.
@@ -386,6 +391,55 @@ public static class Palette
         }
     }
 
+    /// <summary>
+    /// Gives a control's OS-drawn parts -- its scrollbars, and a tree's expand glyphs -- the Explorer
+    /// visual style that matches the palette: <c>DarkMode_Explorer</c> in the dark theme and
+    /// <c>Explorer</c> in the light one. Applied again whenever the control's handle is recreated,
+    /// and by every <see cref="Apply"/> walk, so a theme toggle reaches it.
+    /// </summary>
+    /// <remarks>
+    /// Only the documented <c>SetWindowTheme</c> is used. Parts the OS draws outside the window's
+    /// own theme, such as a ListView's column header scrollbars, may stay light.
+    /// </remarks>
+    public static void ApplyNativeTheme(Control control)
+    {
+        ArgumentNullException.ThrowIfNull(control);
+        control.HandleCreated -= ApplyNativeThemeOnHandleCreated;
+        control.HandleCreated += ApplyNativeThemeOnHandleCreated;
+        if (control.IsHandleCreated) SetNativeTheme(control);
+    }
+
+    /// <summary>The visual style <see cref="ApplyNativeTheme"/> last gave the control's current handle, or null.</summary>
+    public static string? NativeThemeOf(Control control) =>
+        control.IsHandleCreated && NativeThemes.TryGetValue(control, out var theme) && theme.Handle == control.Handle
+            ? theme.Name
+            : null;
+
+    private static readonly ConditionalWeakTable<Control, NativeTheme> NativeThemes = [];
+
+    private static void ApplyNativeThemeOnHandleCreated(object? sender, EventArgs e)
+    {
+        if (sender is Control control) SetNativeTheme(control);
+    }
+
+    private static void SetNativeTheme(Control control)
+    {
+        var name = IsLightMode ? "Explorer" : "DarkMode_Explorer";
+        try
+        {
+            if (SetWindowTheme(control.Handle, name, null) == 0)
+                NativeThemes.AddOrUpdate(control, new NativeTheme(control.Handle, name));
+        }
+        // Without uxtheme the control keeps the system style, which is what it had before.
+        catch (DllNotFoundException) { }
+        catch (EntryPointNotFoundException) { }
+    }
+
+    [DllImport("uxtheme.dll", CharSet = CharSet.Unicode)]
+    private static extern int SetWindowTheme(IntPtr hwnd, string pszSubAppName, string? pszSubIdList);
+
+    private sealed record NativeTheme(IntPtr Handle, string Name);
+
     private static bool SetDwmAttribute(IntPtr handle, int attribute, int value)
     {
         try
@@ -421,6 +475,10 @@ public static class Palette
         public override Color ButtonSelectedHighlight => Selection;
         public override Color ButtonPressedHighlight => Selection;
         public override Color CheckBackground => Selection;
+        // A strip too narrow for its items shows an overflow button, which otherwise stays system-light.
+        public override Color OverflowButtonGradientBegin => SurfaceAlt;
+        public override Color OverflowButtonGradientMiddle => SurfaceAlt;
+        public override Color OverflowButtonGradientEnd => SurfaceAlt;
     }
 
     private sealed class BaseHeight(int value)

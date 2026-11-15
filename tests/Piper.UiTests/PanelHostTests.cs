@@ -65,6 +65,7 @@ internal static class PanelHostTests
         FloatingWindowChrome(check, pumpUntil);
         FloatingCaptionDocks(check, pumpUntil);
         CaptionDragWindowDisposed(check, pumpUntil);
+        NativePartsFollowTheme(check, pumpUntil);
         FlyoutScreenshots(pumpUntil);
         DragScreenshots(pumpUntil);
     }
@@ -1771,6 +1772,63 @@ internal static class PanelHostTests
             rig.Host.ShowPanel(PanelId.Filters, PanelReveal.Explicit);
             PumpFor(pumpUntil, 100);
             check(rig.Filters.BackColor == Palette.Background, "showing it again re-themes it");
+        }
+        finally
+        {
+            if (Palette.IsLightMode != wasLight) Palette.ToggleMode();
+        }
+    }
+
+    private static void NativePartsFollowTheme(Action<bool, string> check, Action<Func<bool>> pumpUntil)
+    {
+        Console.WriteLine("== scrollbars, trees and toolbars follow the palette");
+        using var rig = new Rig();
+        rig.Form.Show();
+        pumpUntil(() => rig.Grid.Width > 0);
+        var wasLight = Palette.IsLightMode;
+        try
+        {
+            if (Palette.IsLightMode) Palette.ToggleMode();
+            Palette.Apply(rig.Form);
+            rig.Host.ApplyTheme();
+            PumpFor(pumpUntil, 100);
+
+            var log = rig.Registry.ContentOf(PanelId.Log);
+            var tree = Descendants(rig.Inspector).OfType<TreeView>().First();
+            var hosts = Descendants(rig.Filters).OfType<ListBox>().First();
+            var scrollBar = Descendants(rig.Inspector).OfType<ScrollBar>().FirstOrDefault();
+            Control[] natives = [rig.List, tree, log, hosts, .. scrollBar is null ? Array.Empty<Control>() : [scrollBar]];
+            check(scrollBar is not null, "setup: the hex view has a native scrollbar to theme");
+            foreach (var control in natives)
+            {
+                // A page not on screen yet gets its handle now, as it would when first shown.
+                _ = control.Handle;
+                check(Palette.NativeThemeOf(control) == "DarkMode_Explorer",
+                    $"dark: the {control.GetType().Name}'s scrollbars use DarkMode_Explorer ({Palette.NativeThemeOf(control) ?? "none"})");
+            }
+
+            typeof(Control).GetMethod("RecreateHandle", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+                .Invoke(tree, null);
+            check(Palette.NativeThemeOf(tree) == "DarkMode_Explorer", "a recreated handle gets the dark theme again");
+
+            Palette.ToggleMode();
+            Palette.Apply(rig.Form);
+            rig.Host.ApplyTheme();
+            foreach (var control in natives)
+                check(Palette.NativeThemeOf(control) == "Explorer", $"light: the {control.GetType().Name} goes back to Explorer ({Palette.NativeThemeOf(control) ?? "none"})");
+
+            Palette.ToggleMode();
+            Palette.Apply(rig.Form);
+            rig.Host.ApplyTheme();
+            rig.Host.ShowPanel(PanelId.AutoResponder, PanelReveal.Explicit);
+            PumpFor(pumpUntil, 100);
+            var responder = rig.Registry.ContentOf(PanelId.AutoResponder);
+            var toolbar = Descendants(responder).OfType<ToolStrip>().First(strip => strip is not ToolStripDropDown);
+            check(toolbar.Renderer is ToolStripProfessionalRenderer { ColorTable: not null } renderer
+                  && renderer.ColorTable.OverflowButtonGradientBegin == Palette.SurfaceAlt,
+                "the AutoResponder toolbar has the palette renderer, overflow button included");
+            check(!toolbar.OverflowButton.Visible && toolbar.Items.Cast<ToolStripItem>().All(item => item.Placement == ToolStripItemPlacement.Main && item.Visible),
+                "every AutoResponder toolbar item fits, so no overflow arrow shows");
         }
         finally
         {
