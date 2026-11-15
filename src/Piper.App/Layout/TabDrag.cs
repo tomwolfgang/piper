@@ -89,7 +89,7 @@ internal sealed class TabDrag : IMessageFilter
         if (_source is not null || _host.IsDisposed || _host.ShuttingDown || window.IsDisposed) return;
         _window = window;
         _panel = id;
-        var drop = HitTest(screen);
+        var drop = HitTest(screen, tabRowOnly: true);
         Mark(drop.Kind == DropKind.Strip ? drop.Strip : null, drop.Gap);
         MarkAutoHide(drop.Kind == DropKind.AutoHide ? drop.AutoHide : null);
     }
@@ -102,7 +102,7 @@ internal sealed class TabDrag : IMessageFilter
     {
         ArgumentNullException.ThrowIfNull(window);
         if (_window != window) return;
-        var drop = HitTest(screen);
+        var drop = HitTest(screen, tabRowOnly: true);
         var id = _panel;
         Cancel();
         if (!moved || drop.Kind is not (DropKind.Strip or DropKind.AutoHide) || _host.IsDisposed || !_host.IsHandleCreated) return;
@@ -113,6 +113,12 @@ internal sealed class TabDrag : IMessageFilter
             if (_host.IsDisposed || _host.ShuttingDown) return;
             _host.MoveTo(id, drop.Area, drop.Kind == DropKind.Strip ? drop.Gap : null);
         });
+    }
+
+    /// <summary>Ends a title-bar drag of <paramref name="window"/>, if that is the one tracked, without docking: the window went away mid-move.</summary>
+    public void CancelWindow(Form window)
+    {
+        if (_window == window) Cancel();
     }
 
     /// <summary>Ends a drag, if one is under way, without changing the layout.</summary>
@@ -215,8 +221,10 @@ internal sealed class TabDrag : IMessageFilter
     /// What is under a screen point. Floating windows come first, as they sit above the main window, and
     /// refuse tab drops: each holds one panel. Then the docked strips, then auto-hidden areas' strips.
     /// Elsewhere in the main window nothing happens; outside it and every floating window the panel floats.
+    /// With <paramref name="tabRowOnly"/>, for a floating window dragged by its title bar, a docked strip
+    /// counts only over its row of tabs: parking the window over a panel's content must not dock it.
     /// </summary>
-    private Drop HitTest(Point screen)
+    private Drop HitTest(Point screen, bool tabRowOnly = false)
     {
         var strips = _strips.Where(strip => !strip.IsDisposed && strip.IsHandleCreated).ToArray();
         foreach (var strip in strips)
@@ -226,7 +234,9 @@ internal sealed class TabDrag : IMessageFilter
         foreach (var strip in strips)
         {
             if (_host.DockedAreaOf(strip) is not { } area || !strip.Visible || strip.TabCount == 0) continue;
-            if (strip.RectangleToScreen(strip.ClientRectangle).Contains(screen))
+            var target = strip.ClientRectangle;
+            if (tabRowOnly) target.Height = Math.Min(strip.GetTabRect(0).Bottom, target.Height);
+            if (strip.RectangleToScreen(target).Contains(screen))
                 return new Drop(DropKind.Strip, area, strip, GapAt(strip, strip.PointToClient(screen)));
         }
 

@@ -64,6 +64,7 @@ internal static class PanelHostTests
         BottomKeepsMinimum(check, pumpUntil);
         FloatingWindowChrome(check, pumpUntil);
         FloatingCaptionDocks(check, pumpUntil);
+        CaptionDragWindowDisposed(check, pumpUntil);
         FlyoutScreenshots(pumpUntil);
         DragScreenshots(pumpUntil);
     }
@@ -1511,9 +1512,49 @@ internal static class PanelHostTests
         check(rig.Host.IsFloating(PanelId.Log) && !window.IsDisposed && !right.IsDropTarget,
             "a drag that ends where it began, as Esc leaves it, docks nothing");
 
+        var content = right.PointToScreen(new Point(right.Width / 2, right.GetTabRect(0).Bottom + (right.Height - right.GetTabRect(0).Bottom) / 2));
+        window.PointerPosition = () => content;
+        SendMessage(window.Handle, WmEnterSizeMove, 0, 0);
+        window.Location = new Point(window.Left + 40, window.Top + 40);
+        MovingMessage(window);
+        PumpFor(pumpUntil, 60);
+        check(!right.IsDropTarget, "over a panel's content, below the tabs, nothing is marked");
+        SendMessage(window.Handle, WmExitSizeMove, 0, 0);
+        PumpFor(pumpUntil, 150);
+        check(rig.Host.IsFloating(PanelId.Log) && !window.IsDisposed,
+            "releasing the title bar over a panel's content keeps the window floating where it was parked");
+        if (window.IsDisposed) return;
+
         SendMessage(window.Handle, WmNcLButtonDblClk, HtCaption, caption);
         PumpFor(pumpUntil, 100);
         check(!rig.Host.IsFloating(PanelId.Log) && window.IsDisposed, "double-clicking the title bar docks the panel");
+    }
+
+    private static void CaptionDragWindowDisposed(Action<bool, string> check, Action<Func<bool>> pumpUntil)
+    {
+        Console.WriteLine("== a floating window disposed in the middle of a title-bar drag leaves no marker");
+        using var rig = new Rig();
+        rig.Form.Show();
+        pumpUntil(() => rig.Grid.Width > 0);
+        rig.Host.FloatPanel(PanelId.Log, new Point(300, 300));
+        PumpFor(pumpUntil, 150);
+        var window = rig.Host.FloatingWindow(PanelId.Log);
+        check(window is not null, "setup: the Log floats");
+        if (window is null) return;
+        var right = StripOf(rig, PanelId.Composer)!;
+        var target = BeforeTab(right, 1);
+        window.PointerPosition = () => target;
+        SendMessage(window.Handle, WmEnterSizeMove, 0, 0);
+        window.Location = new Point(window.Left + 40, window.Top + 40);
+        MovingMessage(window);
+        PumpFor(pumpUntil, 60);
+        check(right.IsDropTarget, "setup: a title-bar drag marks the Right tabs");
+        // Gone inside the move loop, so WM_EXITSIZEMOVE never comes; ShuttingDown keeps the close from
+        // docking, whose rearrangement would clear the marker on its own.
+        window.ShuttingDown = true;
+        window.Dispose();
+        PumpFor(pumpUntil, 60);
+        check(!right.IsDropTarget && right.DropIndex == -1, "a window disposed mid-drag leaves no marker behind");
     }
 
     private const int WmNcLButtonDblClk = 0x00A3;

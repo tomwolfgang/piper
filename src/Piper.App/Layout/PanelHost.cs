@@ -605,8 +605,11 @@ internal sealed class PanelHost : UserControl
             window.MenuRequested += (_, screen) => ShowTabMenu(id, screen);
             window.CaptionDragging += (_, screen) => _drag.TrackWindow(id, window, screen);
             window.CaptionDragEnded += (_, end) => _drag.EndWindow(window, end.Screen, end.Moved);
+            // A window gone in the middle of its own move loop never sends the end of the move.
+            window.Disposed += (_, _) => _drag.CancelWindow(window);
             window.FormClosed += (_, _) =>
             {
+                _drag.CancelWindow(window);
                 // The owner closing, or a shutdown, ends the window without a dock; forget it.
                 if (_floating.TryGetValue(id, out var current) && current == window) _floating.Remove(id);
             };
