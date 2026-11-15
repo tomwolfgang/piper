@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.Json;
+using Piper.Core.Text;
 
 namespace Piper.Core.Proxy;
 
@@ -158,7 +159,7 @@ public static class AutoResponderSettingsStore
         try
         {
             using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
-            if (!TryReadBounded(stream, out var content, out var length))
+            if (!BoundedRead.TryRead(stream, MaxFileBytes, out var content, out var length))
                 return new AutoResponderLoadResult(AutoResponderLoadStatus.TooLarge);
 
             AutoResponderSettings? settings;
@@ -228,30 +229,6 @@ public static class AutoResponderSettingsStore
         {
             return null;
         }
-    }
-
-    /// <summary>Reads at most <see cref="MaxFileBytes"/>; false when the stream holds more.</summary>
-    private static bool TryReadBounded(Stream stream, out byte[] content, out int length)
-    {
-        content = [];
-        length = 0;
-
-        // The length is checked while reading rather than up front: it is only a hint, and a file
-        // that grows after it was asked for must not be read past the cap.
-        using var buffer = new MemoryStream();
-        var chunk = new byte[64 * 1024];
-        var remaining = MaxFileBytes + 1;
-        int read;
-        while (remaining > 0 && (read = stream.Read(chunk, 0, (int)Math.Min(chunk.Length, remaining))) > 0)
-        {
-            buffer.Write(chunk, 0, read);
-            remaining -= read;
-        }
-
-        if (buffer.Length > MaxFileBytes) return false;
-        content = buffer.GetBuffer();
-        length = (int)buffer.Length;
-        return true;
     }
 
     /// <summary>
