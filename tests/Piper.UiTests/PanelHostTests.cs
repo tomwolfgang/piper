@@ -979,8 +979,7 @@ internal static class PanelHostTests
         var box = Descendants(rig.Registry.ContentOf(PanelId.Composer)).OfType<TextBoxBase>().FirstOrDefault(control => control.Visible && control.Enabled);
         check(composerWindow is not null && box is not null, "setup: the Composer floats and has a text box");
         if (composerWindow is null || box is null) return;
-        composerWindow.Activate();
-        PumpFor(pumpUntil, 100);
+        if (!TryTakeForeground(nameof(ShortcutsInFloatingWindow), composerWindow, check, pumpUntil)) return;
         box.Focus();
         pumpUntil(() => Form.ActiveForm == composerWindow && box.Focused);
         check(Form.ActiveForm == composerWindow && box.Focused, $"setup: the floating Composer is active with its text box focused (active: {Form.ActiveForm?.Text})");
@@ -993,7 +992,7 @@ internal static class PanelHostTests
         var gridWindow = rig.Host.FloatingWindow(PanelId.Sessions);
         check(gridWindow is not null, "setup: the sessions grid floats");
         if (gridWindow is null) return;
-        gridWindow.Activate();
+        if (!TryTakeForeground(nameof(ShortcutsInFloatingWindow), gridWindow, check, pumpUntil)) return;
         rig.List.Focus();
         pumpUntil(() => Form.ActiveForm == gridWindow && rig.List.Focused);
         check(ProcessCmdKey(rig.List, Keys.Control | Keys.X) && cleared == 1 && rig.Store.Count == 0, "Ctrl+X on the floating grid clears the capture");
@@ -1552,13 +1551,14 @@ internal static class PanelHostTests
         rig.Form.Show();
         pumpUntil(() => rig.Grid.Width > 0);
 
+        var foreground = TryTakeForeground(nameof(MoveKeepsFocus), rig.Form, check, pumpUntil);
         rig.Host.FocusPanel(PanelId.Filters);
         PumpFor(pumpUntil, 100);
-        check(rig.Filters.ContainsFocus, $"setup: the Filters have the focus (focus: {FocusedName(rig.Form)})");
+        if (foreground) check(rig.Filters.ContainsFocus, $"setup: the Filters have the focus (focus: {FocusedName(rig.Form)})");
         rig.Host.MoveTo(PanelId.Filters, DockArea.Left);
         PumpFor(pumpUntil, 100);
         check(StripOf(rig, PanelId.Filters) == StripOf(rig, PanelId.Sessions), "setup: the Filters moved to the left");
-        check(rig.Filters.ContainsFocus, $"a move with the tab menu keeps the focus in the Filters (focus: {FocusedName(rig.Form)})");
+        if (foreground) check(rig.Filters.ContainsFocus, $"a move with the tab menu keeps the focus in the Filters (focus: {FocusedName(rig.Form)})");
 
         rig.Host.FloatPanel(PanelId.Filters);
         PumpFor(pumpUntil, 150);
@@ -1566,8 +1566,9 @@ internal static class PanelHostTests
         PumpFor(pumpUntil, 100);
         rig.Host.MoveTo(PanelId.Filters, DockArea.Bottom);
         PumpFor(pumpUntil, 150);
-        check(rig.Filters.ContainsFocus && rig.Filters.FindForm() == rig.Form,
-            $"and a floating panel moved to the Bottom brings the focus with it (focus: {FocusedName(rig.Form)})");
+        check(rig.Filters.FindForm() == rig.Form, "a floating panel moved to the Bottom docks into the main window");
+        if (!foreground) return;
+        check(rig.Filters.ContainsFocus, $"and a floating panel moved to the Bottom brings the focus with it (focus: {FocusedName(rig.Form)})");
 
         rig.List.Focus();
         PumpFor(pumpUntil, 50);
@@ -1588,13 +1589,15 @@ internal static class PanelHostTests
         rig.Form.Show();
         pumpUntil(() => rig.Grid.Width > 0);
 
+        var foreground = TryTakeForeground(nameof(PassiveRevealKeepsFocus), rig.Form, check, pumpUntil);
         rig.Host.FocusPanel(PanelId.Filters);
         PumpFor(pumpUntil, 100);
-        check(rig.Filters.ContainsFocus, $"setup: the Filters have the focus (focus: {FocusedName(rig.Form)})");
+        if (foreground) check(rig.Filters.ContainsFocus, $"setup: the Filters have the focus (focus: {FocusedName(rig.Form)})");
         rig.Host.ShowPanel(PanelId.Log, PanelReveal.Passive);
         PumpFor(pumpUntil, 100);
-        check(rig.Host.SelectedPanel(DockArea.Right) == PanelId.Filters && rig.Filters.ContainsFocus,
-            $"the Filters stay selected with the focus (selected {rig.Host.SelectedPanel(DockArea.Right)}, focus: {FocusedName(rig.Form)})");
+        if (foreground)
+            check(rig.Host.SelectedPanel(DockArea.Right) == PanelId.Filters && rig.Filters.ContainsFocus,
+                $"the Filters stay selected with the focus (selected {rig.Host.SelectedPanel(DockArea.Right)}, focus: {FocusedName(rig.Form)})");
 
         rig.Host.ShowPanel(PanelId.Log, PanelReveal.Explicit);
         PumpFor(pumpUntil, 100);
@@ -1612,7 +1615,7 @@ internal static class PanelHostTests
         rig.Host.SetAutoHidden(DockArea.Right, true);
         PumpFor(pumpUntil, 100);
         var flyout = rig.Host.FlyoutOf(DockArea.Right);
-        rig.Form.Activate();
+        if (!TryTakeForeground(nameof(DeactivateCloseKeepsActivation), rig.Form, check, pumpUntil)) return;
         rig.Host.FocusPanel(PanelId.Filters);
         PumpFor(pumpUntil, 100);
         check(flyout.IsOpen && rig.Filters.ContainsFocus && Form.ActiveForm == rig.Form,
@@ -1638,7 +1641,7 @@ internal static class PanelHostTests
         other.Close();
         PumpFor(pumpUntil, 100);
 
-        rig.Form.Activate();
+        if (!TryTakeForeground(nameof(DeactivateCloseKeepsActivation), rig.Form, check, pumpUntil)) return;
         rig.Host.FocusPanel(PanelId.Filters);
         PumpFor(pumpUntil, 100);
         check(flyout.IsOpen && rig.Filters.ContainsFocus, "setup: the flyout has the focus again");
@@ -2329,6 +2332,27 @@ internal static class PanelHostTests
     {
         var deadline = Environment.TickCount64 + milliseconds;
         pumpUntil(() => Environment.TickCount64 >= deadline);
+    }
+
+    /// <summary>
+    /// Activating a window is what the activation tests exercise, but Windows only grants the foreground
+    /// to a process the user is not fighting with, so on a workstation in use it can be refused. Activates
+    /// the form and waits up to three seconds for it to be the active form. When it is not: under CI (the
+    /// CI or GITHUB_ACTIONS environment variable is set) that fails the check, so CI never silently loses
+    /// the coverage; elsewhere it prints a skip line and the caller leaves its activation checks out.
+    /// </summary>
+    private static bool TryTakeForeground(string test, Form form, Action<bool, string> check, Action<Func<bool>> pumpUntil)
+    {
+        form.Activate();
+        var deadline = Environment.TickCount64 + 3000;
+        pumpUntil(() => Form.ActiveForm == form || Environment.TickCount64 >= deadline);
+        if (Form.ActiveForm == form) return true;
+
+        if (Environment.GetEnvironmentVariable("CI") is { Length: > 0 } || Environment.GetEnvironmentVariable("GITHUB_ACTIONS") is { Length: > 0 })
+            check(false, $"{test}: could not take the foreground under CI (active: {Form.ActiveForm?.Text ?? "none"})");
+        else
+            Console.WriteLine($"skip  {test}: could not take the foreground; activation checks skipped");
+        return false;
     }
 
     /// <summary>The six real panels in a registry and a default host, in a 1200x800 window, wired as MainForm wires them.</summary>
