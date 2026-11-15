@@ -168,6 +168,7 @@ method:POST host:api status:>=400 -is:image body:"order"
 | `Ctrl+0` | reset the UI font to 100% |
 | `Ctrl+Alt+1` ... `Ctrl+Alt+6` | show and focus Sessions, Inspectors, Composer, Filters, AutoResponder or Log (outside text boxes, where `Ctrl+Alt` is `AltGr` and types a character) |
 | right-click a panel's tab, or `Shift+F10` / Menu key on it | move the panel to the left, right or bottom area, float it in its own window or dock it again, auto-hide its area, keep a floating window on top, or hide it |
+| click ▾ at the right end of a tab row (shown when its tabs do not all fit) | list every tab in that row and switch to one |
 | `Esc` in an auto-hidden panel's flyout | close the flyout |
 | `Esc` while dragging a panel's tab | cancel the drag |
 

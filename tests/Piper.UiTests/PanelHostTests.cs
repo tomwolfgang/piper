@@ -66,6 +66,7 @@ internal static class PanelHostTests
         FloatingCaptionDocks(check, pumpUntil);
         CaptionDragWindowDisposed(check, pumpUntil);
         NativePartsFollowTheme(check, pumpUntil);
+        TabOverflowMenu(check, pumpUntil);
         FlyoutScreenshots(pumpUntil);
         DragScreenshots(pumpUntil);
     }
@@ -1834,6 +1835,98 @@ internal static class PanelHostTests
         {
             if (Palette.IsLightMode != wasLight) Palette.ToggleMode();
         }
+    }
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern nint FindWindowEx(nint parent, nint childAfter, string className, string? windowName);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool IsWindowVisible(nint hwnd);
+
+    /// <summary>Every tab is either wholly in view, clear of the ▾ button, or reachable from its menu.</summary>
+    private static bool EveryTabReachable(DarkTabControl strip, out string detail)
+    {
+        var button = strip.OverflowButtonBounds;
+        var limit = button.IsEmpty ? strip.Width : button.Left;
+        var hidden = Enumerable.Range(0, strip.TabCount)
+            .Where(i => strip.GetTabRect(i) is var rect && (rect.Left < 0 || rect.Right > limit))
+            .Select(i => strip.TabPages[i].Text).ToArray();
+        detail = hidden.Length == 0 ? "all in view" : $"cut off: {string.Join(", ", hidden)}; button {(button.IsEmpty ? "absent" : "shown")}";
+        return hidden.Length == 0 || !button.IsEmpty;
+    }
+
+    private static void TabOverflowMenu(Action<bool, string> check, Action<Func<bool>> pumpUntil)
+    {
+        Console.WriteLine("== tabs that do not fit are reached from a ▾ menu");
+        using var rig = new Rig();
+        rig.Form.Show();
+        pumpUntil(() => rig.Grid.Width > 0);
+        Palette.Apply(rig.Form);
+        PumpFor(pumpUntil, 100);
+        var right = StripOf(rig, PanelId.Log)!;
+        check(EveryTabReachable(right, out var detail), $"at 1200 px no Right tab is unreachable ({detail})");
+
+        // Narrow enough that the five Right tabs cannot all fit.
+        rig.Form.Width = 760;
+        PumpFor(pumpUntil, 150);
+        check(right.HasOverflow && !right.OverflowButtonBounds.IsEmpty, $"a narrow Right strip shows the ▾ button ({right.Width} px)");
+        var upDown = FindWindowEx(right.Handle, 0, "msctls_updown32", null);
+        check(upDown == 0 || !IsWindowVisible(upDown), "and the native ◀▶ arrows are hidden");
+        var button = right.OverflowButtonBounds;
+        check(button.Width == right.ItemSize.Height && button.Right == right.Width, "the button is a row-high square at the right end");
+        var centre = new Point(button.X + button.Width / 2, button.Y + button.Height / 2);
+        check(right.TabIndexAt(centre) == -1, "the button is not part of the tab beneath it");
+        check(EveryTabReachable(right, out detail), $"every tab is in view or behind the button ({detail})");
+
+        SendMessage(right.Handle, WmMouseMove, 0, MouseLParam(centre));
+        check(right.IsOverflowHot, "hovering the button lights it");
+        SendMessage(right.Handle, WmMouseMove, 0, MouseLParam(new Point(2, centre.Y)));
+        check(!right.IsOverflowHot, "and moving off it clears that");
+
+        var before = right.SelectedIndex;
+        PostMessage(right.Handle, WmLButtonDown, MkLButton, MouseLParam(centre));
+        PostMessage(right.Handle, WmLButtonUp, 0, MouseLParam(centre));
+        PumpFor(pumpUntil, 150);
+        var menu = right.OverflowMenu;
+        check(menu is not null, "clicking the button opens its menu");
+        check(right.SelectedIndex == before && !right.Capture, "and neither selects the tab beneath it nor starts a drag");
+        if (menu is null) return;
+        var items = menu.Items.OfType<ToolStripMenuItem>().ToArray();
+        check(items.Select(item => item.Text).SequenceEqual(right.TabPages.Cast<TabPage>().Select(page => page.Text)),
+            $"the menu lists every tab in order ({string.Join(", ", items.Select(item => item.Text))})");
+        check(items.Count(item => item.Checked) == 1 && items[right.SelectedIndex].Checked, "with the selected tab checked");
+        check(menu.BackColor == Palette.SurfaceAlt, "and the menu is themed");
+
+        var last = right.TabCount - 1;
+        items[last].PerformClick();
+        menu.Close();
+        PumpFor(pumpUntil, 150);
+        check(right.SelectedIndex == last && rig.Host.SelectedPanel(DockArea.Right) == PanelId.Log, "choosing Log selects it");
+        var rect = right.GetTabRect(last);
+        check(rect.Left >= 0 && rect.Right <= right.OverflowButtonBounds.Left,
+            $"and scrolls it into view, clear of the button ({rect.Left}..{rect.Right}, button at {right.OverflowButtonBounds.Left})");
+
+        right.ShowTabs = false;
+        check(!right.HasOverflow && right.OverflowButtonBounds.IsEmpty, "with the tab row hidden there is no button");
+        right.ShowTabs = true;
+
+        rig.Form.Width = 1900;
+        PumpFor(pumpUntil, 150);
+        check(!right.HasOverflow && right.OverflowButtonBounds.IsEmpty && right.GetTabRect(0).Left >= 0,
+            $"once the tabs fit again the button goes and the row starts at the first tab ({right.Width} px)");
+
+        // A window that opens too narrow overflows while its strips are still being built.
+        using var narrow = new Rig();
+        narrow.Form.Width = 900;
+        narrow.Form.Show();
+        pumpUntil(() => narrow.Grid.Width > 0);
+        Palette.Apply(narrow.Form);
+        PumpFor(pumpUntil, 300);
+        var strips = Descendants(narrow.Form).OfType<DarkTabControl>().Where(strip => strip.Visible && strip.HasOverflow).ToArray();
+        check(strips.Length > 0, $"setup: a 900 px window has overflowing strips ({strips.Length})");
+        check(strips.All(strip => FindWindowEx(strip.Handle, 0, "msctls_updown32", null) is var arrows && (arrows == 0 || !IsWindowVisible(arrows))),
+            "none of them shows the native ◀▶ arrows");
     }
 
     private static void DropOn(DarkTabControl strip, int index, Session session)
