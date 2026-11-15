@@ -85,6 +85,22 @@ internal static class PanelLayoutTests
             return Task.CompletedTask;
         });
 
+        await runner.RunAsync("sessions landing in an auto-hidden area shows it without normalising", () =>
+        {
+            var layout = PanelLayout.Default();
+            runner.IsTrue(layout.SetAutoHidden(DockArea.Right, true), "the right area auto-hides while it holds no sessions");
+            layout.Move(PanelId.Sessions, DockArea.Right);
+            runner.IsFalse(layout.IsAutoHidden(DockArea.Right), "moving sessions in stops the auto-hide");
+            layout.Float(PanelId.Sessions, new Rectangle(0, 0, 400, 300), 96);
+            layout.SetAutoHidden(DockArea.Bottom, true);
+            layout.Move(PanelId.Sessions, DockArea.Bottom);
+            layout.Float(PanelId.Sessions, new Rectangle(0, 0, 400, 300), 96);
+            layout.SetAutoHidden(DockArea.Bottom, true);
+            layout.Dock(PanelId.Sessions);
+            runner.IsFalse(layout.IsAutoHidden(DockArea.Bottom), "docking sessions back stops the auto-hide");
+            return Task.CompletedTask;
+        });
+
         await runner.RunAsync("fractions reject NaN, infinity and out of range", () =>
         {
             runner.AreEqual(0.55, PanelLayout.ClampFraction(double.NaN, 0.55), "NaN falls back");
@@ -124,6 +140,13 @@ internal static class PanelLayoutTests
             layout.Normalise(screen);
             bounds = layout.FloatingBounds(PanelId.Log)!.Value;
             runner.IsTrue(bounds.Width >= 300 && bounds.Height >= 200, $"a tiny window is enlarged ({bounds})");
+
+            layout.Float(PanelId.Log, new Rectangle(0, 0, 400, 300), int.MaxValue);
+            layout.Normalise(screen);
+            runner.AreEqual(960, layout.FloatingDpi(PanelId.Log), "an absurd dpi is clamped");
+            layout.Float(PanelId.Log, new Rectangle(0, 0, 400, 300), 1);
+            layout.Normalise(screen);
+            runner.AreEqual(48, layout.FloatingDpi(PanelId.Log), "a tiny dpi is raised");
 
             layout.Float(PanelId.Log, new Rectangle(0, 0, 400, 300), 96);
             layout.Normalise([]);

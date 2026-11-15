@@ -28,6 +28,8 @@ internal sealed class PanelLayout
     /// <summary>The top strip of a floating window that must stay on a screen so it can be dragged.</summary>
     private const int CaptionHeight = 32;
     private const int DefaultDpi = 96;
+    private const int MinDpi = 48;
+    private const int MaxDpi = 960;
     private const double MinFraction = 0.1;
     private const double MaxFraction = 0.9;
 
@@ -122,6 +124,8 @@ internal sealed class PanelLayout
         for (var i = 0; i < order.Count; i++) _entries[order[i]].Order = i;
 
         _areas[area].Selected = id;
+        // The sessions list must stay on screen, so an auto-hidden area stops hiding when it lands there.
+        if (id == PanelId.Sessions) _areas[area].AutoHidden = false;
         Renumber(oldArea);
         EnsureSelection(oldArea);
     }
@@ -230,7 +234,7 @@ internal sealed class PanelLayout
         foreach (var entry in _entries.Values)
         {
             if (!Enum.IsDefined(entry.Area)) entry.Area = DockArea.Right;
-            if (entry.Dpi <= 0) entry.Dpi = DefaultDpi;
+            entry.Dpi = Math.Clamp(entry.Dpi, MinDpi, MaxDpi);
             if (!entry.Floating) continue;
 
             if (usable.Length == 0)
