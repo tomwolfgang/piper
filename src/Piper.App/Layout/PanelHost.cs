@@ -36,6 +36,9 @@ internal sealed class PanelHost : UserControl
     private KeyEventHandler _shortcutKeyDown = (_, _) => { };
     private bool _shuttingDown;
 
+    /// <summary>Set while flyouts close because the window lost activation; see <see cref="CloseFlyouts"/>.</summary>
+    private bool _closingOnDeactivate;
+
     /// <summary>True until the layout's fractions have been applied to a host with a real size.</summary>
     private bool _fractionsPending = true;
 
@@ -155,7 +158,11 @@ internal sealed class PanelHost : UserControl
 
         var page = _registry.PageOf(id);
         // SelectWithoutFocus, not SelectedTab: the grid must keep the focus while its selection is shown.
-        if (page.Parent is DarkTabControl strip) strip.SelectWithoutFocus(strip.TabPages.IndexOf(page));
+        // A passive one leaves alone a strip whose shown panel has the focus, as it does a flyout:
+        // hiding that page would move the focus.
+        if (page.Parent is DarkTabControl strip
+            && !(reveal == PanelReveal.Passive && strip.SelectedTab is { ContainsFocus: true }))
+            strip.SelectWithoutFocus(strip.TabPages.IndexOf(page));
 
         // Brought forward, never activated: the grid keeps the focus here too.
         if (_floating.TryGetValue(id, out var window)) window.Reveal();
@@ -186,10 +193,22 @@ internal sealed class PanelHost : UserControl
         LayoutChanged?.Invoke(this, EventArgs.Empty);
     }
 
-    /// <summary>Closes any open flyout. The window calls this when it is deactivated.</summary>
-    public void CloseFlyouts()
+    /// <summary>
+    /// Closes any open flyout. The window calls this with <paramref name="deactivated"/> when it loses
+    /// activation: the focus is leaving with it, so it is not handed to the grid, whose SetFocus could
+    /// take the activation back from the window the user just went to.
+    /// </summary>
+    public void CloseFlyouts(bool deactivated = false)
     {
-        foreach (var flyout in _flyouts.Values) flyout.Close();
+        _closingOnDeactivate = deactivated;
+        try
+        {
+            foreach (var flyout in _flyouts.Values) flyout.Close();
+        }
+        finally
+        {
+            _closingOnDeactivate = false;
+        }
     }
 
     /// <summary>The strip an area shows while it is auto-hidden; for tests.</summary>
@@ -326,8 +345,23 @@ internal sealed class PanelHost : UserControl
             if (index is not { } at || order[Math.Clamp(at, 0, order.Count - 1)] == id) return;
         }
 
+        var hadFocus = _registry.ContentOf(id).ContainsFocus;
+        var focused = hadFocus ? null : FocusedControl();
         Rearrange(() => _layout.Move(id, area, index));
         if (wasHidden) Retheme(id);
+        // Moved with the keyboard (Shift+F10, then a Move to item), the panel keeps the focus at its new
+        // place. Focus elsewhere stays put: rebuilding a strip takes its pages out, which moves the focus
+        // onto the strip (see Flyout.Close).
+        if (hadFocus) FocusPanel(id);
+        else if (focused is { IsDisposed: false, Focused: false, CanFocus: true }) focused.Focus();
+    }
+
+    /// <summary>The control with the keyboard focus in this window, found through each container's active control.</summary>
+    private Control? FocusedControl()
+    {
+        Control? control = FindForm();
+        while (control is ContainerControl { ActiveControl: { } inner }) control = inner;
+        return control is { Focused: true } ? control : null;
     }
 
     /// <summary>Hides the panel; the sessions list cannot be hidden. Focus inside it goes back to the sessions list.</summary>
@@ -599,8 +633,8 @@ internal sealed class PanelHost : UserControl
             };
             if (_layout.FloatingBounds(id) is { } bounds) window.Bounds = bounds;
             window.Strip.SetTabChecked(page, _checked.Contains(id));
+            // No TabDragStarted: the page covers the hidden tab row, so the title bar is dragged instead.
             window.Strip.TabMenuRequested += OnTabMenuRequested;
-            window.Strip.TabDragStarted += OnTabDragStarted;
             window.DockRequested += (_, _) => DockPanel(id);
             window.MenuRequested += (_, screen) => ShowTabMenu(id, screen);
             window.CaptionDragging += (_, screen) => _drag.TrackWindow(id, window, screen);
@@ -794,6 +828,6 @@ internal sealed class PanelHost : UserControl
         // The focus was in the page that just left; give it to the grid, as hiding a panel does. Only in
         // this window: focusing a floating grid would activate its window.
         var grid = _registry.ContentOf(PanelId.Sessions);
-        if (hadFocus && !IsDisposed && grid.FindForm() is { } form && form == FindForm()) grid.Focus();
+        if (hadFocus && !_closingOnDeactivate && !IsDisposed && grid.FindForm() is { } form && form == FindForm()) grid.Focus();
     }
 }

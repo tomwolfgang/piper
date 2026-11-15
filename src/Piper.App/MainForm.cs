@@ -157,7 +157,7 @@ public sealed partial class MainForm : Form, IMessageFilter
         });
         _panelHost.StripCreated += (_, strip) => sessionDrop.Attach(strip);
         // An auto-hidden area's flyout closes when Piper loses the foreground, as in Visual Studio.
-        Deactivate += (_, _) => _panelHost.CloseFlyouts();
+        Deactivate += (_, _) => _panelHost.CloseFlyouts(deactivated: true);
 
         Controls.Add(_panelHost);
         // The Sessions tab comes before the grid in tab order; without this it, not the grid, takes the first focus.

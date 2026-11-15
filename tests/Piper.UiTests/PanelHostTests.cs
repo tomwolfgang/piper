@@ -56,7 +56,6 @@ internal static class PanelHostTests
         ShortClickSelects(check, pumpUntil);
         SessionDropAfterDrag(check, pumpUntil);
         DragOutsideFloats(check, pumpUntil);
-        DragFloatingTabDocks(check, pumpUntil);
         DragOntoAutoHiddenArea(check, pumpUntil);
         EmptiedAutoHiddenArea(check, pumpUntil);
         FlyoutMinimumWidth(check, pumpUntil);
@@ -64,7 +63,11 @@ internal static class PanelHostTests
         BottomKeepsMinimum(check, pumpUntil);
         FloatingWindowChrome(check, pumpUntil);
         FloatingCaptionDocks(check, pumpUntil);
+        FloatingKeyboardMenu(check, pumpUntil);
         CaptionDragWindowDisposed(check, pumpUntil);
+        MoveKeepsFocus(check, pumpUntil);
+        PassiveRevealKeepsFocus(check, pumpUntil);
+        DeactivateCloseKeepsActivation(check, pumpUntil);
         NativePartsFollowTheme(check, pumpUntil);
         TabOverflowMenu(check, pumpUntil);
         FiltersFitNarrow(check, pumpUntil);
@@ -197,24 +200,6 @@ internal static class PanelHostTests
         rig.Host.ShuttingDown = false;
         ReleaseAt(right, BeforeTab(left, 0), pumpUntil);
         check(log.Parent == right && Order(rig, DockArea.Right).SequenceEqual(before), "and the mouse-up after it moves nothing");
-
-        rig.Host.FloatPanel(PanelId.Log);
-        PumpFor(pumpUntil, 150);
-        var window = rig.Host.FloatingWindow(PanelId.Log);
-        check(window is not null, "setup: the Log floats");
-        if (window is null) return;
-        PressAndDrag(window.Strip, 0, pumpUntil);
-        DragOver(window.Strip, BeforeTab(left, 0), pumpUntil);
-        check(left.DropIndex == 0, "setup: a floating tab drags over the Sessions strip");
-        // The page is taken out first, so disposing the strip does not dispose the panel with it.
-        window.Strip.TabPages.Remove(log);
-        window.Strip.Dispose();
-        PumpFor(pumpUntil, 60);
-        check(left.DropIndex == -1 && !left.IsDropTarget, "the dragged strip disposed mid-drag clears the marker");
-        ReleaseAt(left, BeforeTab(left, 0), pumpUntil);
-        rig.Host.DockPanel(PanelId.Log);
-        PumpFor(pumpUntil, 100);
-        check(log.Parent == right && Order(rig, DockArea.Left).SequenceEqual([PanelId.Sessions]), "and nothing lands on the Sessions strip");
     }
 
     private static void ShortClickSelects(Action<bool, string> check, Action<Func<bool>> pumpUntil)
@@ -305,28 +290,6 @@ internal static class PanelHostTests
         ReleaseAt(right, onWindow, pumpUntil);
         check(composer.Parent == right && Order(rig, DockArea.Right).SequenceEqual(before) && rig.Host.FloatingWindow(PanelId.Log) == window,
             "and dropping on it moves nothing");
-    }
-
-    private static void DragFloatingTabDocks(Action<bool, string> check, Action<Func<bool>> pumpUntil)
-    {
-        Console.WriteLine("== dragging a floating window's tab onto a docked strip docks it there and closes the window");
-        using var rig = new Rig();
-        rig.Form.Show();
-        pumpUntil(() => rig.Grid.Width > 0);
-        rig.Host.FloatPanel(PanelId.Log, new Point(300, 300));
-        PumpFor(pumpUntil, 150);
-        var window = rig.Host.FloatingWindow(PanelId.Log);
-        var right = StripOf(rig, PanelId.Composer)!;
-        check(window is not null, "setup: the Log floats");
-        if (window is null) return;
-
-        PressAndDrag(window.Strip, 0, pumpUntil);
-        DragOver(window.Strip, BeforeTab(right, 1), pumpUntil);
-        check(right.DropIndex == 1, $"the marker sits before the right strip's second tab (index {right.DropIndex})");
-        ReleaseAt(window.Strip, BeforeTab(right, 1), pumpUntil);
-        pumpUntil(() => window.IsDisposed);
-        check(!rig.Host.IsFloating(PanelId.Log) && Order(rig, DockArea.Right)[1] == PanelId.Log, $"the Log docks second on the right ({string.Join(", ", Order(rig, DockArea.Right))})");
-        check(window.IsDisposed && rig.Host.FloatingWindow(PanelId.Log) is null, "and its window closes");
     }
 
     private static void DragOntoAutoHiddenArea(Action<bool, string> check, Action<Func<bool>> pumpUntil)
@@ -1126,6 +1089,11 @@ internal static class PanelHostTests
             var webView = view is null ? null : Read<Microsoft.Web.WebView2.WinForms.WebView2?>(view, "View");
             check(HoldsBody(view) && webView?.CoreWebView2 is not null, $"after {names[i]} the WebP is shown again");
             if (view is null || webView?.CoreWebView2 is not { } core) continue;
+            // HoldsBody turns true before the page's own navigation completes; a probe sent then would
+            // supersede it and leave the view on about:blank. The view shows itself once the page loaded.
+            bool Loaded() => view.Visible && webView.Source is { } source && source == Read<Uri?>(view, "PageUri");
+            pumpUntil(Loaded);
+            check(Loaded(), $"setup: after {names[i]} the WebP page has finished loading");
             var before = Read<int>(view, "Blocked");
             core.Navigate("https://localhost:1/other");
             pumpUntil(() => Read<int>(view, "Blocked") > before);
@@ -1190,6 +1158,8 @@ internal static class PanelHostTests
         check(PanelMenus.FocusChordTarget(new KeyEventArgs(Keys.Control | Keys.Alt | Keys.D7), false) is null, "Ctrl+Alt+7 names no panel");
         check(PanelMenus.FocusChordTarget(new KeyEventArgs(Keys.Control | Keys.D1), false) is null, "Ctrl+1 without Alt is not the chord");
         check(PanelMenus.FocusChordTarget(new KeyEventArgs(Keys.Alt | Keys.D1), false) is null, "nor is Alt+1 without Ctrl");
+        check(PanelMenus.FocusChordTarget(new KeyEventArgs(Keys.Control | Keys.Alt | Keys.Shift | Keys.D1), false) is null,
+            "nor is Ctrl+Alt+Shift+1: the chord is exactly Ctrl+Alt");
     }
 
     private static void MoveLogToBottom(Action<bool, string> check, Action<Func<bool>> pumpUntil)
@@ -1532,6 +1502,149 @@ internal static class PanelHostTests
         SendMessage(window.Handle, WmNcLButtonDblClk, HtCaption, caption);
         PumpFor(pumpUntil, 100);
         check(!rig.Host.IsFloating(PanelId.Log) && window.IsDisposed, "double-clicking the title bar docks the panel");
+    }
+
+    private static void FloatingKeyboardMenu(Action<bool, string> check, Action<Func<bool>> pumpUntil)
+    {
+        Console.WriteLine("== a floating window's hidden strip is no tab stop, and Shift+F10 still opens the tab menu");
+        using var rig = new Rig();
+        rig.Form.Show();
+        pumpUntil(() => rig.Grid.Width > 0);
+        rig.Host.FloatPanel(PanelId.Filters, new Point(300, 300));
+        PumpFor(pumpUntil, 150);
+        var window = rig.Host.FloatingWindow(PanelId.Filters);
+        check(window is not null, "setup: the Filters float");
+        if (window is null) return;
+        var page = rig.Registry.PageOf(PanelId.Filters);
+
+        check(!window.Strip.TabStop, "the strip, whose tab row is hidden, is not a tab stop");
+        window.Activate();
+        PumpFor(pumpUntil, 100);
+        check(!window.Strip.Focused, $"activating the window does not focus the invisible strip (focus: {FocusedName(window)})");
+
+        bool MenuShowsDock() => rig.Host.TabMenu.Visible
+            && rig.Host.TabMenu.Items.OfType<ToolStripMenuItem>().Any(item => item.Text == Strings.Panels.Dock);
+
+        // Shift+F10 in a control with no menu of its own bubbles WM_CONTEXTMENU, with no position, up to the window.
+        SendMessage(page.Handle, WmContextMenu, page.Handle, -1);
+        PumpFor(pumpUntil, 100);
+        check(MenuShowsDock(), "Shift+F10 in the panel's content opens the floating panel's tab menu");
+        rig.Host.TabMenu.Close();
+        PumpFor(pumpUntil, 50);
+
+        SendMessage(window.Strip.Handle, WmContextMenu, window.Strip.Handle, -1);
+        PumpFor(pumpUntil, 100);
+        check(MenuShowsDock(), "and so does the strip's own keyboard menu request, should it ever hold the focus");
+        rig.Host.TabMenu.Close();
+        PumpFor(pumpUntil, 50);
+
+        var at = page.PointToScreen(new Point(20, 20));
+        SendMessage(page.Handle, WmContextMenu, page.Handle, (at.Y << 16) | (at.X & 0xFFFF));
+        PumpFor(pumpUntil, 100);
+        check(!rig.Host.TabMenu.Visible, "a right-click in the content is not taken for the tab");
+        rig.Host.TabMenu.Close();
+    }
+
+    private static void MoveKeepsFocus(Action<bool, string> check, Action<Func<bool>> pumpUntil)
+    {
+        Console.WriteLine("== moving the panel that has the focus keeps the focus in it at its new place");
+        using var rig = new Rig();
+        rig.Form.Show();
+        pumpUntil(() => rig.Grid.Width > 0);
+
+        rig.Host.FocusPanel(PanelId.Filters);
+        PumpFor(pumpUntil, 100);
+        check(rig.Filters.ContainsFocus, $"setup: the Filters have the focus (focus: {FocusedName(rig.Form)})");
+        rig.Host.MoveTo(PanelId.Filters, DockArea.Left);
+        PumpFor(pumpUntil, 100);
+        check(StripOf(rig, PanelId.Filters) == StripOf(rig, PanelId.Sessions), "setup: the Filters moved to the left");
+        check(rig.Filters.ContainsFocus, $"a move with the tab menu keeps the focus in the Filters (focus: {FocusedName(rig.Form)})");
+
+        rig.Host.FloatPanel(PanelId.Filters);
+        PumpFor(pumpUntil, 150);
+        rig.Host.FocusPanel(PanelId.Filters);
+        PumpFor(pumpUntil, 100);
+        rig.Host.MoveTo(PanelId.Filters, DockArea.Bottom);
+        PumpFor(pumpUntil, 150);
+        check(rig.Filters.ContainsFocus && rig.Filters.FindForm() == rig.Form,
+            $"and a floating panel moved to the Bottom brings the focus with it (focus: {FocusedName(rig.Form)})");
+
+        rig.List.Focus();
+        PumpFor(pumpUntil, 50);
+        check(rig.List.Focused, "setup: the grid has the focus");
+        // Rebuilding the strips takes their pages out, which can hand the focus to a strip.
+        rig.Host.MoveTo(PanelId.Log, DockArea.Bottom);
+        PumpFor(pumpUntil, 100);
+        check(rig.List.Focused, $"moving another panel leaves the focus in the grid (focus: {FocusedName(rig.Form)})");
+        rig.Host.MoveTo(PanelId.Log, DockArea.Right);
+        PumpFor(pumpUntil, 100);
+        check(rig.List.Focused, $"and so does moving it away again (focus: {FocusedName(rig.Form)})");
+    }
+
+    private static void PassiveRevealKeepsFocus(Action<bool, string> check, Action<Func<bool>> pumpUntil)
+    {
+        Console.WriteLine("== a Passive reveal never takes the tab of a docked panel that has the focus");
+        using var rig = new Rig();
+        rig.Form.Show();
+        pumpUntil(() => rig.Grid.Width > 0);
+
+        rig.Host.FocusPanel(PanelId.Filters);
+        PumpFor(pumpUntil, 100);
+        check(rig.Filters.ContainsFocus, $"setup: the Filters have the focus (focus: {FocusedName(rig.Form)})");
+        rig.Host.ShowPanel(PanelId.Log, PanelReveal.Passive);
+        PumpFor(pumpUntil, 100);
+        check(rig.Host.SelectedPanel(DockArea.Right) == PanelId.Filters && rig.Filters.ContainsFocus,
+            $"the Filters stay selected with the focus (selected {rig.Host.SelectedPanel(DockArea.Right)}, focus: {FocusedName(rig.Form)})");
+
+        rig.Host.ShowPanel(PanelId.Log, PanelReveal.Explicit);
+        PumpFor(pumpUntil, 100);
+        check(rig.Host.SelectedPanel(DockArea.Right) == PanelId.Log, "an Explicit reveal still selects the Log");
+    }
+
+    private static void DeactivateCloseKeepsActivation(Action<bool, string> check, Action<Func<bool>> pumpUntil)
+    {
+        Console.WriteLine("== a flyout closed because the window lost activation does not take it back");
+        using var rig = new Rig();
+        // As MainForm wires it.
+        rig.Form.Deactivate += (_, _) => rig.Host.CloseFlyouts(deactivated: true);
+        rig.Form.Show();
+        pumpUntil(() => rig.Grid.Width > 0);
+        rig.Host.SetAutoHidden(DockArea.Right, true);
+        PumpFor(pumpUntil, 100);
+        var flyout = rig.Host.FlyoutOf(DockArea.Right);
+        rig.Form.Activate();
+        rig.Host.FocusPanel(PanelId.Filters);
+        PumpFor(pumpUntil, 100);
+        check(flyout.IsOpen && rig.Filters.ContainsFocus && Form.ActiveForm == rig.Form,
+            $"setup: the Filters flyout has the focus in the active window (focus: {FocusedName(rig.Form)})");
+
+        // Windows still reports the main window active while it handles its own deactivation, so the
+        // close happens with the focus in the flyout; handing it to the grid then is a SetFocus that can
+        // take the activation back.
+        var gridFocused = 0;
+        var reactivated = 0;
+        rig.List.GotFocus += (_, _) => gridFocused++;
+        rig.Form.Activated += (_, _) => reactivated++;
+        using var other = new Form { ShowInTaskbar = false, StartPosition = FormStartPosition.Manual, Location = new Point(1300, 100), Size = new Size(300, 200) };
+        var box = new TextBox { Dock = DockStyle.Top };
+        other.Controls.Add(box);
+        other.Show();
+        other.Activate();
+        PumpFor(pumpUntil, 200);
+        check(!flyout.IsOpen, "setup: the flyout closed when the window lost activation");
+        check(Form.ActiveForm == other && reactivated == 0,
+            $"the other window stays active and the main window is not activated again ({reactivated} activations, main active: {Form.ActiveForm == rig.Form})");
+        check(gridFocused == 0 && !rig.Grid.ContainsFocus, $"and the grid is not given the focus ({gridFocused} times)");
+        other.Close();
+        PumpFor(pumpUntil, 100);
+
+        rig.Form.Activate();
+        rig.Host.FocusPanel(PanelId.Filters);
+        PumpFor(pumpUntil, 100);
+        check(flyout.IsOpen && rig.Filters.ContainsFocus, "setup: the flyout has the focus again");
+        rig.Host.CloseFlyouts();
+        PumpFor(pumpUntil, 50);
+        check(!flyout.IsOpen && rig.List.Focused, $"closed any other way, the focus still goes to the grid (focus: {FocusedName(rig.Form)})");
     }
 
     private static void CaptionDragWindowDisposed(Action<bool, string> check, Action<Func<bool>> pumpUntil)

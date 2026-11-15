@@ -50,7 +50,9 @@ internal sealed class FloatingPanelForm : Form
         KeyPreview = true;
         KeyDown += keyDown;
 
-        Strip = new DarkTabControl { Dock = DockStyle.Fill, Font = Palette.UiFont, ShowTabs = false };
+        // Not a tab stop: with its tab row hidden it would take the focus with nothing to show for it,
+        // so the focus goes to the panel's content. Shift+F10 there still opens the tab menu (WndProc).
+        Strip = new DarkTabControl { Dock = DockStyle.Fill, Font = Palette.UiFont, ShowTabs = false, TabStop = false };
         Strip.TabPages.Add(page);
         Controls.Add(Strip);
     }
@@ -61,7 +63,10 @@ internal sealed class FloatingPanelForm : Form
     /// </summary>
     public event EventHandler? DockRequested;
 
-    /// <summary>Raised with the screen point of a right-click on the title bar, for the panel's tab menu.</summary>
+    /// <summary>
+    /// Raised with a screen point for the panel's tab menu: where the title bar was right-clicked, or the
+    /// panel's top-left corner for Shift+F10 or the Menu key.
+    /// </summary>
     public event EventHandler<Point>? MenuRequested;
 
     /// <summary>Raised with the pointer's screen position as the user drags the window by its title bar.</summary>
@@ -137,6 +142,7 @@ internal sealed class FloatingPanelForm : Form
 
     private const int WmNcLButtonDblClk = 0x00A3;
     private const int WmNcRButtonUp = 0x00A5;
+    private const int WmContextMenu = 0x007B;
     private const int WmMoving = 0x0216;
     private const int WmEnterSizeMove = 0x0231;
     private const int WmExitSizeMove = 0x0232;
@@ -157,6 +163,11 @@ internal sealed class FloatingPanelForm : Form
             case WmNcRButtonUp when m.WParam == HtCaption:
                 // Instead of the system menu, which Alt+Space still opens.
                 MenuRequested?.Invoke(this, ScreenPoint(m.LParam));
+                return;
+            case WmContextMenu when m.LParam == -1:
+                // Shift+F10 or the Menu key in a control with no menu of its own, bubbled up: the keyboard's
+                // way to the tab menu, shown at the top-left of the panel. A right-click is left alone.
+                MenuRequested?.Invoke(this, PointToScreen(Point.Empty));
                 return;
             case WmEnterSizeMove:
                 _moveStart = Location;
