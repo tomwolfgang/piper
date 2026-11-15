@@ -55,6 +55,14 @@ internal static class PanelHostTests
 
     private const int WmLButtonDown = 0x0201;
     private const int WmMouseMove = 0x0200;
+    private const int WmMouseLeave = 0x02A3;
+
+    /// <summary>Runs a key down through the whole pre-dispatch chain, as the message loop does: command keys, then input keys, then dialog keys.</summary>
+    private static bool PreProcessKey(Control control, Keys key)
+    {
+        var message = Message.Create(control.Handle, WmKeyDown, (nint)key, 0);
+        return control.PreProcessMessage(ref message);
+    }
 
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
@@ -201,6 +209,11 @@ internal static class PanelHostTests
         PumpFor(pumpUntil, 100);
         check(Math.Abs(flyout.Width - (width + 100)) <= 2, $"dragging the inner edge widens the flyout ({width} -> {flyout.Width})");
         check(left.Bounds == leftBounds, "and still moves nothing under it");
+        SendMessage(flyout.Handle, WmMouseMove, 0, MouseLParam(new Point(2, flyout.Height / 2)));
+        check(flyout.Cursor == Cursors.SizeWE, "over the grip the cursor is the resize one");
+        SendMessage(flyout.Handle, WmMouseLeave, 0, 0);
+        check(flyout.Cursor == Cursors.Default && flyout.Strip.Cursor == Cursors.Default,
+            "once the pointer leaves the grip the flyout and the panel in it have the normal cursor again");
         var fraction = rig.Host.Snapshot().FlyoutFraction(DockArea.Right);
         check(fraction > PanelLayout.DefaultFlyoutFraction, $"Snapshot records the new flyout fraction ({fraction})");
 
@@ -242,7 +255,7 @@ internal static class PanelHostTests
         var composer = rig.Registry.ContentOf(PanelId.Composer);
         check(flyout.IsOpen && composer.ContainsFocus, $"FocusPanel opens the flyout with the focus in it (focus: {FocusedName(rig.Form)})");
         var focused = Control.FromChildHandle(GetFocus()) ?? composer;
-        check(ProcessCmdKey(focused, Keys.Escape), "Esc is taken by the flyout");
+        check(PreProcessKey(focused, Keys.Escape), "Esc is taken by the flyout");
         PumpFor(pumpUntil, 100);
         check(!flyout.IsOpen && !flyout.FilterInstalled, "Esc closes it");
         check(rig.List.Focused, $"and the focus goes back to the grid (focus: {FocusedName(rig.Form)})");
@@ -253,6 +266,37 @@ internal static class PanelHostTests
         rig.List.Focus();
         PumpFor(pumpUntil, 150);
         check(!flyout.IsOpen && rig.List.Focused, $"a flyout opened with the focus closes when the focus leaves it, and the focus stays where it went (focus: {FocusedName(rig.Form)})");
+
+        rig.Host.FocusPanel(PanelId.Composer);
+        PumpFor(pumpUntil, 100);
+        var method = Descendants(composer).OfType<ComboBox>().FirstOrDefault();
+        check(method is not null, "setup: the Composer has a ComboBox");
+        if (method is not null)
+        {
+            method.Focus();
+            method.DroppedDown = true;
+            PumpFor(pumpUntil, 100);
+            check(method.DroppedDown && method.Focused, "setup: the Composer's ComboBox has the focus and its list open");
+            var handled = PreProcessKey(method, Keys.Escape);
+            check(!handled && flyout.IsOpen, "Esc with a ComboBox list open is left to the list; the flyout stays open");
+            method.DroppedDown = false;
+            PumpFor(pumpUntil, 50);
+            check(PreProcessKey(method, Keys.Escape) && !flyout.IsOpen, "with the list closed, Esc closes the flyout");
+        }
+
+        rig.Host.FocusPanel(PanelId.Composer);
+        PumpFor(pumpUntil, 100);
+        var typing = Descendants(composer).OfType<TextBox>().FirstOrDefault(box => box.CanFocus);
+        check(typing is not null, "setup: the Composer has a text box");
+        typing?.Focus();
+        PumpFor(pumpUntil, 50);
+        check(typing?.Focused == true && flyout.Page == rig.Registry.PageOf(PanelId.Composer), "setup: typing in the Composer flyout");
+        rig.Host.ShowPanel(PanelId.Log, PanelReveal.Passive);
+        PumpFor(pumpUntil, 100);
+        check(flyout.IsOpen && flyout.Page == rig.Registry.PageOf(PanelId.Composer) && typing?.Focused == true,
+            $"a Passive reveal leaves a flyout with the focus open, on its panel, with the focus (focus: {FocusedName(rig.Form)})");
+        rig.List.Focus();
+        PumpFor(pumpUntil, 150);
 
         rig.Host.ShowPanel(PanelId.Filters, PanelReveal.Explicit);
         PumpFor(pumpUntil, 100);

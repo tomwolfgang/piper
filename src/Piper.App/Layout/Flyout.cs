@@ -158,15 +158,28 @@ internal sealed class Flyout : Control
         return control is { Focused: true } ? control : null;
     }
 
-    protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
+    /// <summary>
+    /// Esc closes the flyout, but only once the focused control has had it: a dialog key reaches here
+    /// after the control's <c>IsInputKey</c>, so an open ComboBox dropdown or AutoComplete list keeps its
+    /// Esc and closes itself instead of the whole flyout.
+    /// </summary>
+    protected override bool ProcessDialogKey(Keys keyData)
     {
-        if (keyData == Keys.Escape && IsOpen && ContainsFocus)
+        if (keyData == Keys.Escape && IsOpen && ContainsFocus && !FocusedListIsOpen())
         {
             Close();
             return true;
         }
 
-        return base.ProcessCmdKey(ref msg, keyData);
+        return base.ProcessDialogKey(keyData);
+    }
+
+    /// <summary>A belt-and-braces check for a dropdown a control did not claim through <c>IsInputKey</c>.</summary>
+    private bool FocusedListIsOpen()
+    {
+        for (var control = FocusedControl(); control is not null && control != this; control = control.Parent)
+            if (control is ComboBox { DroppedDown: true }) return true;
+        return false;
     }
 
     protected override void OnLeave(EventArgs e)
@@ -233,6 +246,16 @@ internal sealed class Flyout : Control
         Reposition();
     }
 
+    /// <summary>
+    /// The pointer left the flyout's own surface, often onto its strip. Children inherit
+    /// <see cref="Control.Cursor"/>, so a resize cursor left set here would show over the whole panel.
+    /// </summary>
+    protected override void OnMouseLeave(EventArgs e)
+    {
+        base.OnMouseLeave(e);
+        if (!_resizing) Cursor = Cursors.Default;
+    }
+
     protected override void OnMouseUp(MouseEventArgs e)
     {
         base.OnMouseUp(e);
@@ -265,6 +288,8 @@ internal sealed class Flyout : Control
     {
         if (!_resizing) return;
         _resizing = false;
+        // The next move over the grip sets it again; anywhere else it must not linger.
+        if (!GripBounds().Contains(PointToClient(Cursor.Position))) Cursor = Cursors.Default;
         Capture = false;
         Resized?.Invoke(this, EventArgs.Empty);
     }

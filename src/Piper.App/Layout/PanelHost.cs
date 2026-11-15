@@ -141,6 +141,9 @@ internal sealed class PanelHost : UserControl
 
         if (IsInAutoHiddenArea(id))
         {
+            // A reveal never moves the focus: a passive one must not swap or close a flyout the user is
+            // working in, so it is dropped. The panel is still named on its strip, one click away.
+            if (reveal == PanelReveal.Passive && _flyouts.Values.Any(flyout => flyout.IsOpen && flyout.ContainsFocus)) return;
             OpenFlyout(id, takeFocus);
             return;
         }
