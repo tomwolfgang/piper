@@ -68,6 +68,7 @@ internal static class PanelHostTests
         NativePartsFollowTheme(check, pumpUntil);
         TabOverflowMenu(check, pumpUntil);
         FiltersFitNarrow(check, pumpUntil);
+        SingleBorders(check, pumpUntil);
         FlyoutScreenshots(pumpUntil);
         DragScreenshots(pumpUntil);
     }
@@ -1966,6 +1967,63 @@ internal static class PanelHostTests
                 check(box.AutoEllipsis && (box.PreferredSize.Width <= box.Width || box.AutoEllipsis),
                     $"at {width} px the {box.Text} checkbox ends in an ellipsis rather than cutting its text");
         }
+    }
+
+    private static void SingleBorders(Action<bool, string> check, Action<Func<bool>> pumpUntil)
+    {
+        Console.WriteLine("== panel content draws one border, not a frame inside the page");
+        using var rig = new Rig();
+        rig.Form.Show();
+        pumpUntil(() => rig.Grid.Width > 0);
+        Palette.Apply(rig.Form);
+        PumpFor(pumpUntil, 100);
+
+        var fields = Descendants(rig.Inspector).OfType<TextBox>()
+            .Where(box => box.Text.StartsWith(Strings.Inspector.Request, StringComparison.Ordinal)
+                          || box.Text.StartsWith(Strings.Inspector.Response, StringComparison.Ordinal)).ToArray();
+        var filterBox = Descendants(rig.Grid).OfType<TextBox>().First(box => box.PlaceholderText == Strings.SessionList.FilterPlaceholder);
+        check(fields.Length == 2, $"setup: the Request and Response start lines are found ({fields.Length})");
+        check(rig.List.BorderStyle == BorderStyle.None, "the session grid has no frame of its own");
+
+        var wasZoom = false;
+        try
+        {
+            foreach (var zoomed in new[] { false, true })
+            {
+                if (zoomed)
+                {
+                    wasZoom = true;
+                    Zoom("ZoomIn");
+                    Zoom("ZoomIn");
+                    Palette.RescaleFonts();
+                    Palette.Apply(rig.Form);
+                    PumpFor(pumpUntil, 150);
+                }
+                var when = zoomed ? "zoomed in" : "at 100%";
+                foreach (var box in fields.Append(filterBox))
+                {
+                    var row = box.Parent!;
+                    var name = box == filterBox ? "filter box" : box.Text.Split(' ')[0] + " line";
+                    check(box.BorderStyle == BorderStyle.None, $"{when} the {name} has no frame of its own");
+                    check(box.Height >= box.PreferredHeight && box.Top > 0 && box.Bottom < row.ClientSize.Height,
+                        $"{when} the {name} sits wholly inside its row (box {box.Top}..{box.Bottom}, preferred {box.PreferredHeight}, row {row.ClientSize.Height})");
+                    check(row.Height >= box.Font.Height + row.LogicalToDeviceUnits(8),
+                        $"{when} the {name}'s row is the font's height plus 8 px ({row.Height} for font {box.Font.Height})");
+                }
+            }
+        }
+        finally
+        {
+            if (wasZoom)
+            {
+                Zoom("Reset");
+                Palette.RescaleFonts();
+                Palette.Apply(rig.Form);
+            }
+        }
+
+        static void Zoom(string method) =>
+            typeof(Palette).Assembly.GetType("Piper.App.Theme.FontScale", throwOnError: true)!.GetMethod(method)!.Invoke(null, null);
     }
 
     private static void DropOn(DarkTabControl strip, int index, Session session)

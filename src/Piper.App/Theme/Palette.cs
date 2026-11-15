@@ -208,7 +208,9 @@ public static class Palette
                 TextBoxWordSelection.Configure(textBox);
                 textBox.BackColor = Surface;
                 textBox.ForeColor = Text;
-                textBox.BorderStyle = BorderStyle.FixedSingle;
+                // Flatten the system's sunken frame, but leave a box built borderless that way: it
+                // sits inside a page or a FieldRow that already draws its edge.
+                if (textBox.BorderStyle == BorderStyle.Fixed3D) textBox.BorderStyle = BorderStyle.FixedSingle;
                 break;
             case ListView listView:
                 listView.BackColor = Surface;

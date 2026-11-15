@@ -121,8 +121,8 @@ public sealed class SessionListView : UserControl
         };
         _filterBox.TextChanged += (_, _) => ApplyFilter();
 
-        var filterRow = new Panel { Dock = DockStyle.Top, Height = 26, Padding = new Padding(2) };
-        filterRow.Controls.Add(_filterBox);
+        // One line under the filter, where the box's own frame used to sit inside the page's edge.
+        var filterRow = new FieldRow(_filterBox, bottomEdgeOnly: true);
 
         _list = new SteadyListView
         {
@@ -135,6 +135,8 @@ public sealed class SessionListView : UserControl
             MultiSelect = true,
             OwnerDraw = true,
             HeaderStyle = ColumnHeaderStyle.Clickable,
+            // The page and the filter row already edge the grid; its own frame doubled them.
+            BorderStyle = BorderStyle.None,
         };
         DarkListView.EnableDoubleBuffering(_list);
 
