@@ -91,13 +91,15 @@ internal static class PanelLayoutTests
             runner.IsTrue(layout.SetAutoHidden(DockArea.Right, true), "the right area auto-hides while it holds no sessions");
             layout.Move(PanelId.Sessions, DockArea.Right);
             runner.IsFalse(layout.IsAutoHidden(DockArea.Right), "moving sessions in stops the auto-hide");
-            layout.Float(PanelId.Sessions, new Rectangle(0, 0, 400, 300), 96);
-            layout.SetAutoHidden(DockArea.Bottom, true);
-            layout.Move(PanelId.Sessions, DockArea.Bottom);
-            layout.Float(PanelId.Sessions, new Rectangle(0, 0, 400, 300), 96);
-            layout.SetAutoHidden(DockArea.Bottom, true);
-            layout.Dock(PanelId.Sessions);
-            runner.IsFalse(layout.IsAutoHidden(DockArea.Bottom), "docking sessions back stops the auto-hide");
+
+            // Sessions floats out of Left, so Left may auto-hide; docking it back must undo that.
+            var other = PanelLayout.Default();
+            other.Float(PanelId.Sessions, new Rectangle(0, 0, 400, 300), 96);
+            runner.IsTrue(other.SetAutoHidden(DockArea.Left, true), "an area whose sessions list floats can auto-hide");
+            runner.IsTrue(other.IsAutoHidden(DockArea.Left), "and is auto-hidden before the dock");
+            other.Dock(PanelId.Sessions);
+            runner.IsFalse(other.IsAutoHidden(DockArea.Left), "docking sessions back stops the auto-hide");
+            runner.IsFalse(other.Hide(PanelId.Sessions), "sessions cannot be hidden, so Show has nothing to restore");
             return Task.CompletedTask;
         });
 
@@ -147,6 +149,10 @@ internal static class PanelLayoutTests
             layout.Float(PanelId.Log, new Rectangle(0, 0, 400, 300), 1);
             layout.Normalise(screen);
             runner.AreEqual(48, layout.FloatingDpi(PanelId.Log), "a tiny dpi is raised");
+
+            layout.Float(PanelId.Log, new Rectangle(0, 0, 400, 300), 0);
+            layout.Normalise(screen);
+            runner.AreEqual(96, layout.FloatingDpi(PanelId.Log), "an unset dpi becomes 96, not the minimum");
 
             layout.Float(PanelId.Log, new Rectangle(0, 0, 400, 300), 96);
             layout.Normalise([]);

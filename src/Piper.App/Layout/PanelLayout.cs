@@ -234,7 +234,7 @@ internal sealed class PanelLayout
         foreach (var entry in _entries.Values)
         {
             if (!Enum.IsDefined(entry.Area)) entry.Area = DockArea.Right;
-            entry.Dpi = Math.Clamp(entry.Dpi, MinDpi, MaxDpi);
+            entry.Dpi = entry.Dpi <= 0 ? DefaultDpi : Math.Clamp(entry.Dpi, MinDpi, MaxDpi);
             if (!entry.Floating) continue;
 
             if (usable.Length == 0)
