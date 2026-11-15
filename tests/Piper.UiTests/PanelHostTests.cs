@@ -67,6 +67,7 @@ internal static class PanelHostTests
         CaptionDragWindowDisposed(check, pumpUntil);
         NativePartsFollowTheme(check, pumpUntil);
         TabOverflowMenu(check, pumpUntil);
+        FiltersFitNarrow(check, pumpUntil);
         FlyoutScreenshots(pumpUntil);
         DragScreenshots(pumpUntil);
     }
@@ -1927,6 +1928,44 @@ internal static class PanelHostTests
         check(strips.Length > 0, $"setup: a 900 px window has overflowing strips ({strips.Length})");
         check(strips.All(strip => FindWindowEx(strip.Handle, 0, "msctls_updown32", null) is var arrows && (arrows == 0 || !IsWindowVisible(arrows))),
             "none of them shows the native ◀▶ arrows");
+    }
+
+    private static void FiltersFitNarrow(Action<bool, string> check, Action<Func<bool>> pumpUntil)
+    {
+        Console.WriteLine("== the Filters panel fits a narrow flyout");
+        using var form = new Form { ShowInTaskbar = false, StartPosition = FormStartPosition.Manual, Location = new Point(0, 0), FormBorderStyle = FormBorderStyle.None };
+        var filters = new FilterPanel { Dock = DockStyle.Fill };
+        form.Controls.Add(filters);
+        form.Show();
+        // 380 px is the Filters flyout's minimum at 96 DPI; try it unscaled too, the tightest case.
+        foreach (var width in new[] { form.LogicalToDeviceUnits(380), 380 })
+        {
+            form.ClientSize = new Size(width, form.LogicalToDeviceUnits(640));
+            Palette.Apply(form);
+            PumpFor(pumpUntil, 100);
+
+            foreach (var button in Descendants(filters).OfType<Button>())
+            {
+                var bounds = button.Bounds;
+                var preferred = button.PreferredSize;
+                var inView = filters.RectangleToClient(button.Parent!.RectangleToScreen(bounds));
+                check(preferred.Width <= bounds.Width && preferred.Height <= bounds.Height && inView.Right <= filters.ClientSize.Width,
+                    $"at {width} px the {button.Text} button is not clipped (preferred {preferred}, bounds {bounds}, right edge {inView.Right})");
+            }
+
+            var toolbar = Descendants(filters).OfType<ToolStrip>().First();
+            check(!toolbar.OverflowButton.Visible && toolbar.Items.Cast<ToolStripItem>().All(item => item.Placement == ToolStripItemPlacement.Main)
+                  && toolbar.PreferredSize.Width <= toolbar.Width,
+                $"at {width} px the Actions button fits its toolbar ({toolbar.PreferredSize.Width} in {toolbar.Width})");
+            var useFilters = Descendants(filters).OfType<CheckBox>().First(box => box.Text == Strings.Filters.UseFilters);
+            var toolbarLeft = filters.RectangleToClient(toolbar.RectangleToScreen(toolbar.ClientRectangle)).Left;
+            var useRight = filters.RectangleToClient(useFilters.RectangleToScreen(useFilters.ClientRectangle)).Right;
+            check(useRight <= toolbarLeft, $"at {width} px Use Filters stops before Actions ({useRight} vs {toolbarLeft})");
+
+            foreach (var box in Descendants(filters).OfType<CheckBox>())
+                check(box.AutoEllipsis && (box.PreferredSize.Width <= box.Width || box.AutoEllipsis),
+                    $"at {width} px the {box.Text} checkbox ends in an ellipsis rather than cutting its text");
+        }
     }
 
     private static void DropOn(DarkTabControl strip, int index, Session session)
