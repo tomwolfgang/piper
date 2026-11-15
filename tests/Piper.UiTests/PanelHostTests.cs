@@ -43,6 +43,390 @@ internal static class PanelHostTests
         ZoomReachesFloatingWindow(check, pumpUntil);
         InspectorSurvivesFloating(check, pumpUntil);
         SessionsKeepViewState(check, pumpUntil);
+        AutoHideRight(check, pumpUntil);
+        AutoHideMenu(check, pumpUntil);
+        FlyoutOverlaysLeft(check, pumpUntil);
+        FlyoutCloses(check, pumpUntil);
+        FlyoutInsideAtMinimumSize(check, pumpUntil);
+        AutoHideStripTracksZoom(check, pumpUntil);
+        AutoHideAccessibility(check, pumpUntil);
+        FlyoutScreenshots(pumpUntil);
+    }
+
+    private const int WmLButtonDown = 0x0201;
+    private const int WmMouseMove = 0x0200;
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool PostMessage(nint hwnd, int msg, nint wParam, nint lParam);
+
+    [DllImport("user32.dll")]
+    private static extern nint GetFocus();
+
+    private static nint MouseLParam(Point client) => (nint)(((client.Y & 0xFFFF) << 16) | (client.X & 0xFFFF));
+
+    /// <summary>A left click on a strip item, delivered to the strip as the mouse would.</summary>
+    private static void ClickStripItem(AutoHideStrip strip, PanelId id)
+    {
+        var item = strip.ItemBounds(id);
+        var centre = MouseLParam(new Point(item.X + item.Width / 2, item.Y + item.Height / 2));
+        SendMessage(strip.Handle, WmLButtonDown, 1, centre);
+        SendMessage(strip.Handle, WmLButtonUp, 0, centre);
+    }
+
+    private static void AutoHideRight(Action<bool, string> check, Action<Func<bool>> pumpUntil)
+    {
+        Console.WriteLine("== auto-hiding Right gives the space to Left and shows a strip with five names");
+        using var rig = new Rig();
+        rig.Form.Show();
+        pumpUntil(() => rig.Grid.Width > 0);
+        var left = StripOf(rig, PanelId.Sessions)!;
+        var widthBefore = left.Width;
+
+        rig.Host.SetAutoHidden(DockArea.Right, true);
+        PumpFor(pumpUntil, 100);
+        var strip = rig.Host.AutoHideStripOf(DockArea.Right);
+        check(rig.Host.IsAutoHidden(DockArea.Right) && rig.Host.Snapshot().IsAutoHidden(DockArea.Right), "the host and its layout have Right auto-hidden");
+        check(strip.Visible && strip.Dock == DockStyle.Right, "a strip is shown along the right edge");
+        string[] names = ["Inspectors", "Composer", "Filters", "AutoResponder", "Log"];
+        check(strip.Panels.Select(panel => panel.Title).SequenceEqual(names), $"it names the five panels in order ({string.Join(", ", strip.Panels.Select(panel => panel.Title))})");
+        check(Enum.GetValues<PanelId>().Where(id => id != PanelId.Sessions).All(id => rig.Registry.PageOf(id).Parent is null),
+            "the five pages are out of every strip until a flyout shows one");
+        check(left.Width > widthBefore && left.Right >= strip.Left - 1, $"the sessions area takes the space ({widthBefore} -> {left.Width}, strip at {strip.Left})");
+        check(!rig.Host.AutoHideStripOf(DockArea.Left).Visible && !rig.Host.AutoHideStripOf(DockArea.Bottom).Visible, "no other strip is shown");
+
+        rig.Host.MoveTo(PanelId.Log, DockArea.Bottom);
+        rig.Host.SetAutoHidden(DockArea.Bottom, true);
+        PumpFor(pumpUntil, 100);
+        var bottom = rig.Host.AutoHideStripOf(DockArea.Bottom);
+        check(bottom.Visible && bottom.Panels.Select(panel => panel.Id).SequenceEqual([PanelId.Log]), "an auto-hidden Bottom shows a strip with the Log");
+        check(left.Bottom >= bottom.Top - 1 && left.Right >= strip.Left - 1, "with Right and Bottom auto-hidden the sessions area fills the window");
+
+        rig.Host.SetAutoHidden(DockArea.Right, false);
+        PumpFor(pumpUntil, 100);
+        check(!strip.Visible && StripOf(rig, PanelId.Inspectors) is { } right && right.TabCount == 4 && right.FindForm() == rig.Form,
+            "pinning Right again puts its panels back in the split");
+        check(Math.Abs(left.Width - widthBefore) <= 2, $"and the sessions area its old width ({left.Width} vs {widthBefore})");
+
+        rig.Host.SetAutoHidden(DockArea.Right, true);
+        rig.Host.ShowPanel(PanelId.Composer, PanelReveal.Explicit);
+        PumpFor(pumpUntil, 100);
+        rig.Host.ResetLayout();
+        PumpFor(pumpUntil, 100);
+        check(!rig.Host.IsAutoHidden(DockArea.Right) && !rig.Host.IsAutoHidden(DockArea.Bottom) && !rig.Host.FlyoutOf(DockArea.Right).IsOpen,
+            "Reset layout pins every area and closes the flyout");
+        check(StripOf(rig, PanelId.Composer) == StripOf(rig, PanelId.Log) && StripOf(rig, PanelId.Log)?.TabCount == 5, "and every panel is back on the right");
+    }
+
+    private static void AutoHideMenu(Action<bool, string> check, Action<Func<bool>> pumpUntil)
+    {
+        Console.WriteLine("== the Auto-hide item is disabled for the sessions area");
+        using var rig = new Rig();
+        rig.Form.Show();
+        pumpUntil(() => rig.Grid.Width > 0);
+        ToolStripMenuItem? Item(PanelId id) =>
+            rig.Host.TabMenuItems(id).OfType<ToolStripMenuItem>().FirstOrDefault(item => item.Text == Strings.Panels.AutoHide);
+
+        check(Item(PanelId.Sessions) is { Enabled: false, Checked: false }, "the sessions tab's Auto-hide area is greyed out");
+        rig.Host.SetAutoHidden(DockArea.Left, true);
+        check(!rig.Host.IsAutoHidden(DockArea.Left), "and the sessions area cannot be auto-hidden another way");
+        check(Item(PanelId.Composer) is { Enabled: true, Checked: false }, "a right-hand tab's item is enabled and unchecked");
+        Item(PanelId.Composer)?.PerformClick();
+        PumpFor(pumpUntil, 100);
+        check(rig.Host.IsAutoHidden(DockArea.Right), "clicking it auto-hides the Right area");
+        check(Item(PanelId.Composer) is { Enabled: true, Checked: true }, "and the item shows checked next time");
+
+        rig.Host.FloatPanel(PanelId.Filters);
+        PumpFor(pumpUntil, 100);
+        check(Item(PanelId.Filters) is { Enabled: false }, "a floating panel's item is greyed out");
+        rig.Host.DockPanel(PanelId.Filters);
+        PumpFor(pumpUntil, 100);
+
+        rig.Host.ShowPanel(PanelId.Composer, PanelReveal.Explicit);
+        PumpFor(pumpUntil, 100);
+        var flyout = rig.Host.FlyoutOf(DockArea.Right);
+        check(flyout.IsOpen && rig.Registry.PageOf(PanelId.Composer).Parent == flyout.Strip, "setup: the Composer shows in the flyout");
+        Item(PanelId.Composer)?.PerformClick();
+        PumpFor(pumpUntil, 100);
+        check(!rig.Host.IsAutoHidden(DockArea.Right) && !flyout.IsOpen && StripOf(rig, PanelId.Composer)?.TabCount == 5,
+            "unchecking it from the flyout's tab pins the area again and closes the flyout");
+    }
+
+    private static void FlyoutOverlaysLeft(Action<bool, string> check, Action<Func<bool>> pumpUntil)
+    {
+        Console.WriteLine("== clicking a strip name opens a flyout over Left without changing its width");
+        using var rig = new Rig();
+        var strips = new List<DarkTabControl>();
+        rig.Host.StripCreated += (_, created) => strips.Add(created);
+        rig.Host.MoveTo(PanelId.Log, DockArea.Bottom);
+        rig.Form.Show();
+        pumpUntil(() => rig.Grid.Width > 0);
+        rig.Host.SetAutoHidden(DockArea.Right, true);
+        PumpFor(pumpUntil, 100);
+        var flyout = rig.Host.FlyoutOf(DockArea.Right);
+        check(strips.Contains(flyout.Strip), "the flyout's strip is handed to StripCreated, so session drops work on it");
+
+        var left = StripOf(rig, PanelId.Sessions)!;
+        var splits = Descendants(rig.Host).OfType<SplitContainer>().ToArray();
+        var distances = splits.Select(split => split.SplitterDistance).ToArray();
+        var leftBounds = left.Bounds;
+        var gridWidth = rig.Grid.Width;
+
+        ClickStripItem(rig.Host.AutoHideStripOf(DockArea.Right), PanelId.Filters);
+        PumpFor(pumpUntil, 100);
+        var filters = rig.Registry.PageOf(PanelId.Filters);
+        check(flyout.IsOpen && flyout.Visible && filters.Parent == flyout.Strip, "the Filters show in the flyout");
+        check(rig.Host.Controls.GetChildIndex(flyout) == 0, "the flyout is at the top of the z-order");
+        check(rig.Host.AutoHideStripOf(DockArea.Right).OpenPanel == PanelId.Filters, "the strip marks the Filters as open");
+        var overLeft = rig.Host.RectangleToScreen(flyout.Bounds);
+        check(overLeft.IntersectsWith(left.RectangleToScreen(left.ClientRectangle)), "the flyout lies over the sessions area");
+        check(left.Bounds == leftBounds && rig.Grid.Width == gridWidth, $"the sessions area did not move or resize ({left.Bounds} vs {leftBounds})");
+        check(splits.Select(split => split.SplitterDistance).SequenceEqual(distances), "no splitter moved");
+        check(rig.Registry.ContentOf(PanelId.Filters).ContainsFocus, $"a click on the strip moves the focus into the flyout (focus: {FocusedName(rig.Form)})");
+
+        ClickStripItem(rig.Host.AutoHideStripOf(DockArea.Right), PanelId.Composer);
+        PumpFor(pumpUntil, 100);
+        check(flyout.IsOpen && rig.Registry.PageOf(PanelId.Composer).Parent == flyout.Strip && filters.Parent is null,
+            "clicking another name swaps the flyout to that panel");
+
+        rig.Host.AutoHideStripOf(DockArea.Right).DragHover(Center(rig.Host.AutoHideStripOf(DockArea.Right).ItemBounds(PanelId.AutoResponder)));
+        PumpFor(pumpUntil, 100);
+        check(flyout.IsOpen && rig.Registry.PageOf(PanelId.AutoResponder).Parent == flyout.Strip, "dragging a session over a name opens that panel's flyout");
+
+        var width = flyout.Width;
+        var grip = new Point(2, flyout.Height / 2);
+        SendMessage(flyout.Handle, WmLButtonDown, 1, MouseLParam(grip));
+        SendMessage(flyout.Handle, WmMouseMove, 1, MouseLParam(new Point(grip.X - 100, grip.Y)));
+        SendMessage(flyout.Handle, WmLButtonUp, 0, MouseLParam(new Point(grip.X - 100, grip.Y)));
+        PumpFor(pumpUntil, 100);
+        check(Math.Abs(flyout.Width - (width + 100)) <= 2, $"dragging the inner edge widens the flyout ({width} -> {flyout.Width})");
+        check(left.Bounds == leftBounds, "and still moves nothing under it");
+        var fraction = rig.Host.Snapshot().FlyoutFraction(DockArea.Right);
+        check(fraction > PanelLayout.DefaultFlyoutFraction, $"Snapshot records the new flyout fraction ({fraction})");
+
+        static Point Center(Rectangle r) => new(r.X + r.Width / 2, r.Y + r.Height / 2);
+    }
+
+    private static void FlyoutCloses(Action<bool, string> check, Action<Func<bool>> pumpUntil)
+    {
+        Console.WriteLine("== a mouse-down outside closes the flyout, Esc closes it, and a Passive reveal opens it without taking focus from the grid");
+        using var rig = new Rig();
+        rig.Form.Show();
+        pumpUntil(() => rig.Grid.Width > 0);
+        rig.Host.SetAutoHidden(DockArea.Right, true);
+        PumpFor(pumpUntil, 100);
+        var flyout = rig.Host.FlyoutOf(DockArea.Right);
+        var sessionsPage = rig.Registry.PageOf(PanelId.Sessions);
+
+        rig.List.Focus();
+        pumpUntil(() => rig.List.Focused);
+        rig.Host.ShowPanel(PanelId.Log, PanelReveal.Passive);
+        PumpFor(pumpUntil, 100);
+        check(flyout.IsOpen && rig.Registry.PageOf(PanelId.Log).Parent == flyout.Strip, "a Passive reveal opens the Log's flyout");
+        check(rig.List.Focused, $"and the grid keeps the focus (focus: {FocusedName(rig.Form)})");
+        check(flyout.FilterInstalled, "the outside-click filter is installed while it is open");
+
+        PostMessage(flyout.Strip.Handle, WmLButtonDown, 1, MouseLParam(new Point(5, flyout.Strip.Height - 5)));
+        PostMessage(flyout.Strip.Handle, WmLButtonUp, 0, MouseLParam(new Point(5, flyout.Strip.Height - 5)));
+        PumpFor(pumpUntil, 100);
+        check(flyout.IsOpen, "a mouse-down inside the flyout leaves it open");
+
+        PostMessage(sessionsPage.Handle, WmLButtonDown, 1, MouseLParam(new Point(20, 40)));
+        PostMessage(sessionsPage.Handle, WmLButtonUp, 0, MouseLParam(new Point(20, 40)));
+        PumpFor(pumpUntil, 150);
+        check(!flyout.IsOpen && !flyout.Visible && rig.Registry.PageOf(PanelId.Log).Parent is null, "a mouse-down outside it closes it");
+        check(!flyout.FilterInstalled, "and removes the filter");
+
+        rig.Host.FocusPanel(PanelId.Composer);
+        PumpFor(pumpUntil, 100);
+        var composer = rig.Registry.ContentOf(PanelId.Composer);
+        check(flyout.IsOpen && composer.ContainsFocus, $"FocusPanel opens the flyout with the focus in it (focus: {FocusedName(rig.Form)})");
+        var focused = Control.FromChildHandle(GetFocus()) ?? composer;
+        check(ProcessCmdKey(focused, Keys.Escape), "Esc is taken by the flyout");
+        PumpFor(pumpUntil, 100);
+        check(!flyout.IsOpen && !flyout.FilterInstalled, "Esc closes it");
+        check(rig.List.Focused, $"and the focus goes back to the grid (focus: {FocusedName(rig.Form)})");
+
+        rig.Host.FocusPanel(PanelId.Composer);
+        PumpFor(pumpUntil, 100);
+        check(flyout.IsOpen && composer.ContainsFocus, "setup: the Composer flyout has the focus again");
+        rig.List.Focus();
+        PumpFor(pumpUntil, 150);
+        check(!flyout.IsOpen && rig.List.Focused, $"a flyout opened with the focus closes when the focus leaves it, and the focus stays where it went (focus: {FocusedName(rig.Form)})");
+
+        rig.Host.ShowPanel(PanelId.Filters, PanelReveal.Explicit);
+        PumpFor(pumpUntil, 100);
+        check(flyout.IsOpen && rig.List.Focused, $"an Explicit ShowPanel opens it and the grid keeps the focus (open: {flyout.IsOpen}, focus: {FocusedName(rig.Form)})");
+        rig.Host.CloseFlyouts();
+        PumpFor(pumpUntil, 50);
+        check(!flyout.IsOpen && !flyout.FilterInstalled, "CloseFlyouts, which the window calls on Deactivate, closes it");
+
+        rig.Host.ShowPanel(PanelId.Filters, PanelReveal.Explicit);
+        PumpFor(pumpUntil, 50);
+        rig.Host.HidePanel(PanelId.Filters);
+        PumpFor(pumpUntil, 50);
+        check(!flyout.IsOpen && !flyout.FilterInstalled && rig.Host.AutoHideStripOf(DockArea.Right).Panels.Count == 4,
+            "hiding the panel in the flyout closes it and takes the name off the strip");
+        rig.Host.ShowPanel(PanelId.Filters, PanelReveal.Passive);
+        PumpFor(pumpUntil, 50);
+        check(!flyout.IsOpen, "a Passive reveal of a hidden panel still leaves it hidden");
+
+        rig.Host.ShowPanel(PanelId.Log, PanelReveal.Explicit);
+        PumpFor(pumpUntil, 50);
+        check(flyout.FilterInstalled, "setup: the flyout is open again");
+        rig.Form.Close();
+        rig.Form.Dispose();
+        check(!flyout.FilterInstalled, "disposing the window removes the filter");
+    }
+
+    private static void FlyoutInsideAtMinimumSize(Action<bool, string> check, Action<Func<bool>> pumpUntil)
+    {
+        Console.WriteLine("== the flyout stays inside the window at MinimumSize");
+        using var rig = new Rig();
+        rig.Form.MinimumSize = new Size(900, 600); // as MainForm
+        rig.Form.Show();
+        pumpUntil(() => rig.Grid.Width > 0);
+        rig.Host.MoveTo(PanelId.Log, DockArea.Bottom);
+        rig.Host.SetAutoHidden(DockArea.Right, true);
+        rig.Host.SetAutoHidden(DockArea.Bottom, true);
+        rig.Host.SetFlyoutFraction(DockArea.Right, 0.9);
+        PumpFor(pumpUntil, 100);
+
+        var right = rig.Host.FlyoutOf(DockArea.Right);
+        var bottom = rig.Host.FlyoutOf(DockArea.Bottom);
+        rig.Host.ShowPanel(PanelId.Inspectors, PanelReveal.Explicit);
+        PumpFor(pumpUntil, 100);
+        check(right.IsOpen && rig.Host.ClientRectangle.Contains(right.Bounds) && right.Width > 0, $"at full size the Right flyout is inside the host ({right.Bounds})");
+
+        rig.Form.Size = rig.Form.MinimumSize;
+        PumpFor(pumpUntil, 200);
+        check(right.IsOpen && rig.Host.ClientRectangle.Contains(right.Bounds) && right.Width > 0 && right.Height > 0,
+            $"at MinimumSize it is still inside ({right.Bounds} in {rig.Host.ClientRectangle})");
+        check(!right.Bounds.IntersectsWith(rig.Host.AutoHideStripOf(DockArea.Right).Bounds)
+              && !right.Bounds.IntersectsWith(rig.Host.AutoHideStripOf(DockArea.Bottom).Bounds), "and it covers neither strip");
+
+        rig.Host.ShowPanel(PanelId.Log, PanelReveal.Explicit);
+        PumpFor(pumpUntil, 100);
+        check(!right.IsOpen && bottom.IsOpen, "opening the Bottom flyout closes the Right one");
+        check(rig.Host.ClientRectangle.Contains(bottom.Bounds) && bottom.Height > 0, $"the Bottom flyout is inside too ({bottom.Bounds})");
+
+        rig.Form.Size = new Size(1200, 800);
+        PumpFor(pumpUntil, 200);
+        check(rig.Host.ClientRectangle.Contains(bottom.Bounds) && bottom.Width == rig.Host.ClientSize.Width - rig.Host.AutoHideStripOf(DockArea.Right).Width,
+            $"and follows the window as it grows ({bottom.Bounds})");
+    }
+
+    private static void AutoHideStripTracksZoom(Action<bool, string> check, Action<Func<bool>> pumpUntil)
+    {
+        // Piper's own zoom stops at 150%; on a 150% display that is the 200%-plus text the strips must fit.
+        Console.WriteLine("== zoom 200% then 100%: the strip thickness tracks Font.Height");
+        using var rig = new Rig();
+        rig.Form.Show();
+        pumpUntil(() => rig.Grid.Width > 0);
+        Palette.Apply(rig.Form);
+        rig.Host.MoveTo(PanelId.Log, DockArea.Bottom);
+        rig.Host.SetAutoHidden(DockArea.Right, true);
+        rig.Host.SetAutoHidden(DockArea.Bottom, true);
+        PumpFor(pumpUntil, 100);
+        var right = rig.Host.AutoHideStripOf(DockArea.Right);
+        var bottom = rig.Host.AutoHideStripOf(DockArea.Bottom);
+        var normalHeight = right.Font.Height;
+        check(right.Width == right.Font.Height + 12 && bottom.Height == bottom.Font.Height + 12, $"at 100% the strips are Font.Height + 12 thick ({right.Width}, {bottom.Height})");
+
+        check(right.Panels.All(panel => right.ItemBounds(panel.Id).Height >= TextRenderer.MeasureText(panel.Title, right.Font).Width),
+            "at 100% each name has room for its whole text");
+
+        try
+        {
+            SetZoom(FontScaleSettingsStore.MaxStep);
+            PumpFor(pumpUntil, 100);
+            check(right.Font.Height >= normalHeight * 14 / 10, $"setup: the font grew to the largest zoom ({normalHeight} -> {right.Font.Height})");
+            check(right.Width == right.Font.Height + 12 && bottom.Height == bottom.Font.Height + 12, $"at the largest zoom they are Font.Height + 12 thick ({right.Width}, {bottom.Height})");
+            var items = right.Panels.Select(panel => right.ItemBounds(panel.Id)).ToArray();
+            check(items.All(item => item.Width == right.Width && item.Height > 0 && item.Bottom <= right.Height) && items.Zip(items.Skip(1)).All(pair => pair.First.Bottom <= pair.Second.Top),
+                $"every name stays on the strip without overlapping the next ({string.Join(", ", items.Select(item => $"{item.Top}-{item.Bottom}"))} in {right.Height})");
+            var log = bottom.ItemBounds(PanelId.Log);
+            check(log.Width >= TextRenderer.MeasureText("Log", bottom.Font).Width && log.Height == bottom.Height, "a name with room keeps its whole text");
+            rig.Form.Height = 1400;
+            PumpFor(pumpUntil, 100);
+            check(right.Panels.All(panel => right.ItemBounds(panel.Id).Height >= TextRenderer.MeasureText(panel.Title, right.Font).Width),
+                $"and in a taller window every name is whole again (strip {right.Height})");
+        }
+        finally
+        {
+            SetZoom(0);
+        }
+
+        PumpFor(pumpUntil, 100);
+        check(right.Font.Height == normalHeight && right.Width == normalHeight + 12 && bottom.Height == bottom.Font.Height + 12, $"back at 100% they are thin again ({right.Width})");
+
+        void SetZoom(int step)
+        {
+            typeof(Palette).Assembly.GetType("Piper.App.Theme.FontScale", throwOnError: true)!.GetMethod("SetStep")!.Invoke(null, [step]);
+            Palette.RescaleFonts();
+            Palette.Apply(rig.Form); // as ChangeFontScale does
+            rig.Host.ApplyTheme();
+        }
+    }
+
+    private static void AutoHideAccessibility(Action<bool, string> check, Action<Func<bool>> pumpUntil)
+    {
+        Console.WriteLine("== the accessible children are page tabs named after the panels");
+        using var rig = new Rig();
+        rig.Form.Show();
+        pumpUntil(() => rig.Grid.Width > 0);
+        rig.Host.SetAutoHidden(DockArea.Right, true);
+        PumpFor(pumpUntil, 100);
+        var strip = rig.Host.AutoHideStripOf(DockArea.Right);
+        var accessible = strip.AccessibilityObject;
+        check(accessible.Role == AccessibleRole.PageTabList, $"the strip is a page tab list ({accessible.Role})");
+        var children = Enumerable.Range(0, accessible.GetChildCount()).Select(accessible.GetChild).ToArray();
+        check(children.Length == 5 && children.All(child => child?.Role == AccessibleRole.PageTab), "it has five page tabs");
+        check(children.Select(child => child?.Name).SequenceEqual(["Inspectors", "Composer", "Filters", "AutoResponder", "Log"]), "named after the panels");
+        check(children.All(child => child is not null && strip.RectangleToScreen(strip.ClientRectangle).Contains(child.Bounds)), "each lies on the strip");
+        children[2]?.DoDefaultAction();
+        PumpFor(pumpUntil, 100);
+        check(rig.Host.FlyoutOf(DockArea.Right).IsOpen && rig.Registry.PageOf(PanelId.Filters).Parent == rig.Host.FlyoutOf(DockArea.Right).Strip,
+            "its default action opens the panel's flyout");
+        check(children[2]?.State.HasFlag(AccessibleStates.Selected) == true, "and the open one is selected");
+    }
+
+    /// <summary>
+    /// Saves the Right flyout open in both themes, for a visual review, when PIPER_UI_SCREENSHOTS names
+    /// a directory. Not a check: nothing is asserted.
+    /// </summary>
+    private static void FlyoutScreenshots(Action<Func<bool>> pumpUntil)
+    {
+        if (Environment.GetEnvironmentVariable("PIPER_UI_SCREENSHOTS") is not { Length: > 0 } directory) return;
+        Console.WriteLine($"== screenshots of the Right flyout into {directory}");
+        var wasLight = Palette.IsLightMode;
+        try
+        {
+            foreach (var light in new[] { false, true })
+            {
+                if (Palette.IsLightMode != light) Palette.ToggleMode();
+                using var rig = new Rig();
+                rig.Host.MoveTo(PanelId.Log, DockArea.Bottom);
+                rig.Form.Show();
+                Palette.Apply(rig.Form);
+                rig.Host.ApplyTheme();
+                pumpUntil(() => rig.Grid.Width > 0);
+                rig.Host.SetAutoHidden(DockArea.Right, true);
+                rig.Host.ShowPanel(PanelId.Filters, PanelReveal.Explicit);
+                PumpFor(pumpUntil, 300);
+                // DrawToBitmap paints children in reverse z-order and would hide the flyout, so copy the screen.
+                rig.Form.TopMost = true;
+                PumpFor(pumpUntil, 300);
+                var client = rig.Form.RectangleToScreen(rig.Form.ClientRectangle);
+                using var bitmap = new Bitmap(client.Width, client.Height);
+                using (var graphics = Graphics.FromImage(bitmap)) graphics.CopyFromScreen(client.Location, Point.Empty, client.Size);
+                bitmap.Save(Path.Combine(directory, light ? "task-7-flyout-light.png" : "task-7-flyout-dark.png"));
+            }
+        }
+        finally
+        {
+            if (Palette.IsLightMode != wasLight) Palette.ToggleMode();
+        }
     }
 
     private const int WmLButtonDblClk = 0x0203;
@@ -447,19 +831,19 @@ internal static class PanelHostTests
         check(Math.Abs(bottom.Height - expected) <= 8, $"and takes 30% of the height ({bottom.Height} px, expected about {expected:0})");
 
         var items = rig.Host.TabMenuItems(PanelId.Log).OfType<ToolStripMenuItem>().ToArray();
-        string[] texts = [Strings.Panels.MoveLeft, Strings.Panels.MoveRight, Strings.Panels.MoveBottom, Strings.Panels.Float, Strings.Panels.TopMost, Strings.Panels.Hide];
-        check(items.Select(item => item.Text).SequenceEqual(texts), $"the tab menu holds Move to Left/Right/Bottom, Float, Always on top and Hide ({string.Join(", ", items.Select(item => item.Text))})");
-        check(items.Length == 6 && items[0].Enabled && items[1].Enabled && !items[2].Enabled && items[5].Enabled,
+        string[] texts = [Strings.Panels.MoveLeft, Strings.Panels.MoveRight, Strings.Panels.MoveBottom, Strings.Panels.Float, Strings.Panels.AutoHide, Strings.Panels.TopMost, Strings.Panels.Hide];
+        check(items.Select(item => item.Text).SequenceEqual(texts), $"the tab menu holds Move to Left/Right/Bottom, Float, Auto-hide area, Always on top and Hide ({string.Join(", ", items.Select(item => item.Text))})");
+        check(items.Length == 7 && items[0].Enabled && items[1].Enabled && !items[2].Enabled && items[6].Enabled,
             "Move to Bottom is greyed out where the Log already is");
-        if (items.Length == 6) items[1].PerformClick();
+        if (items.Length == 7) items[1].PerformClick();
         PumpFor(pumpUntil, 100);
         check(StripOf(rig, PanelId.Log) == right && right.SelectedTab == log, "Move to Right puts the Log back on the right, selected");
         check(rig.Host.SelectedPanel(DockArea.Bottom) is null, "and leaves the bottom empty");
         foreach (var item in items) item.Dispose();
 
         var sessionItems = rig.Host.TabMenuItems(PanelId.Sessions).OfType<ToolStripMenuItem>().ToArray();
-        check(sessionItems.Length == 6 && !sessionItems[0].Enabled && !sessionItems[5].Enabled,
-            "for Sessions, Move to Left (where it is) and Hide are greyed out");
+        check(sessionItems.Length == 7 && !sessionItems[0].Enabled && !sessionItems[4].Enabled && !sessionItems[6].Enabled,
+            "for Sessions, Move to Left (where it is), Auto-hide area and Hide are greyed out");
         foreach (var item in sessionItems) item.Dispose();
     }
 
@@ -785,8 +1169,8 @@ internal static class PanelHostTests
 
         var strips = new List<DarkTabControl>();
         rig.Host.StripCreated += (_, strip) => strips.Add(strip);
-        check(strips.Count == 3 && strips.Contains(left) && strips.Contains(right),
-            $"a late StripCreated subscriber still gets every docked strip ({strips.Count})");
+        check(strips.Count == 6 && strips.Contains(left) && strips.Contains(right),
+            $"a late StripCreated subscriber still gets every docked strip and every flyout's ({strips.Count})");
     }
 
     private static void ShowPanelKeepsFocus(Action<bool, string> check, Action<Func<bool>> pumpUntil)

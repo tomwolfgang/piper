@@ -9,7 +9,9 @@ namespace Piper.App.Layout;
 /// Renders a <see cref="PanelLayout"/> onto the main window: an outer horizontal split with the Left and
 /// Right areas side by side above and the Bottom area below, each area a <see cref="DarkTabControl"/>. It
 /// is the only way the window reaches its panels, so a panel can move without its callers knowing where
-/// it is. An empty area collapses its side of the split.
+/// it is. An empty area collapses its side of the split. An auto-hidden area leaves the split too: its
+/// panels are named on an <see cref="AutoHideStrip"/> along its edge and open in a <see cref="Flyout"/>
+/// over the neighbouring area, which moves nothing under it.
 /// </summary>
 internal sealed class PanelHost : UserControl
 {
@@ -24,6 +26,8 @@ internal sealed class PanelHost : UserControl
     private readonly HashSet<PanelId> _checked = [];
     private readonly ContextMenuStrip _tabMenu = new();
     private readonly Dictionary<PanelId, FloatingPanelForm> _floating = [];
+    private readonly Dictionary<DockArea, AutoHideStrip> _autoHideStrips = [];
+    private readonly Dictionary<DockArea, Flyout> _flyouts = [];
     private PanelLayout _layout;
     private EventHandler<DarkTabControl>? _stripCreated;
     private Func<Keys, bool> _processShortcut = _ => false;
@@ -52,6 +56,31 @@ internal sealed class PanelHost : UserControl
         _outer.Panel2.Controls.Add(_strips[DockArea.Bottom]);
         Controls.Add(_outer);
 
+        // Docked in reverse order of addition: Left and Right run the full height, Bottom between them,
+        // and the split fills what is left.
+        foreach (var area in (DockArea[])[DockArea.Bottom, DockArea.Right, DockArea.Left])
+        {
+            var strip = new AutoHideStrip(area) { Visible = false, Font = Palette.UiFont };
+            strip.PanelClicked += OnAutoHideClicked;
+            strip.PanelDragHover += (_, id) => OpenFlyout(id, takeFocus: false);
+            _autoHideStrips[area] = strip;
+            Controls.Add(strip);
+        }
+
+        foreach (var area in AllAreas)
+        {
+            var flyout = new Flyout(area, () => _layout.FlyoutFraction(area), value => _layout.SetFlyoutFraction(area, value))
+            {
+                AutoHideStrip = _autoHideStrips[area],
+                Panels = () => _registry.Contents,
+            };
+            flyout.Strip.TabMenuRequested += OnTabMenuRequested;
+            flyout.Closed += OnFlyoutClosed;
+            flyout.Resized += (_, _) => LayoutChanged?.Invoke(this, EventArgs.Empty);
+            _flyouts[area] = flyout;
+            Controls.Add(flyout);
+        }
+
         Arrange();
         _inner.SplitterMoved += OnSplitterMoved;
         _outer.SplitterMoved += OnSplitterMoved;
@@ -68,6 +97,7 @@ internal sealed class PanelHost : UserControl
             _stripCreated += value;
             if (value is null) return;
             foreach (var area in AllAreas) value(this, _strips[area]);
+            foreach (var area in AllAreas) value(this, _flyouts[area].Strip);
             foreach (var form in _floating.Values) value(this, form.Strip);
         }
         remove => _stripCreated -= value;
@@ -80,7 +110,26 @@ internal sealed class PanelHost : UserControl
     /// Brings a panel into view without taking the keyboard focus. A hidden panel is shown again only for
     /// an <see cref="PanelReveal.Explicit"/> reveal; a <see cref="PanelReveal.Passive"/> one leaves it hidden.
     /// </summary>
-    public void ShowPanel(PanelId id, PanelReveal reveal)
+    public void ShowPanel(PanelId id, PanelReveal reveal) => Reveal(id, reveal, takeFocus: false);
+
+    /// <summary>Shows the panel and moves the keyboard focus into it, activating its window if it floats.</summary>
+    public void FocusPanel(PanelId id)
+    {
+        Reveal(id, PanelReveal.Explicit, takeFocus: true);
+        if (_floating.TryGetValue(id, out var window))
+        {
+            if (window.WindowState == FormWindowState.Minimized) window.WindowState = FormWindowState.Normal;
+            window.Activate();
+        }
+
+        _registry.ContentOf(id).Focus();
+    }
+
+    /// <summary>
+    /// Brings a panel into view: selects its tab, brings its floating window forward, or opens its
+    /// flyout when its area is auto-hidden. Only a flyout opened with <paramref name="takeFocus"/> takes the focus.
+    /// </summary>
+    private void Reveal(PanelId id, PanelReveal reveal, bool takeFocus)
     {
         if (_layout.IsHidden(id))
         {
@@ -88,6 +137,12 @@ internal sealed class PanelHost : UserControl
             Rearrange(() => _layout.Show(id));
             // A theme toggle or zoom while it was hidden may have missed it.
             Retheme(id);
+        }
+
+        if (IsInAutoHiddenArea(id))
+        {
+            OpenFlyout(id, takeFocus);
+            return;
         }
 
         var page = _registry.PageOf(id);
@@ -98,20 +153,42 @@ internal sealed class PanelHost : UserControl
         if (_floating.TryGetValue(id, out var window)) window.Reveal();
     }
 
-    /// <summary>Shows the panel and moves the keyboard focus into it, activating its window if it floats.</summary>
-    public void FocusPanel(PanelId id)
-    {
-        ShowPanel(id, PanelReveal.Explicit);
-        if (_floating.TryGetValue(id, out var window))
-        {
-            if (window.WindowState == FormWindowState.Minimized) window.WindowState = FormWindowState.Normal;
-            window.Activate();
-        }
+    public PanelId? SelectedPanel(DockArea area) => _layout.SelectedIn(area);
 
-        _registry.ContentOf(id).Focus();
+    public bool IsAutoHidden(DockArea area) => _layout.IsAutoHidden(area);
+
+    /// <summary>The area holding the sessions list cannot auto-hide, so the grid is never buried under a flyout.</summary>
+    public bool CanAutoHide(DockArea area) => _layout.CanAutoHide(area);
+
+    /// <summary>
+    /// Takes the area out of the split layout and names its panels on a strip along its edge, or puts it
+    /// back. The area holding the sessions list is never auto-hidden.
+    /// </summary>
+    public void SetAutoHidden(DockArea area, bool value)
+    {
+        if (_layout.IsAutoHidden(area) == value || (value && !_layout.CanAutoHide(area))) return;
+        Rearrange(() => _layout.SetAutoHidden(area, value));
     }
 
-    public PanelId? SelectedPanel(DockArea area) => _layout.SelectedIn(area);
+    /// <summary>Stores how far an area's flyout reaches across the window; the layout clamps it.</summary>
+    public void SetFlyoutFraction(DockArea area, double value)
+    {
+        _layout.SetFlyoutFraction(area, value);
+        if (_flyouts[area].IsOpen) _flyouts[area].Frame = _outer.Bounds;
+        LayoutChanged?.Invoke(this, EventArgs.Empty);
+    }
+
+    /// <summary>Closes any open flyout. The window calls this when it is deactivated.</summary>
+    public void CloseFlyouts()
+    {
+        foreach (var flyout in _flyouts.Values) flyout.Close();
+    }
+
+    /// <summary>The strip an area shows while it is auto-hidden; for tests.</summary>
+    internal AutoHideStrip AutoHideStripOf(DockArea area) => _autoHideStrips[area];
+
+    /// <summary>The flyout an auto-hidden area opens; for tests.</summary>
+    internal Flyout FlyoutOf(DockArea area) => _flyouts[area];
 
     public bool IsHidden(PanelId id) => _layout.IsHidden(id);
 
@@ -137,6 +214,7 @@ internal sealed class PanelHost : UserControl
         set
         {
             _shuttingDown = value;
+            if (value) CloseFlyouts();
             foreach (var window in _floating.Values)
             {
                 window.ShuttingDown = value;
@@ -252,6 +330,8 @@ internal sealed class PanelHost : UserControl
         }
 
         foreach (var id in AllPanels) Retheme(id);
+        foreach (var strip in _autoHideStrips.Values) strip.Invalidate();
+        foreach (var flyout in _flyouts.Values) flyout.Invalidate(true);
         Palette.Apply(_tabMenu);
     }
 
@@ -282,6 +362,10 @@ internal sealed class PanelHost : UserControl
     protected override void OnLayout(LayoutEventArgs e)
     {
         base.OnLayout(e);
+        // An open flyout keeps to the area the split fills, whatever the window's size.
+        foreach (var flyout in _flyouts.Values)
+            if (flyout.IsOpen) flyout.Frame = _outer.Bounds;
+
         // Fractions only mean something once the host has its real size; before that the splits are
         // the default 150 px and every distance would be clamped. Applied once, so the user's
         // splitter is never pulled back; SplitContainer keeps the proportions on later resizes.
@@ -320,6 +404,8 @@ internal sealed class PanelHost : UserControl
     /// <summary>Applies a change to the layout and shows the result, keeping the user's splitters.</summary>
     private void Rearrange(Action change)
     {
+        // A flyout's page may be about to move; the caller reopens one if it wants it.
+        CloseFlyouts();
         CaptureFractions();
         CaptureFloatingBounds();
         // Moving the grid can recreate its handles, which loses the selection and the scroll position.
@@ -421,7 +507,13 @@ internal sealed class PanelHost : UserControl
             foreach (var area in AllAreas)
             {
                 var strip = _strips[area];
-                var pages = _layout.DockedIn(area).Select(_registry.PageOf).ToArray();
+                var docked = _layout.DockedIn(area);
+                // An auto-hidden area leaves the split: its pages wait outside every strip until a
+                // flyout shows one, and the auto-hide strip names them.
+                var autoHidden = _layout.IsAutoHidden(area) && docked.Count > 0;
+                TabPage[] pages = autoHidden ? [] : docked.Select(_registry.PageOf).ToArray();
+                _autoHideStrips[area].SetPanels(autoHidden ? docked.Select(id => (id, _registry.PageOf(id).Text)).ToArray() : []);
+                _autoHideStrips[area].Visible = autoHidden;
                 if (!strip.TabPages.Cast<TabPage>().SequenceEqual(pages))
                 {
                     strip.TabPages.Clear();
@@ -434,7 +526,7 @@ internal sealed class PanelHost : UserControl
                     strip.SetTabChecked(page, _checked.Contains(id) && page.Parent == strip);
                 }
 
-                if (_layout.SelectedIn(area) is { } selected)
+                if (!autoHidden && _layout.SelectedIn(area) is { } selected)
                     strip.SelectWithoutFocus(strip.TabPages.IndexOf(_registry.PageOf(selected)));
             }
 
@@ -496,5 +588,46 @@ internal sealed class PanelHost : UserControl
     {
         if (_fractionsPending) return;
         LayoutChanged?.Invoke(this, EventArgs.Empty);
+    }
+
+    private bool IsInAutoHiddenArea(PanelId id) =>
+        !_layout.IsHidden(id) && !_layout.IsFloating(id) && _layout.IsAutoHidden(_layout.AreaOf(id));
+
+    /// <summary>
+    /// Slides the panel out over the neighbouring area, closing any other flyout first. Only a docked
+    /// panel in an auto-hidden area has a flyout; anything else is ignored.
+    /// </summary>
+    private void OpenFlyout(PanelId id, bool takeFocus)
+    {
+        if (_shuttingDown || !IsInAutoHiddenArea(id)) return;
+        var area = _layout.AreaOf(id);
+        foreach (var (other, open) in _flyouts)
+            if (other != area) open.Close();
+
+        var flyout = _flyouts[area];
+        var page = _registry.PageOf(id);
+        _layout.Select(id);
+        flyout.Frame = _outer.Bounds;
+        flyout.Open(page, takeFocus);
+        flyout.Strip.SetTabChecked(page, _checked.Contains(id));
+        _autoHideStrips[area].OpenPanel = id;
+    }
+
+    /// <summary>A click on a name opens its flyout with the focus in it, as in Visual Studio; a second click closes it.</summary>
+    private void OnAutoHideClicked(object? sender, PanelId id)
+    {
+        var flyout = _flyouts[_layout.AreaOf(id)];
+        if (flyout.IsOpen && flyout.Page == _registry.PageOf(id)) flyout.Close();
+        else OpenFlyout(id, takeFocus: true);
+    }
+
+    private void OnFlyoutClosed(object? sender, bool hadFocus)
+    {
+        if (sender is not Flyout flyout) return;
+        _autoHideStrips[_flyouts.First(pair => pair.Value == flyout).Key].OpenPanel = null;
+        // The focus was in the page that just left; give it to the grid, as hiding a panel does. Only in
+        // this window: focusing a floating grid would activate its window.
+        var grid = _registry.ContentOf(PanelId.Sessions);
+        if (hadFocus && !IsDisposed && grid.FindForm() is { } form && form == FindForm()) grid.Focus();
     }
 }
