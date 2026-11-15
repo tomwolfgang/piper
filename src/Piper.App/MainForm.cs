@@ -1688,6 +1688,8 @@ public sealed partial class MainForm : Form, IMessageFilter
     /// </summary>
     internal bool ProcessShortcut(Keys keyData)
     {
+        // A floating window can still take keys while the window shuts down; none of these may run then.
+        if (_shutdownInProgress) return false;
         if (Menus.PerformShortcut(_menu, keyData)) return true;
 
         var e = new KeyEventArgs(keyData);

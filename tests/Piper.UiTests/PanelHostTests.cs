@@ -79,6 +79,16 @@ internal static class PanelHostTests
         PumpFor(pumpUntil, 100);
         check(rig.List.Focused && Form.ActiveForm != window, $"revealing a floating panel leaves the grid the focus (focus: {FocusedName(rig.Form)})");
 
+        window.WindowState = FormWindowState.Minimized;
+        PumpFor(pumpUntil, 100);
+        rig.List.Focus();
+        pumpUntil(() => window.WindowState == FormWindowState.Minimized && rig.List.Focused);
+        check(window.WindowState == FormWindowState.Minimized, "setup: the floating Composer is minimised");
+        rig.Host.ShowPanel(PanelId.Composer, PanelReveal.Explicit);
+        PumpFor(pumpUntil, 150);
+        check(window.WindowState != FormWindowState.Minimized && window.Visible, "revealing a minimised floating panel restores its window");
+        check(rig.List.Focused && Form.ActiveForm != window, $"and the grid keeps the focus (focus: {FocusedName(rig.Form)})");
+
         rig.Host.DockPanel(PanelId.Composer);
         PumpFor(pumpUntil, 100);
         check(composer.Parent == right && right.SelectedTab == composer, "Dock puts the Composer back on the right, selected");
@@ -199,7 +209,12 @@ internal static class PanelHostTests
         var logWindow = second.Host.FloatingWindow(PanelId.Log);
         var logDocks = 0;
         if (logWindow is not null) logWindow.DockRequested += (_, _) => logDocks++;
+        second.Host.FloatPanel(PanelId.Filters);
+        PumpFor(pumpUntil, 100);
+        var filtersWindow = second.Host.FloatingWindow(PanelId.Filters);
         second.Host.ShuttingDown = true;
+        check(logWindow is { Enabled: false } && filtersWindow is { Enabled: false },
+            "once shutting down, every floating window is disabled, so the main window's shortcuts cannot run from it");
         logWindow?.Close();
         PumpFor(pumpUntil, 100);
         var logPage = second.Registry.PageOf(PanelId.Log);

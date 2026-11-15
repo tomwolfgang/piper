@@ -65,19 +65,27 @@ internal sealed class FloatingPanelForm : Form
     protected override bool ShowWithoutActivation => true;
 
     /// <summary>
-    /// Shows the window and brings it to the front without activating it, so the grid keeps the focus.
-    /// <see cref="Control.BringToFront"/> is not used: on a top-level window it activates it.
+    /// Shows the window, restoring it if it is minimised, and brings it to the front without activating
+    /// it, so the grid keeps the focus. <see cref="Control.BringToFront"/> is not used: on a top-level
+    /// window it activates it, as setting <see cref="Form.WindowState"/> can.
     /// </summary>
     public void Reveal()
     {
         Show();
-        if (IsHandleCreated) SetWindowPos(Handle, HwndTop, 0, 0, 0, 0, SwpNoSize | SwpNoMove | SwpNoActivate);
+        if (!IsHandleCreated) return;
+        if (WindowState == FormWindowState.Minimized) ShowWindow(Handle, SwShowNoActivate);
+        SetWindowPos(Handle, HwndTop, 0, 0, 0, 0, SwpNoSize | SwpNoMove | SwpNoActivate);
     }
 
     private const nint HwndTop = 0;
     private const uint SwpNoSize = 0x0001;
     private const uint SwpNoMove = 0x0002;
     private const uint SwpNoActivate = 0x0010;
+    private const int SwShowNoActivate = 4;
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool ShowWindow(nint hwnd, int command);
 
     [DllImport("user32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]

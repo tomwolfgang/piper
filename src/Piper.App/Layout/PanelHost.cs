@@ -102,7 +102,12 @@ internal sealed class PanelHost : UserControl
     public void FocusPanel(PanelId id)
     {
         ShowPanel(id, PanelReveal.Explicit);
-        if (_floating.TryGetValue(id, out var window)) window.Activate();
+        if (_floating.TryGetValue(id, out var window))
+        {
+            if (window.WindowState == FormWindowState.Minimized) window.WindowState = FormWindowState.Normal;
+            window.Activate();
+        }
+
         _registry.ContentOf(id).Focus();
     }
 
@@ -132,7 +137,13 @@ internal sealed class PanelHost : UserControl
         set
         {
             _shuttingDown = value;
-            foreach (var window in _floating.Values) window.ShuttingDown = value;
+            foreach (var window in _floating.Values)
+            {
+                window.ShuttingDown = value;
+                // Only the main window is disabled while the proxy is restored; its shortcuts must not
+                // run from a floating window meanwhile.
+                window.Enabled = !value;
+            }
             // A shutdown that failed leaves Piper running: bring back any window closed meanwhile.
             if (!value) OpenFloatingWindows();
         }
@@ -347,6 +358,7 @@ internal sealed class PanelHost : UserControl
             var window = new FloatingPanelForm(owner, page, _processShortcut, _shortcutKeyDown)
             {
                 ShuttingDown = _shuttingDown,
+                Enabled = !_shuttingDown,
                 TopMost = _layout.TopMost(id),
             };
             if (_layout.FloatingBounds(id) is { } bounds) window.Bounds = bounds;
