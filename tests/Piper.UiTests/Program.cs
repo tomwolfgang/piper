@@ -59,6 +59,12 @@ internal static class Program
             return _failures == 0 ? 0 : 1;
         }
 
+        if (args is ["--panels"])
+        {
+            PanelHostTests.Run(Check, PumpUntil);
+            return _failures == 0 ? 0 : 1;
+        }
+
         RunTextBoxWordSelectionTest();
         RunTextWizardJwtMenuTest();
         RunComposerHistoryTooltipTest();

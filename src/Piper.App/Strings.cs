@@ -68,6 +68,9 @@ internal static class Strings
         public static string ZoomIn => I18n.T("shortcuts.zoomIn");
         public static string ZoomOut => I18n.T("shortcuts.zoomOut");
         public static string ZoomReset => I18n.T("shortcuts.zoomReset");
+
+        /// <summary>Ctrl+Alt+1 to Ctrl+Alt+6, the focus shortcut of the panel numbered <paramref name="n"/>.</summary>
+        public static string FocusPanel(int n) => I18n.T("shortcuts.focusPanel", ("n", n));
     }
 
     /// <summary>Shared message-box captions and the buttons that appear on more than one dialog.</summary>
@@ -118,6 +121,24 @@ internal static class Strings
         public static string Filters => I18n.T("tabs.filters");
         public static string AutoResponder => I18n.T("tabs.autoResponder");
         public static string Log => I18n.T("tabs.log");
+    }
+
+    /// <summary>View > Panels and the tab menu that moves, floats and hides a panel.</summary>
+    public static class Panels
+    {
+        public static string Title => I18n.T("panels.title");
+        public static string ResetLayout => I18n.T("panels.resetLayout");
+        public static string MoveLeft => I18n.T("panels.moveLeft");
+        public static string MoveRight => I18n.T("panels.moveRight");
+        public static string MoveBottom => I18n.T("panels.moveBottom");
+        public static string Float => I18n.T("panels.float");
+        public static string Dock => I18n.T("panels.dock");
+        public static string AutoHide => I18n.T("panels.autoHide");
+        public static string TopMost => I18n.T("panels.topMost");
+        public static string Hide => I18n.T("panels.hide");
+
+        /// <summary>The sessions list's name in View > Panels.</summary>
+        public static string Sessions => I18n.T("panels.sessions");
     }
 
     public static class Menu

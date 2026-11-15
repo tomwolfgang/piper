@@ -127,4 +127,43 @@ internal sealed class DarkTabControl : TabControl
     }
 
     internal bool IsTabChecked(TabPage tab) => _checkedTabs.Contains(tab);
+
+    /// <summary>
+    /// Raised with a tab's index when the user asks for that tab's menu: by right-clicking it, or with
+    /// Shift+F10 or the Menu key while the strip has the focus (for the selected tab).
+    /// </summary>
+    public event EventHandler<int>? TabMenuRequested;
+
+    /// <summary>The index of the tab under a point in client coordinates, or -1 when there is none.</summary>
+    public int TabIndexAt(Point client)
+    {
+        for (var i = 0; i < TabCount; i++)
+            if (GetTabRect(i).Contains(client)) return i;
+        return -1;
+    }
+
+    private const int WmContextMenu = 0x007B;
+
+    /// <summary>
+    /// A right-click, Shift+F10 and the Menu key all arrive as WM_CONTEXTMENU, with no position for
+    /// the keyboard. Only a request for this strip itself counts: the same message bubbles up from a
+    /// page's controls that have no menu of their own, and those are not asking about a tab.
+    /// </summary>
+    protected override void WndProc(ref Message m)
+    {
+        if (m.Msg == WmContextMenu && m.WParam == Handle && TabMenuRequested is { } handler)
+        {
+            var index = m.LParam == -1 ? SelectedIndex : TabIndexAt(PointToClient(ScreenPoint(m.LParam)));
+            if (index >= 0)
+            {
+                handler(this, index);
+                return;
+            }
+        }
+
+        base.WndProc(ref m);
+    }
+
+    /// <summary>Unpacks the signed screen coordinates of a mouse message; a second monitor can be left of or above the first.</summary>
+    private static Point ScreenPoint(nint lParam) => new((short)(lParam & 0xFFFF), (short)((lParam >> 16) & 0xFFFF));
 }

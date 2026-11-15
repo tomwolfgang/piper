@@ -155,15 +155,22 @@ internal sealed class PanelLayout
         return true;
     }
 
-    /// <summary>Shows a hidden panel where it was: floating if it was floating, else at the end of its area.</summary>
+    /// <summary>
+    /// Shows a hidden panel where it was: floating if it was floating, else back at its old place in
+    /// its area's tab order. A hidden panel keeps the order it had when it was hidden, because
+    /// renumbering an area only touches the panels docked there.
+    /// </summary>
     public void Show(PanelId id)
     {
         var entry = _entries[id];
         if (!entry.Hidden) return;
         entry.Hidden = false;
         if (entry.Floating) return;
-        Move(id, entry.Area);
+        Move(id, entry.Area, entry.Order);
     }
+
+    /// <summary>The panel's place in its area's tab order; for a hidden panel, the place it will return to.</summary>
+    public int OrderOf(PanelId id) => _entries[id].Order;
 
     /// <summary>Makes a docked, visible panel the selected tab of its area; anything else is ignored.</summary>
     public void Select(PanelId id)

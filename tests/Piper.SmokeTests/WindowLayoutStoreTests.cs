@@ -238,6 +238,24 @@ internal static class WindowLayoutStoreTests
 
             return Task.CompletedTask;
         });
+
+        await runner.RunAsync("a hidden panel's place in the tab order survives a save and load", () =>
+        {
+            WithFile(path =>
+            {
+                var panels = PanelLayout.Default();
+                panels.Hide(PanelId.Filters);
+                WindowLayoutStore.Save(new WindowLayoutStore.WindowLayout(new Rectangle(0, 0, 1200, 800), false, panels), path);
+
+                var loaded = WindowLayoutStore.Load(path)!.Panels;
+                loaded.Normalise(Screen);
+                runner.IsTrue(loaded.IsHidden(PanelId.Filters), "filters is still hidden");
+                loaded.Show(PanelId.Filters);
+                runner.AreEqual("Inspectors,Composer,Filters,AutoResponder,Log", Join(loaded.DockedIn(DockArea.Right)),
+                    "shown again, filters is third, where it was");
+            });
+            return Task.CompletedTask;
+        });
     }
 
     private static PanelLayout Load(string path, string members)

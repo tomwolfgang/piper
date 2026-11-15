@@ -16,11 +16,12 @@ internal sealed class PanelHost : UserControl
     private static readonly DockArea[] AllAreas = Enum.GetValues<DockArea>();
 
     private readonly PanelRegistry _registry;
-    private readonly PanelLayout _layout;
     private readonly SplitContainer _outer;
     private readonly SplitContainer _inner;
     private readonly Dictionary<DockArea, DarkTabControl> _strips = [];
     private readonly HashSet<PanelId> _checked = [];
+    private readonly ContextMenuStrip _tabMenu = new();
+    private PanelLayout _layout;
     private EventHandler<DarkTabControl>? _stripCreated;
 
     /// <summary>True until the layout's fractions have been applied to a host with a real size.</summary>
@@ -77,12 +78,9 @@ internal sealed class PanelHost : UserControl
         if (_layout.IsHidden(id))
         {
             if (reveal == PanelReveal.Passive) return;
-            CaptureFractions();
-            _layout.Show(id);
-            Arrange();
-            _fractionsPending = true;
-            PerformLayout();
-            LayoutChanged?.Invoke(this, EventArgs.Empty);
+            Rearrange(() => _layout.Show(id));
+            // A theme toggle or zoom while it was hidden may have missed it.
+            Retheme(id);
         }
 
         var page = _registry.PageOf(id);
@@ -98,6 +96,50 @@ internal sealed class PanelHost : UserControl
     }
 
     public PanelId? SelectedPanel(DockArea area) => _layout.SelectedIn(area);
+
+    public bool IsHidden(PanelId id) => _layout.IsHidden(id);
+
+    /// <summary>Docks the panel at the end of the area and selects it there; a hidden panel is shown.</summary>
+    public void MoveTo(PanelId id, DockArea area)
+    {
+        var wasHidden = _layout.IsHidden(id);
+        if (!wasHidden && !_layout.IsFloating(id) && _layout.AreaOf(id) == area) return;
+        Rearrange(() => _layout.Move(id, area));
+        if (wasHidden) Retheme(id);
+    }
+
+    /// <summary>Hides the panel; the sessions list cannot be hidden. Focus inside it goes back to the sessions list.</summary>
+    public void HidePanel(PanelId id)
+    {
+        if (id == PanelId.Sessions || _layout.IsHidden(id)) return;
+        var hadFocus = _registry.ContentOf(id).ContainsFocus;
+        Rearrange(() => _layout.Hide(id));
+        if (hadFocus) _registry.ContentOf(PanelId.Sessions).Focus();
+    }
+
+    /// <summary>Puts every panel back where <see cref="PanelLayout.Default"/> has it, shown, with the default splits.</summary>
+    public void ResetLayout()
+    {
+        var hidden = AllPanels.Where(_layout.IsHidden).ToArray();
+        Rearrange(() => _layout = PanelLayout.Default());
+        foreach (var id in hidden) Retheme(id);
+    }
+
+    /// <summary>
+    /// Re-applies the palette to every panel, wherever it is. The window's own walk only reaches the
+    /// panels docked in it, so a hidden one would otherwise keep the old theme and font size.
+    /// </summary>
+    public void ApplyTheme()
+    {
+        foreach (var id in AllPanels) Retheme(id);
+        Palette.Apply(_tabMenu);
+    }
+
+    /// <summary>The tab menu's items for a panel, built fresh each time it opens.</summary>
+    internal ToolStripItem[] TabMenuItems(PanelId id) => PanelMenus.TabItems(this, id, _layout.AreaOf(id));
+
+    /// <summary>The menu shown for a tab, exposed so tests can see and close it.</summary>
+    internal ContextMenuStrip TabMenu => _tabMenu;
 
     /// <summary>Marks the panel's tab with a check glyph, wherever the panel is shown.</summary>
     public void SetTabChecked(PanelId id, bool value)
@@ -123,17 +165,63 @@ internal sealed class PanelHost : UserControl
         // splitter is never pulled back; SplitContainer keeps the proportions on later resizes.
         if (!_fractionsPending || !IsHandleCreated || Width <= 0 || Height <= 0) return;
         _fractionsPending = false;
-        if (BothShown(_outer))
-            SetDistance(_outer, _outer.Height, _outer.Height - (int)(_layout.BottomFraction * _outer.Height) - _outer.SplitterWidth);
-        if (BothShown(_inner))
-            SetDistance(_inner, _inner.Width, (int)(_layout.LeftFraction * _inner.Width));
+        if (BothShown(_outer)) SetDistance(_outer, _outer.Height, BottomDistance());
+        if (BothShown(_inner)) SetDistance(_inner, _inner.Width, LeftDistance());
     }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing) _tabMenu.Dispose();
+        base.Dispose(disposing);
+    }
+
+    // Rounded, not truncated: truncating moved the split a pixel on every restart.
+    private int LeftDistance() => (int)Math.Round(_layout.LeftFraction * _inner.Width);
+
+    private int BottomDistance() => _outer.Height - (int)Math.Round(_layout.BottomFraction * _outer.Height) - _outer.SplitterWidth;
 
     private DarkTabControl NewStrip()
     {
         var strip = new DarkTabControl { Dock = DockStyle.Fill, Font = Palette.UiFont };
         strip.SelectedIndexChanged += OnStripSelectionChanged;
+        strip.TabMenuRequested += OnTabMenuRequested;
         return strip;
+    }
+
+    /// <summary>Applies a change to the layout and shows the result, keeping the user's splitters.</summary>
+    private void Rearrange(Action change)
+    {
+        CaptureFractions();
+        change();
+        Arrange();
+        _fractionsPending = true;
+        PerformLayout();
+        LayoutChanged?.Invoke(this, EventArgs.Empty);
+    }
+
+    private void Retheme(PanelId id)
+    {
+        var page = _registry.PageOf(id);
+        Palette.Apply(page);
+        page.Invalidate(true);
+    }
+
+    private void OnTabMenuRequested(object? sender, int index)
+    {
+        if (sender is not DarkTabControl strip || index < 0 || index >= strip.TabCount
+            || _registry.IdOf(strip.TabPages[index]) is not { } id)
+            return;
+
+        // The previous items are disposed only now, never from their own click handler.
+        foreach (var old in _tabMenu.Items.Cast<ToolStripItem>().ToArray()) old.Dispose();
+        _tabMenu.Items.AddRange(TabMenuItems(id));
+        _tabMenu.Font = Palette.UiFont;
+        Palette.Apply(_tabMenu);
+
+        // At the pointer for a right-click; under the tab for the keyboard.
+        var tab = strip.GetTabRect(index);
+        var pointer = strip.PointToClient(Cursor.Position);
+        _tabMenu.Show(strip, tab.Contains(pointer) ? pointer : new Point(tab.Left, tab.Bottom));
     }
 
     /// <summary>Puts every docked panel's page into its area's strip, in order, selected and checked as the layout says.</summary>
@@ -190,15 +278,24 @@ internal sealed class PanelHost : UserControl
         split.SplitterDistance = Math.Clamp(distance, split.Panel1MinSize, max);
     }
 
-    /// <summary>Reads the splitters back into the layout, once they have been set from it.</summary>
+    /// <summary>
+    /// Reads the splitters back into the layout, once they have been set from it. A split that is not
+    /// shown at a real size says nothing about where the user wants it: a minimised window, or a split
+    /// too small for its two panels, has had its splitter clamped, so the known fractions are kept. A
+    /// splitter still within a pixel of where its fraction puts it keeps the exact fraction, so pixel
+    /// rounding never creeps into the saved layout.
+    /// </summary>
     private void CaptureFractions()
     {
-        if (_fractionsPending) return;
-        if (BothShown(_inner) && _inner.Width > 0)
+        if (_fractionsPending || FindForm() is { WindowState: FormWindowState.Minimized }) return;
+        if (BothShown(_inner) && Fits(_inner, _inner.Width) && Math.Abs(_inner.SplitterDistance - LeftDistance()) > 1)
             _layout.LeftFraction = (double)_inner.SplitterDistance / _inner.Width;
-        if (BothShown(_outer) && _outer.Height > 0)
+        if (BothShown(_outer) && Fits(_outer, _outer.Height) && Math.Abs(_outer.SplitterDistance - BottomDistance()) > 1)
             _layout.BottomFraction = (double)(_outer.Height - _outer.SplitterDistance - _outer.SplitterWidth) / _outer.Height;
     }
+
+    private static bool Fits(SplitContainer split, int extent) =>
+        extent >= split.Panel1MinSize + split.Panel2MinSize + split.SplitterWidth;
 
     private void OnStripSelectionChanged(object? sender, EventArgs e)
     {

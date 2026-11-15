@@ -52,6 +52,23 @@ internal static class PanelLayoutTests
             return Task.CompletedTask;
         });
 
+        await runner.RunAsync("a hidden panel comes back at its old place in the tab order", () =>
+        {
+            var layout = PanelLayout.Default();
+            layout.Hide(PanelId.Composer);
+            runner.AreEqual("Inspectors,Filters,AutoResponder,Log", Join(layout.DockedIn(DockArea.Right)), "hidden composer leaves a gap");
+            layout.Move(PanelId.Log, DockArea.Bottom);
+            layout.Show(PanelId.Composer);
+            runner.AreEqual("Inspectors,Composer,Filters,AutoResponder", Join(layout.DockedIn(DockArea.Right)), "it returns second, not last");
+            runner.AreEqual(PanelId.Composer, layout.SelectedIn(DockArea.Right), "and is selected");
+
+            layout.Hide(PanelId.AutoResponder);
+            layout.Hide(PanelId.Inspectors);
+            layout.Show(PanelId.Inspectors);
+            runner.AreEqual("Inspectors,Composer,Filters", Join(layout.DockedIn(DockArea.Right)), "the first panel returns first");
+            return Task.CompletedTask;
+        });
+
         await runner.RunAsync("floating then docking returns to the area it came from", () =>
         {
             var layout = PanelLayout.Default();

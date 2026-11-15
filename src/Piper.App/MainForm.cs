@@ -148,13 +148,12 @@ public sealed partial class MainForm : Form, IMessageFilter
         _captureScopeLabel.Click += (_, _) => ShowCaptureScopeMenu();
         var trustBar = BuildTrustUi(statusBar);
         ApplyCaptureScope();
-        _panelHost.StripCreated += (_, strip) =>
+        var sessionDrop = new SessionDrop(_panels, (id, session) =>
         {
-            strip.AllowDrop = true;
-            strip.DragEnter += OnSessionDragEnter;
-            strip.DragOver += OnSessionDragOver;
-            strip.DragDrop += OnSessionDragDrop;
-        };
+            if (id == PanelId.AutoResponder) _autoResponder.AddRuleFromSession(session);
+            else _composer.LoadSession(session);
+        });
+        _panelHost.StripCreated += (_, strip) => sessionDrop.Attach(strip);
 
         Controls.Add(_panelHost);
         // The Sessions tab comes before the grid in tab order; without this it, not the grid, takes the first focus.
@@ -567,39 +566,6 @@ public sealed partial class MainForm : Form, IMessageFilter
         }
     }
 
-    private void OnSessionDragEnter(object? sender, DragEventArgs e) => SetSessionDragEffect(sender, e);
-
-    private void OnSessionDragOver(object? sender, DragEventArgs e) => SetSessionDragEffect(sender, e);
-
-    private void SetSessionDragEffect(object? sender, DragEventArgs e)
-    {
-        if (!HasCapturedRequest(e.Data) || sender is not DarkTabControl strip || SessionDropTarget(strip, e) is not { } target)
-        {
-            e.Effect = DragDropEffects.None;
-            return;
-        }
-
-        // Selecting on hover makes the target clear even when it was not the active tab.
-        strip.SelectedTab = target;
-        e.Effect = DragDropEffects.Copy;
-    }
-
-    private void OnSessionDragDrop(object? sender, DragEventArgs e)
-    {
-        if (sender is not DarkTabControl strip
-            || SessionDropTarget(strip, e) is not { } target
-            || e.Data?.GetData(typeof(Session)) is not Session session
-            || session.Request is null)
-            return;
-
-        strip.SelectedTab = target;
-        if (_panels.IdOf(target) == PanelId.AutoResponder) _autoResponder.AddRuleFromSession(session);
-        else _composer.LoadSession(session);
-    }
-
-    private static bool HasCapturedRequest(IDataObject? data) =>
-        data?.GetData(typeof(Session)) is Session { Request: not null };
-
     private void EnableSazFileDrop(Control control)
     {
         control.AllowDrop = true;
@@ -667,29 +633,6 @@ public sealed partial class MainForm : Form, IMessageFilter
         return Strings.Log.DropNoneImportable(paths.Length,
             DiagnosticsBundle.Summarise(rejected, paths.Length, MaxLoggedNames));
     }
-
-    /// <summary>
-    /// The tab a dragged session would land on, or null where a drop means nothing. Composer and
-    /// AutoResponder both take sessions; every other tab refuses them.
-    /// </summary>
-    private TabPage? SessionDropTarget(DarkTabControl strip, DragEventArgs e)
-    {
-        var point = strip.PointToClient(new Point(e.X, e.Y));
-
-        for (var i = 0; i < strip.TabCount; i++)
-        {
-            if (!strip.GetTabRect(i).Contains(point)) continue;
-            var tab = strip.TabPages[i];
-            return AcceptsSessions(tab) ? tab : null;
-        }
-
-        // Once hover has activated a tab that takes sessions, keep accepting the drop on its page too.
-        var stripBottom = strip.TabCount > 0 ? strip.GetTabRect(0).Bottom : 0;
-        return point.Y >= stripBottom && AcceptsSessions(strip.SelectedTab) ? strip.SelectedTab : null;
-    }
-
-    private bool AcceptsSessions(TabPage? tab) =>
-        tab is not null && _panels.IdOf(tab) is PanelId.Composer or PanelId.AutoResponder;
 
     // ------------------------------------------------------------------ chrome
 
@@ -765,7 +708,14 @@ public sealed partial class MainForm : Form, IMessageFilter
         _zoomInItem = NewZoomItem(Strings.Menu.ZoomIn, Keys.Control | Keys.Oemplus, Strings.Shortcuts.ZoomIn, FontScale.ZoomIn);
         _zoomOutItem = NewZoomItem(Strings.Menu.ZoomOut, Keys.Control | Keys.OemMinus, Strings.Shortcuts.ZoomOut, FontScale.ZoomOut);
         _zoomResetItem = NewZoomItem(Strings.Menu.ResetZoom, Keys.Control | Keys.D0, Strings.Shortcuts.ZoomReset, FontScale.Reset);
-        view.DropDownItems.AddRange([_zoomInItem, _zoomOutItem, new ToolStripSeparator(), _zoomResetItem]);
+        // Reset layout saves at once: it is the way back from a layout that has gone wrong.
+        var resetLayout = new ToolStripMenuItem(Strings.Panels.ResetLayout, null, (_, _) =>
+        {
+            _panelHost.ResetLayout();
+            SaveWindowBounds();
+        });
+        view.DropDownItems.AddRange([_zoomInItem, _zoomOutItem, new ToolStripSeparator(), _zoomResetItem,
+            new ToolStripSeparator(), PanelMenus.Panels(_panelHost), resetLayout]);
         UpdateZoomMenu();
         return view;
     }
@@ -1105,7 +1055,7 @@ public sealed partial class MainForm : Form, IMessageFilter
         var composer = new ToolStripButton(Strings.Toolbar.Composer) { DisplayStyle = ToolStripItemDisplayStyle.Text };
         composer.Click += (_, _) =>
         {
-            _panelHost.ShowPanel(PanelId.Composer, PanelReveal.Explicit);
+            _panelHost.FocusPanel(PanelId.Composer);
             _composer.FocusSearch();
         };
 
@@ -1132,6 +1082,7 @@ public sealed partial class MainForm : Form, IMessageFilter
         RefreshStatusIcons();
         UpdateThemeToggle();
         InvalidateTheme(this);
+        _panelHost.ApplyTheme();
     }
 
     private void UpdateThemeToggle()
@@ -1727,9 +1678,15 @@ public sealed partial class MainForm : Form, IMessageFilter
         }
         else if (e.Control && e.KeyCode == Keys.K)
         {
-            _panelHost.ShowPanel(PanelId.Composer, PanelReveal.Explicit);
+            _panelHost.FocusPanel(PanelId.Composer);
             _composer.FocusSearch();
             e.Handled = true;
+        }
+        else if (e.Control && e.Alt && e.KeyCode is >= Keys.D1 and <= Keys.D6)
+        {
+            _panelHost.FocusPanel((PanelId)(e.KeyCode - Keys.D1));
+            e.Handled = true;
+            e.SuppressKeyPress = true;
         }
         // KeyPreview hands this form every key before the focused control sees it, so a chord that
         // means something inside a text box has to leave it alone there: Ctrl+X cut the selected text
@@ -1839,6 +1796,7 @@ public sealed partial class MainForm : Form, IMessageFilter
         UpdateZoomStatus();
         UpdateZoomMenu();
         InvalidateTheme(this);
+        _panelHost.ApplyTheme();
     }
 
     /// <summary>

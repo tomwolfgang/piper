@@ -23,7 +23,8 @@
     "f3": "F3",
     "zoomIn": "Ctrl++",
     "zoomOut": "Ctrl+-",
-    "zoomReset": "Ctrl+0"
+    "zoomReset": "Ctrl+0",
+    "focusPanel": "Ctrl+Alt+{{n}}"
   },
 
   "common": {
@@ -51,6 +52,20 @@
     "filters": "Filters",
     "autoResponder": "AutoResponder",
     "log": "Log"
+  },
+
+  "panels": {
+    "title": "&Panels",
+    "resetLayout": "Reset &layout",
+    "moveLeft": "Move to &Left",
+    "moveRight": "Move to &Right",
+    "moveBottom": "Move to &Bottom",
+    "float": "&Float",
+    "dock": "&Dock",
+    "autoHide": "&Auto-hide area",
+    "topMost": "Always on &top",
+    "hide": "&Hide",
+    "sessions": "Sessions"
   },
 
   "menu": {

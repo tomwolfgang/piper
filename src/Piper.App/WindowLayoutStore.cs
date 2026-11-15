@@ -106,7 +106,8 @@ internal static class WindowLayoutStore
         foreach (var id in AllPanels)
         {
             var area = panels.AreaOf(id);
-            var order = panels.DockedIn(area).ToList().IndexOf(id);
+            // A hidden panel is in no tab list, but it remembers the place it will be shown again at.
+            var order = panels.IsHidden(id) ? panels.OrderOf(id) : panels.DockedIn(area).ToList().IndexOf(id);
             writer.WriteStartObject();
             writer.WriteString("Id", Name(id));
             writer.WriteString("Area", Name(area));

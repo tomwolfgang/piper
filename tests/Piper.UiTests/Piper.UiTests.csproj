@@ -29,6 +29,13 @@
     <Compile Include="..\..\src\Piper.App\Layout\PanelLayout.cs" Link="PanelLayout.cs" />
     <Compile Include="..\..\src\Piper.App\Layout\PanelRegistry.cs" Link="PanelRegistry.cs" />
     <Compile Include="..\..\src\Piper.App\Layout\PanelHost.cs" Link="PanelHost.cs" />
+    <Compile Include="..\..\src\Piper.App\Layout\PanelMenus.cs" Link="PanelMenus.cs" />
+    <Compile Include="..\..\src\Piper.App\Layout\SessionDrop.cs" Link="SessionDrop.cs" />
+    <!-- The panel menus' labels, read from the same catalogue the app embeds. -->
+    <Compile Include="..\..\src\Piper.App\Strings.cs" Link="Strings.cs" />
+    <Compile Include="..\..\src\Piper.App\I18n.cs" Link="I18n.cs" />
+    <Compile Include="..\..\src\Piper.App\Menus.cs" Link="Menus.cs" />
+    <EmbeddedResource Include="..\..\src\Piper.App\Locales\en.json" LogicalName="Piper.App.Locales.en.json" />
     <Compile Include="..\..\src\Piper.App\Theme\DarkTabControl.cs" Link="DarkTabControl.cs" />
     <Compile Include="..\..\src\Piper.App\Theme\DarkListView.cs" Link="DarkListView.cs" />
   </ItemGroup>
