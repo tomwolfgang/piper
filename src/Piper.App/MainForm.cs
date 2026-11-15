@@ -2020,25 +2020,31 @@ public sealed partial class MainForm : Form, IMessageFilter
             return;
         }
 
+        // Windows shutdown, Task Manager and Application.Exit do not honour a cancelled close:
+        // deferring the cleanup to a continuation there would let the process go away with the
+        // system proxy still pointed at Piper. Take the blocking path instead, and restore the proxy
+        // before anything else, so no failure saving the layout or settings can skip it.
+        var blocking = e.CloseReason is CloseReason.WindowsShutDown or CloseReason.TaskManagerClosing
+            or CloseReason.ApplicationExitCall;
+        if (blocking)
+        {
+            _closeAfterShutdown = true;
+            try { RestoreSystemProxy(); }
+            catch (Exception ex) { AppendLog(Strings.Log.SystemProxyRestoreFailed(ex.Message)); }
+        }
+
         // Saved while the floating windows still exist, so their bounds are in it; from here on,
-        // closing one hands its panel back without docking it.
+        // closing one hands its panel back without docking it. On the asynchronous path this also
+        // disables the floating windows before the proxy is restored.
         SaveWindowBounds();
         _panelHost.ShuttingDown = true;
         SaveFontScaleSettings();
         _sessionList.CancelSazSave(TimeSpan.FromSeconds(5));
 
-        // Windows shutdown, Task Manager and Application.Exit do not honour a cancelled close:
-        // deferring the cleanup to a continuation there would let the process go away with the
-        // system proxy still pointed at Piper. Take the blocking path instead.
-        if (e.CloseReason is CloseReason.WindowsShutDown or CloseReason.TaskManagerClosing
-            or CloseReason.ApplicationExitCall)
+        if (blocking)
         {
-            _closeAfterShutdown = true;
             FilterSettingsStore.Save(_filterPanel.Settings);
             SaveStatusBarSettings();
-            try { RestoreSystemProxy(); }
-            catch (Exception ex) { AppendLog(Strings.Log.SystemProxyRestoreFailed(ex.Message)); }
-
             base.OnFormClosing(e);
             return;
         }
