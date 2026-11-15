@@ -36,6 +36,362 @@ internal static class PanelHostTests
         SnapshotKeepsFractionsWhenTiny(check, pumpUntil);
         HiddenPanelThemed(check, pumpUntil);
         FocusChord(check);
+        FloatThenDock(check, pumpUntil);
+        FloatingTabMenu(check, pumpUntil);
+        OwnerClosingDoesNotDock(check, pumpUntil);
+        ShortcutsInFloatingWindow(check, pumpUntil);
+        ZoomReachesFloatingWindow(check, pumpUntil);
+        InspectorSurvivesFloating(check, pumpUntil);
+        SessionsKeepViewState(check, pumpUntil);
+    }
+
+    private const int WmLButtonDblClk = 0x0203;
+    private const int WmLButtonUp = 0x0202;
+
+    private static void FloatThenDock(Action<bool, string> check, Action<Func<bool>> pumpUntil)
+    {
+        Console.WriteLine("== float then dock keeps the panel and its area");
+        using var rig = new Rig();
+        rig.Form.Show();
+        pumpUntil(() => rig.Grid.Width > 0);
+        rig.Host.MoveTo(PanelId.Log, DockArea.Bottom);
+        PumpFor(pumpUntil, 100);
+        var right = StripOf(rig, PanelId.Composer)!;
+        var bottom = StripOf(rig, PanelId.Log)!;
+        var composer = rig.Registry.PageOf(PanelId.Composer);
+        var log = rig.Registry.PageOf(PanelId.Log);
+
+        rig.Host.FloatPanel(PanelId.Composer, new Point(120, 140));
+        PumpFor(pumpUntil, 150);
+        var window = rig.Host.FloatingWindow(PanelId.Composer);
+        check(window is { Visible: true } && composer.FindForm() == window, "Float puts the Composer in a window of its own");
+        if (window is null) return;
+        check(Form.ActiveForm != window, "opening the window does not activate it");
+        check(window.Owner == rig.Form && !window.ShowInTaskbar && window.Text == composer.Text && window.FormBorderStyle == FormBorderStyle.Sizable,
+            "the window is owned by the main window, out of the taskbar, sizable and titled with the panel's name");
+        check(window.Location == new Point(120, 140), $"it opens at the point asked for ({window.Location})");
+        check(!right.TabPages.Contains(composer) && rig.Host.Snapshot().IsFloating(PanelId.Composer), "the Composer left the right strip and the layout has it floating");
+        check(rig.Host.Snapshot().AreaOf(PanelId.Composer) == DockArea.Right, "and still remembers the right area");
+
+        rig.List.Focus();
+        pumpUntil(() => rig.List.Focused);
+        rig.Host.ShowPanel(PanelId.Composer, PanelReveal.Explicit);
+        PumpFor(pumpUntil, 100);
+        check(rig.List.Focused && Form.ActiveForm != window, $"revealing a floating panel leaves the grid the focus (focus: {FocusedName(rig.Form)})");
+
+        rig.Host.DockPanel(PanelId.Composer);
+        PumpFor(pumpUntil, 100);
+        check(composer.Parent == right && right.SelectedTab == composer, "Dock puts the Composer back on the right, selected");
+        check(rig.Host.Snapshot().AreaOf(PanelId.Composer) == DockArea.Right && !rig.Host.Snapshot().IsFloating(PanelId.Composer), "the layout has it docked on the right again");
+        check(window.IsDisposed && rig.Host.FloatingWindow(PanelId.Composer) is null, "and its window is gone");
+
+        rig.Host.FloatPanel(PanelId.Log);
+        PumpFor(pumpUntil, 100);
+        var logWindow = rig.Host.FloatingWindow(PanelId.Log);
+        check(logWindow is { Visible: true } && bottom.TabCount == 0, "the Log floats out of the bottom area");
+        logWindow?.Close();
+        PumpFor(pumpUntil, 100);
+        check(log.Parent == bottom && rig.Host.Snapshot().AreaOf(PanelId.Log) == DockArea.Bottom && !rig.Host.Snapshot().IsFloating(PanelId.Log),
+            "closing its window docks it at the bottom, where it came from");
+
+        rig.Host.FloatPanel(PanelId.Log);
+        PumpFor(pumpUntil, 100);
+        var floatingStrip = log.Parent as DarkTabControl;
+        check(floatingStrip is not null && floatingStrip.FindForm() is FloatingPanelForm, "setup: the Log floats again");
+        if (floatingStrip is null) return;
+        var tab = floatingStrip.GetTabRect(0);
+        var lParam = ((tab.Y + tab.Height / 2) << 16) | (tab.X + tab.Width / 2);
+        SendMessage(floatingStrip.Handle, WmLButtonDblClk, 1, lParam);
+        SendMessage(floatingStrip.Handle, WmLButtonUp, 0, lParam);
+        PumpFor(pumpUntil, 100);
+        check(log.Parent == bottom && !rig.Host.Snapshot().IsFloating(PanelId.Log), "double-clicking a floating window's tab docks the panel");
+    }
+
+    private static void FloatingTabMenu(Action<bool, string> check, Action<Func<bool>> pumpUntil)
+    {
+        Console.WriteLine("== the tab menu floats, docks and keeps a floating window on top");
+        using var rig = new Rig();
+        rig.Form.Show();
+        pumpUntil(() => rig.Grid.Width > 0);
+        check(Enum.GetValues<PanelId>().All(rig.Host.CanFloat), "every panel can float");
+
+        ToolStripMenuItem[] Items() => rig.Host.TabMenuItems(PanelId.Filters).OfType<ToolStripMenuItem>().ToArray();
+        ToolStripMenuItem? Item(ToolStripMenuItem[] items, string text) => items.FirstOrDefault(item => item.Text == text);
+
+        var docked = Items();
+        var topMost = Item(docked, Strings.Panels.TopMost);
+        check(Item(docked, Strings.Panels.Float) is { Enabled: true } && Item(docked, Strings.Panels.Dock) is null, "a docked panel's menu offers Float, not Dock");
+        check(topMost is { Enabled: false, Checked: false }, "Always on top is greyed out while docked");
+        Item(docked, Strings.Panels.Float)?.PerformClick();
+        PumpFor(pumpUntil, 100);
+        var window = rig.Host.FloatingWindow(PanelId.Filters);
+        check(window is { Visible: true }, "Float floats the Filters");
+
+        var floating = Items();
+        check(Item(floating, Strings.Panels.Dock) is { Enabled: true } && Item(floating, Strings.Panels.Float) is null, "a floating panel's menu offers Dock, not Float");
+        string[] moves = [Strings.Panels.MoveLeft, Strings.Panels.MoveRight, Strings.Panels.MoveBottom];
+        check(moves.All(text => Item(floating, text) is { Enabled: true }), "every Move to item is enabled for a floating panel");
+        Item(floating, Strings.Panels.TopMost)?.PerformClick();
+        check(window is { TopMost: true } && rig.Host.Snapshot().TopMost(PanelId.Filters), "Always on top makes the window topmost and the layout records it");
+        check(Item(Items(), Strings.Panels.TopMost) is { Enabled: true, Checked: true }, "and the item shows checked next time");
+
+        Item(Items(), Strings.Panels.Dock)?.PerformClick();
+        PumpFor(pumpUntil, 100);
+        check(StripOf(rig, PanelId.Filters) == StripOf(rig, PanelId.Inspectors) && window!.IsDisposed, "Dock puts the Filters back on the right and closes its window");
+
+        Item(Items(), Strings.Panels.Float)?.PerformClick();
+        PumpFor(pumpUntil, 100);
+        check(rig.Host.FloatingWindow(PanelId.Filters) is { TopMost: true }, "floating it again keeps it on top");
+        rig.Host.MoveTo(PanelId.Filters, DockArea.Bottom);
+        PumpFor(pumpUntil, 100);
+        check(rig.Host.FloatingWindow(PanelId.Filters) is null && StripOf(rig, PanelId.Filters) is { } strip && strip.FindForm() == rig.Form,
+            "Move to Bottom docks a floating panel and closes its window");
+        rig.Host.FloatPanel(PanelId.Filters);
+        rig.Host.HidePanel(PanelId.Filters);
+        PumpFor(pumpUntil, 100);
+        check(rig.Host.FloatingWindow(PanelId.Filters) is null && rig.Registry.PageOf(PanelId.Filters).Parent is null, "hiding a floating panel closes its window and keeps the page");
+        rig.Host.FloatPanel(PanelId.Filters);
+        rig.Host.ResetLayout();
+        PumpFor(pumpUntil, 100);
+        check(rig.Host.FloatingWindow(PanelId.Filters) is null && StripOf(rig, PanelId.Filters) == StripOf(rig, PanelId.Inspectors), "Reset layout docks every floating window");
+    }
+
+    private static void OwnerClosingDoesNotDock(Action<bool, string> check, Action<Func<bool>> pumpUntil)
+    {
+        Console.WriteLine("== closing a floating window docks it; owner closing does not");
+        var rig = new Rig();
+        var disposed = Enum.GetValues<PanelId>().ToDictionary(id => id, _ => 0);
+        foreach (var id in Enum.GetValues<PanelId>()) rig.Registry.ContentOf(id).Disposed += (_, _) => disposed[id]++;
+        rig.Form.Show();
+        pumpUntil(() => rig.Grid.Width > 0);
+        rig.Host.FloatPanel(PanelId.Composer);
+        PumpFor(pumpUntil, 100);
+        var window = rig.Host.FloatingWindow(PanelId.Composer);
+        var docks = 0;
+        if (window is not null) window.DockRequested += (_, _) => docks++;
+        check(window is { Visible: true }, "setup: the Composer floats");
+
+        Exception? error = null;
+        try
+        {
+            rig.Form.Close();
+            PumpFor(pumpUntil, 100);
+            check(docks == 0, "closing the owner does not ask to dock the floating window");
+            check(!rig.Registry.ContentOf(PanelId.Composer).IsDisposed, "the floating Composer's content is left for the registry");
+            rig.Form.Dispose();
+            check(window?.IsDisposed != false, "the floating window goes with its owner");
+            rig.Registry.Dispose();
+        }
+        catch (Exception ex)
+        {
+            error = ex;
+        }
+
+        check(error is null, $"nothing throws ({error?.GetType().Name}: {error?.Message})");
+        check(disposed.All(pair => pair.Value == 1), $"each panel's content is disposed exactly once ({string.Join(", ", disposed.Select(pair => $"{pair.Key}={pair.Value}"))})");
+
+        Console.WriteLine("== while shutting down, closing a floating window returns its page without docking");
+        using var second = new Rig();
+        second.Form.Show();
+        pumpUntil(() => second.Grid.Width > 0);
+        second.Host.FloatPanel(PanelId.Log);
+        PumpFor(pumpUntil, 100);
+        var logWindow = second.Host.FloatingWindow(PanelId.Log);
+        var logDocks = 0;
+        if (logWindow is not null) logWindow.DockRequested += (_, _) => logDocks++;
+        second.Host.ShuttingDown = true;
+        logWindow?.Close();
+        PumpFor(pumpUntil, 100);
+        var logPage = second.Registry.PageOf(PanelId.Log);
+        check(logDocks == 0 && logPage.Parent is null && !logPage.IsDisposed, "the page goes back to the registry, undisposed, and nothing docks");
+        check(second.Host.Snapshot().IsFloating(PanelId.Log), "and the layout still has the Log floating, for the next start");
+    }
+
+    private static void ShortcutsInFloatingWindow(Action<bool, string> check, Action<Func<bool>> pumpUntil)
+    {
+        Console.WriteLine("== Ctrl+X in a floating Composer's text box doesn't clear the store, Ctrl+X on a floating grid does");
+        using var rig = new Rig();
+        var cleared = 0;
+        // MainForm's Ctrl+X rule, through the same text-input check its dispatcher uses.
+        rig.Host.RouteKeys(keys =>
+        {
+            if (keys != (Keys.Control | Keys.X) || TextInputFocus.IsTextInputFocused(Form.ActiveForm)) return false;
+            rig.Store.Clear();
+            cleared++;
+            return true;
+        }, (_, _) => { });
+        rig.Form.Show();
+        pumpUntil(() => rig.Grid.Width > 0);
+        rig.Store.Add(new Session { Request = new HttpRequestData { Method = "GET", Url = new Uri("http://example.test/keep") } });
+
+        rig.Host.FloatPanel(PanelId.Composer);
+        PumpFor(pumpUntil, 100);
+        var composerWindow = rig.Host.FloatingWindow(PanelId.Composer);
+        var box = Descendants(rig.Registry.ContentOf(PanelId.Composer)).OfType<TextBoxBase>().FirstOrDefault(control => control.Visible && control.Enabled);
+        check(composerWindow is not null && box is not null, "setup: the Composer floats and has a text box");
+        if (composerWindow is null || box is null) return;
+        composerWindow.Activate();
+        PumpFor(pumpUntil, 100);
+        box.Focus();
+        pumpUntil(() => Form.ActiveForm == composerWindow && box.Focused);
+        check(Form.ActiveForm == composerWindow && box.Focused, $"setup: the floating Composer is active with its text box focused (active: {Form.ActiveForm?.Text})");
+
+        var handled = ProcessCmdKey(box, Keys.Control | Keys.X);
+        check(!handled && cleared == 0 && rig.Store.Count == 1, "Ctrl+X in the floating Composer's text box is left to the box");
+
+        rig.Host.FloatPanel(PanelId.Sessions);
+        PumpFor(pumpUntil, 100);
+        var gridWindow = rig.Host.FloatingWindow(PanelId.Sessions);
+        check(gridWindow is not null, "setup: the sessions grid floats");
+        if (gridWindow is null) return;
+        gridWindow.Activate();
+        rig.List.Focus();
+        pumpUntil(() => Form.ActiveForm == gridWindow && rig.List.Focused);
+        check(ProcessCmdKey(rig.List, Keys.Control | Keys.X) && cleared == 1 && rig.Store.Count == 0, "Ctrl+X on the floating grid clears the capture");
+    }
+
+    private static void ZoomReachesFloatingWindow(Action<bool, string> check, Action<Func<bool>> pumpUntil)
+    {
+        Console.WriteLine("== zoom and theme reach a floating window");
+        using var rig = new Rig();
+        rig.Form.Show();
+        pumpUntil(() => rig.Grid.Width > 0);
+        Palette.Apply(rig.Form);
+        rig.Host.FloatPanel(PanelId.Composer);
+        PumpFor(pumpUntil, 100);
+        var composer = rig.Registry.ContentOf(PanelId.Composer);
+        var window = rig.Host.FloatingWindow(PanelId.Composer);
+        var wasLight = Palette.IsLightMode;
+        try
+        {
+            Zoom("ZoomIn");
+            Zoom("ZoomIn");
+            Palette.RescaleFonts();
+            Palette.Apply(rig.Form); // as ChangeFontScale does
+            rig.Host.ApplyTheme();
+            check(composer.Font.Size == rig.Filters.Font.Size && composer.Font.Size == Palette.UiFont.Size,
+                $"the floating Composer's font follows the zoom ({composer.Font.Size} vs docked {rig.Filters.Font.Size})");
+
+            Palette.ToggleMode();
+            Palette.Apply(rig.Form);
+            rig.Host.ApplyTheme();
+            check(window is not null && window.BackColor == Palette.Background && composer.BackColor == Palette.Background, "and a theme toggle reaches the window and its panel");
+        }
+        finally
+        {
+            if (Palette.IsLightMode != wasLight) Palette.ToggleMode();
+            Zoom("Reset");
+            Palette.RescaleFonts();
+            Palette.Apply(rig.Form);
+            rig.Host.ApplyTheme();
+        }
+
+        // FontScale is internal to Piper.App, and a linked copy would not be the one Palette reads.
+        static void Zoom(string method) =>
+            typeof(Palette).Assembly.GetType("Piper.App.Theme.FontScale", throwOnError: true)!.GetMethod(method)!.Invoke(null, null);
+    }
+
+    private static void InspectorSurvivesFloating(Action<bool, string> check, Action<Func<bool>> pumpUntil)
+    {
+        Console.WriteLine("== the inspector renders and is hardened after float, dock, float");
+        using var rig = new Rig();
+        if (!rig.Host.CanFloat(PanelId.Inspectors))
+        {
+            Console.WriteLine("   (the Inspectors cannot float; skipped)");
+            return;
+        }
+
+        try { Microsoft.Web.WebView2.Core.CoreWebView2Environment.GetAvailableBrowserVersionString(); }
+        catch (Microsoft.Web.WebView2.Core.WebView2RuntimeNotFoundException)
+        {
+            Console.WriteLine("   (the WebView2 Runtime is not installed here; skipped)");
+            return;
+        }
+
+        rig.Form.Show();
+        pumpUntil(() => rig.Grid.Width > 0);
+        var response = (MessageInspector)typeof(InspectorPanel).GetField("_response", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.GetValue(rig.Inspector)!;
+
+        // The inspector's WebpView is Piper.App's, not the copy linked into this assembly, so it is read by reflection.
+        Control? View() => Descendants(response).FirstOrDefault(control => control.GetType().Name == "WebpView");
+        T Read<T>(Control view, string name) =>
+            (T)view.GetType().GetProperty(name, System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.GetValue(view)!;
+        bool HoldsBody(Control? view) => view is not null && Read<bool>(view, "HoldsBody");
+
+        Control? Shown(string summary)
+        {
+            var message = new HttpResponseData { Body = Convert.FromBase64String("UklGRiAAAABXRUJQVlA4TBQAAAAvD8ABAAcQ/Y/+BwCC8D9uIaL/qQ==") };
+            message.Headers.Add("Content-Type", "image/webp");
+            response.SetMessage(message, summary);
+            // The first WebView2 start in a process can take well over the pump's 10 s.
+            for (var attempt = 0; attempt < 6 && !HoldsBody(View()); attempt++) pumpUntil(() => HoldsBody(View()));
+            return View();
+        }
+
+        var first = Shown("webp 0");
+        check(HoldsBody(first), "setup: the docked inspector shows a WebP");
+        Action[] moves = [() => rig.Host.FloatPanel(PanelId.Inspectors), () => rig.Host.DockPanel(PanelId.Inspectors), () => rig.Host.FloatPanel(PanelId.Inspectors)];
+        string[] names = ["float", "dock", "float again"];
+        for (var i = 0; i < moves.Length; i++)
+        {
+            moves[i]();
+            PumpFor(pumpUntil, 200);
+            var view = Shown($"webp {i + 1}");
+            var webView = view is null ? null : Read<Microsoft.Web.WebView2.WinForms.WebView2?>(view, "View");
+            check(HoldsBody(view) && webView?.CoreWebView2 is not null, $"after {names[i]} the WebP is shown again");
+            if (view is null || webView?.CoreWebView2 is not { } core) continue;
+            var before = Read<int>(view, "Blocked");
+            core.Navigate("https://localhost:1/other");
+            pumpUntil(() => Read<int>(view, "Blocked") > before);
+            check(Read<int>(view, "Blocked") > before && webView.Source?.Host == WebpView.Host, $"after {names[i]} a navigation away is still cancelled");
+        }
+    }
+
+    private static void SessionsKeepViewState(Action<bool, string> check, Action<Func<bool>> pumpUntil)
+    {
+        Console.WriteLine("== sessions floated keep their selection and top row");
+        using var rig = new Rig();
+        rig.Form.Show();
+        pumpUntil(() => rig.Grid.Width > 0);
+        for (var i = 0; i < 200; i++)
+            rig.Store.Add(new Session { Request = new HttpRequestData { Method = "GET", Url = new Uri($"http://example.test/{i}") } });
+        var list = rig.List;
+        pumpUntil(() => list.VirtualListSize == 200);
+        rig.Grid.FollowTail = false;
+
+        list.SelectedIndices.Add(50);
+        list.SelectedIndices.Add(52);
+        list.FocusedItem = list.Items[52];
+        list.EnsureVisible(199);
+        list.EnsureVisible(40);
+        PumpFor(pumpUntil, 200);
+        var top = list.TopItem?.Index;
+        check(top is > 0, $"setup: the grid is scrolled (top {top})");
+
+        void Expect(string after)
+        {
+            var selected = list.SelectedIndices.Cast<int>().ToArray();
+            check(selected.SequenceEqual([50, 52]), $"after {after} rows 50 and 52 are still selected ({string.Join(",", selected)})");
+            check(list.FocusedItem?.Index == 52, $"after {after} row 52 still has the focus rectangle ({list.FocusedItem?.Index})");
+            check(list.TopItem?.Index == top, $"after {after} the same row is at the top ({list.TopItem?.Index}, was {top})");
+        }
+
+        rig.Host.FloatPanel(PanelId.Sessions);
+        PumpFor(pumpUntil, 200);
+        Expect("float");
+        rig.Host.DockPanel(PanelId.Sessions);
+        PumpFor(pumpUntil, 200);
+        Expect("dock");
+    }
+
+    private static readonly System.Reflection.MethodInfo ProcessCmdKeyMethod =
+        typeof(Control).GetMethod("ProcessCmdKey", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+
+    /// <summary>Runs a key through the control's command-key chain, as the message loop does before the control sees it.</summary>
+    private static bool ProcessCmdKey(Control control, Keys keys)
+    {
+        var message = Message.Create(control.Handle, WmKeyDown, (nint)(keys & Keys.KeyCode), 0);
+        return ProcessCmdKeyMethod.Invoke(control, [message, keys]) is true;
     }
 
     private static void FocusChord(Action<bool, string> check)
@@ -76,18 +432,18 @@ internal static class PanelHostTests
         check(Math.Abs(bottom.Height - expected) <= 8, $"and takes 30% of the height ({bottom.Height} px, expected about {expected:0})");
 
         var items = rig.Host.TabMenuItems(PanelId.Log).OfType<ToolStripMenuItem>().ToArray();
-        string[] texts = [Strings.Panels.MoveLeft, Strings.Panels.MoveRight, Strings.Panels.MoveBottom, Strings.Panels.Hide];
-        check(items.Select(item => item.Text).SequenceEqual(texts), $"the tab menu holds Move to Left/Right/Bottom and Hide ({string.Join(", ", items.Select(item => item.Text))})");
-        check(items.Length == 4 && items[0].Enabled && items[1].Enabled && !items[2].Enabled && items[3].Enabled,
+        string[] texts = [Strings.Panels.MoveLeft, Strings.Panels.MoveRight, Strings.Panels.MoveBottom, Strings.Panels.Float, Strings.Panels.TopMost, Strings.Panels.Hide];
+        check(items.Select(item => item.Text).SequenceEqual(texts), $"the tab menu holds Move to Left/Right/Bottom, Float, Always on top and Hide ({string.Join(", ", items.Select(item => item.Text))})");
+        check(items.Length == 6 && items[0].Enabled && items[1].Enabled && !items[2].Enabled && items[5].Enabled,
             "Move to Bottom is greyed out where the Log already is");
-        if (items.Length == 4) items[1].PerformClick();
+        if (items.Length == 6) items[1].PerformClick();
         PumpFor(pumpUntil, 100);
         check(StripOf(rig, PanelId.Log) == right && right.SelectedTab == log, "Move to Right puts the Log back on the right, selected");
         check(rig.Host.SelectedPanel(DockArea.Bottom) is null, "and leaves the bottom empty");
         foreach (var item in items) item.Dispose();
 
         var sessionItems = rig.Host.TabMenuItems(PanelId.Sessions).OfType<ToolStripMenuItem>().ToArray();
-        check(sessionItems.Length == 4 && !sessionItems[0].Enabled && !sessionItems[3].Enabled,
+        check(sessionItems.Length == 6 && !sessionItems[0].Enabled && !sessionItems[5].Enabled,
             "for Sessions, Move to Left (where it is) and Hide are greyed out");
         foreach (var item in sessionItems) item.Dispose();
     }

@@ -61,21 +61,33 @@ internal static class PanelMenus
     }
 
     /// <summary>
-    /// The tab menu: move to another area (the one the panel is in is greyed out) or hide it. Reset
+    /// The tab menu: move to another area (the one the panel is docked in is greyed out; <paramref name="current"/>
+    /// is null for a floating panel), Float or Dock, Always on top (floating only), or hide it. Reset
     /// layout is deliberately absent, so it cannot be clicked by mistake next to Hide.
     /// </summary>
-    public static ToolStripItem[] TabItems(PanelHost host, PanelId id, DockArea current)
+    public static ToolStripItem[] TabItems(PanelHost host, PanelId id, DockArea? current)
     {
         ArgumentNullException.ThrowIfNull(host);
+        var floating = host.IsFloating(id);
         return
         [
             MoveItem(host, id, DockArea.Left, Strings.Panels.MoveLeft, current),
             MoveItem(host, id, DockArea.Right, Strings.Panels.MoveRight, current),
             MoveItem(host, id, DockArea.Bottom, Strings.Panels.MoveBottom, current),
+            new ToolStripSeparator(),
+            floating
+                ? new ToolStripMenuItem(Strings.Panels.Dock, null, (_, _) => host.DockPanel(id))
+                : new ToolStripMenuItem(Strings.Panels.Float, null, (_, _) => host.FloatPanel(id)) { Enabled = host.CanFloat(id) },
+            new ToolStripMenuItem(Strings.Panels.TopMost, null, (_, _) => host.SetTopMost(id, !host.IsTopMost(id)))
+            {
+                Enabled = floating,
+                Checked = floating && host.IsTopMost(id),
+            },
+            new ToolStripSeparator(),
             new ToolStripMenuItem(Strings.Panels.Hide, null, (_, _) => host.HidePanel(id)) { Enabled = id != PanelId.Sessions },
         ];
     }
 
-    private static ToolStripMenuItem MoveItem(PanelHost host, PanelId id, DockArea area, string text, DockArea current) =>
+    private static ToolStripMenuItem MoveItem(PanelHost host, PanelId id, DockArea area, string text, DockArea? current) =>
         new(text, null, (_, _) => host.MoveTo(id, area)) { Enabled = area != current };
 }

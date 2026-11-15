@@ -31,6 +31,8 @@
     <Compile Include="..\..\src\Piper.App\Layout\PanelHost.cs" Link="PanelHost.cs" />
     <Compile Include="..\..\src\Piper.App\Layout\PanelMenus.cs" Link="PanelMenus.cs" />
     <Compile Include="..\..\src\Piper.App\Layout\SessionDrop.cs" Link="SessionDrop.cs" />
+    <Compile Include="..\..\src\Piper.App\Layout\FloatingPanelForm.cs" Link="FloatingPanelForm.cs" />
+    <Compile Include="..\..\src\Piper.App\TextInputFocus.cs" Link="TextInputFocus.cs" />
     <!-- The panel menus' labels, read from the same catalogue the app embeds. -->
     <Compile Include="..\..\src\Piper.App\Strings.cs" Link="Strings.cs" />
     <Compile Include="..\..\src\Piper.App\I18n.cs" Link="I18n.cs" />

@@ -1,4 +1,6 @@
+using System.ComponentModel;
 using System.Windows.Forms;
+using Piper.App.Controls;
 using Piper.App.Theme;
 
 namespace Piper.App.Layout;
@@ -21,8 +23,12 @@ internal sealed class PanelHost : UserControl
     private readonly Dictionary<DockArea, DarkTabControl> _strips = [];
     private readonly HashSet<PanelId> _checked = [];
     private readonly ContextMenuStrip _tabMenu = new();
+    private readonly Dictionary<PanelId, FloatingPanelForm> _floating = [];
     private PanelLayout _layout;
     private EventHandler<DarkTabControl>? _stripCreated;
+    private Func<Keys, bool> _processShortcut = _ => false;
+    private KeyEventHandler _shortcutKeyDown = (_, _) => { };
+    private bool _shuttingDown;
 
     /// <summary>True until the layout's fractions have been applied to a host with a real size.</summary>
     private bool _fractionsPending = true;
@@ -62,6 +68,7 @@ internal sealed class PanelHost : UserControl
             _stripCreated += value;
             if (value is null) return;
             foreach (var area in AllAreas) value(this, _strips[area]);
+            foreach (var form in _floating.Values) value(this, form.Strip);
         }
         remove => _stripCreated -= value;
     }
@@ -86,18 +93,113 @@ internal sealed class PanelHost : UserControl
         var page = _registry.PageOf(id);
         // SelectWithoutFocus, not SelectedTab: the grid must keep the focus while its selection is shown.
         if (page.Parent is DarkTabControl strip) strip.SelectWithoutFocus(strip.TabPages.IndexOf(page));
+
+        // Brought forward, never activated: the grid keeps the focus here too.
+        if (_floating.TryGetValue(id, out var window)) window.Reveal();
     }
 
-    /// <summary>Shows the panel and moves the keyboard focus into it.</summary>
+    /// <summary>Shows the panel and moves the keyboard focus into it, activating its window if it floats.</summary>
     public void FocusPanel(PanelId id)
     {
         ShowPanel(id, PanelReveal.Explicit);
+        if (_floating.TryGetValue(id, out var window)) window.Activate();
         _registry.ContentOf(id).Focus();
     }
 
     public PanelId? SelectedPanel(DockArea area) => _layout.SelectedIn(area);
 
     public bool IsHidden(PanelId id) => _layout.IsHidden(id);
+
+    public bool IsFloating(PanelId id) => _layout.IsFloating(id);
+
+    public bool IsTopMost(PanelId id) => _layout.TopMost(id);
+
+    /// <summary>
+    /// Every panel can float. The movable-panels spike found the inspector's WebView2 survives being
+    /// moved into another window and back with the same core and handle, and the WebP and video views
+    /// harden any core they have not seen, so floating weakens none of the lock-down.
+    /// </summary>
+    public bool CanFloat(PanelId id) => Enum.IsDefined(id);
+
+    /// <summary>
+    /// Set from the moment the main window starts closing: floating windows closed after that hand their
+    /// pages back without docking, so the layout saved just before keeps them floating.
+    /// </summary>
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    public bool ShuttingDown
+    {
+        get => _shuttingDown;
+        set
+        {
+            _shuttingDown = value;
+            foreach (var window in _floating.Values) window.ShuttingDown = value;
+            // A shutdown that failed leaves Piper running: bring back any window closed meanwhile.
+            if (!value) OpenFloatingWindows();
+        }
+    }
+
+    /// <summary>Hands floating windows the main window's keyboard shortcuts: its dispatcher and its <c>KeyDown</c> handler.</summary>
+    public void RouteKeys(Func<Keys, bool> processShortcut, KeyEventHandler keyDown)
+    {
+        ArgumentNullException.ThrowIfNull(processShortcut);
+        ArgumentNullException.ThrowIfNull(keyDown);
+        _processShortcut = processShortcut;
+        _shortcutKeyDown = keyDown;
+    }
+
+    /// <summary>
+    /// Moves the panel into a window of its own, at <paramref name="screenLocation"/> or where its page
+    /// is now, the size of that page. A panel already floating is brought forward instead.
+    /// </summary>
+    public void FloatPanel(PanelId id, Point? screenLocation = null)
+    {
+        if (!CanFloat(id)) return;
+        if (_layout.IsFloating(id))
+        {
+            ShowPanel(id, PanelReveal.Explicit);
+            return;
+        }
+
+        var wasHidden = _layout.IsHidden(id);
+        var page = _registry.PageOf(id);
+        var docked = page.Parent is not null && page.IsHandleCreated;
+        var location = screenLocation ?? (docked ? page.PointToScreen(Point.Empty) : Cursor.Position);
+        var size = docked ? page.Size : Size.Empty;
+        var bounds = new Rectangle(location, new Size(
+            Math.Max(size.Width, PanelLayout.MinFloatingWidth), Math.Max(size.Height, PanelLayout.MinFloatingHeight)));
+        Rearrange(() =>
+        {
+            _layout.Float(id, bounds, DeviceDpi);
+            // Keeps the new window's caption on some screen, so it can always be dragged back.
+            _layout.Normalise(Screen.AllScreens.Select(screen => screen.WorkingArea).ToArray());
+        });
+        if (wasHidden) Retheme(id);
+    }
+
+    /// <summary>Puts a floating panel back at the end of the area it came from, selected, and closes its window.</summary>
+    public void DockPanel(PanelId id)
+    {
+        if (!_layout.IsFloating(id)) return;
+        Rearrange(() => _layout.Dock(id));
+        Retheme(id);
+    }
+
+    /// <summary>Keeps a floating panel's window above every other window, or stops doing so.</summary>
+    public void SetTopMost(PanelId id, bool value)
+    {
+        _layout.SetTopMost(id, value);
+        if (_floating.TryGetValue(id, out var window)) window.TopMost = value;
+        LayoutChanged?.Invoke(this, EventArgs.Empty);
+    }
+
+    /// <summary>
+    /// Opens a window for every panel the layout has floating. Called once the main window is on
+    /// screen, so the owned windows never appear before their owner.
+    /// </summary>
+    public void ShowFloatingWindows() => OpenFloatingWindows();
+
+    /// <summary>The window a floating panel is shown in, or null; for tests.</summary>
+    internal FloatingPanelForm? FloatingWindow(PanelId id) => _floating.GetValueOrDefault(id);
 
     /// <summary>Docks the panel at the end of the area and selects it there; a hidden panel is shown.</summary>
     public void MoveTo(PanelId id, DockArea area)
@@ -131,12 +233,20 @@ internal sealed class PanelHost : UserControl
     /// </summary>
     public void ApplyTheme()
     {
+        // The window first: its font is what the panel inside it inherits.
+        foreach (var window in _floating.Values)
+        {
+            Palette.Apply(window);
+            window.Invalidate(true);
+        }
+
         foreach (var id in AllPanels) Retheme(id);
         Palette.Apply(_tabMenu);
     }
 
     /// <summary>The tab menu's items for a panel, built fresh each time it opens.</summary>
-    internal ToolStripItem[] TabMenuItems(PanelId id) => PanelMenus.TabItems(this, id, _layout.AreaOf(id));
+    internal ToolStripItem[] TabMenuItems(PanelId id) =>
+        PanelMenus.TabItems(this, id, _layout.IsFloating(id) ? null : _layout.AreaOf(id));
 
     /// <summary>The menu shown for a tab, exposed so tests can see and close it.</summary>
     internal ContextMenuStrip TabMenu => _tabMenu;
@@ -154,6 +264,7 @@ internal sealed class PanelHost : UserControl
     public PanelLayout Snapshot()
     {
         CaptureFractions();
+        CaptureFloatingBounds();
         return _layout.Clone();
     }
 
@@ -171,7 +282,14 @@ internal sealed class PanelHost : UserControl
 
     protected override void Dispose(bool disposing)
     {
-        if (disposing) _tabMenu.Dispose();
+        if (disposing)
+        {
+            // Each window hands its page back as it goes; the registry disposes the panels.
+            foreach (var window in _floating.Values.ToArray()) window.Dispose();
+            _floating.Clear();
+            _tabMenu.Dispose();
+        }
+
         base.Dispose(disposing);
     }
 
@@ -192,11 +310,69 @@ internal sealed class PanelHost : UserControl
     private void Rearrange(Action change)
     {
         CaptureFractions();
+        CaptureFloatingBounds();
+        // Moving the grid can recreate its handles, which loses the selection and the scroll position.
+        var grid = _registry.ContentOf(PanelId.Sessions) as SessionListView;
+        var gridPage = _registry.PageOf(PanelId.Sessions);
+        var gridParent = gridPage.Parent;
+        var gridState = grid?.CaptureViewState();
+
         change();
+        CloseStaleWindows();
         Arrange();
+        OpenFloatingWindows();
         _fractionsPending = true;
         PerformLayout();
+        if (grid is not null && gridState is { } state && gridPage.Parent != gridParent) grid.RestoreViewState(state);
         LayoutChanged?.Invoke(this, EventArgs.Empty);
+    }
+
+    /// <summary>Closes the window of every panel the layout no longer has floating; the page goes back first.</summary>
+    private void CloseStaleWindows()
+    {
+        foreach (var (id, window) in _floating.Where(pair => !_layout.IsFloating(pair.Key)).ToArray())
+        {
+            _floating.Remove(id);
+            window.CloseWithoutDocking();
+        }
+    }
+
+    /// <summary>Opens a window for every floating panel that has none, once the main window is on screen.</summary>
+    private void OpenFloatingWindows()
+    {
+        if (FindForm() is not { Visible: true } owner) return;
+        foreach (var id in AllPanels.Where(id => _layout.IsFloating(id) && !_floating.ContainsKey(id)))
+        {
+            var page = _registry.PageOf(id);
+            var window = new FloatingPanelForm(owner, page, _processShortcut, _shortcutKeyDown)
+            {
+                ShuttingDown = _shuttingDown,
+                TopMost = _layout.TopMost(id),
+            };
+            if (_layout.FloatingBounds(id) is { } bounds) window.Bounds = bounds;
+            window.Strip.SetTabChecked(page, _checked.Contains(id));
+            window.Strip.TabMenuRequested += OnTabMenuRequested;
+            window.DockRequested += (_, _) => DockPanel(id);
+            window.FormClosed += (_, _) =>
+            {
+                // The owner closing, or a shutdown, ends the window without a dock; forget it.
+                if (_floating.TryGetValue(id, out var current) && current == window) _floating.Remove(id);
+            };
+            _floating[id] = window;
+            _stripCreated?.Invoke(this, window.Strip);
+            window.Show();
+        }
+    }
+
+    /// <summary>Reads where the user left each floating window back into the layout.</summary>
+    private void CaptureFloatingBounds()
+    {
+        foreach (var (id, window) in _floating)
+        {
+            if (window.IsDisposed) continue;
+            var bounds = window.WindowState == FormWindowState.Normal ? window.Bounds : window.RestoreBounds;
+            _layout.Float(id, bounds, window.DeviceDpi);
+        }
     }
 
     private void Retheme(PanelId id)

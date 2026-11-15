@@ -33,6 +33,7 @@ public sealed partial class MainForm : Form, IMessageFilter
     private readonly TextBox _logView;
     private readonly PanelRegistry _panels;
     private readonly PanelHost _panelHost;
+    private readonly MenuStrip _menu;
 
     private readonly ToolStripStatusLabel _zoomLabel;
     private ToolStripMenuItem? _zoomInItem;
@@ -160,7 +161,7 @@ public sealed partial class MainForm : Form, IMessageFilter
         ActiveControl = _sessionList;
         Controls.Add(trustBar);
         Controls.Add(toolbar);
-        Controls.Add(BuildMenu());
+        Controls.Add(_menu = BuildMenu());
         Controls.Add(statusBar);
         EnableSazFileDrop(this);
 
@@ -258,6 +259,7 @@ public sealed partial class MainForm : Form, IMessageFilter
 
         KeyPreview = true;
         KeyDown += OnFormKeyDown;
+        _panelHost.RouteKeys(ProcessShortcut, OnFormKeyDown);
 
         // Ctrl+wheel cannot be picked up by KeyPreview or ProcessCmdKey, and WM_MOUSEWHEEL goes to
         // whichever control has focus, so a message filter is the only hook that covers the whole
@@ -371,6 +373,8 @@ public sealed partial class MainForm : Form, IMessageFilter
     protected override async void OnShown(EventArgs e)
     {
         base.OnShown(e);
+        // Only now: an owned window opened from the constructor would appear before its owner.
+        _panelHost.ShowFloatingWindows();
 
         // A run that was killed, crashed, or was still open when Windows shut down leaves the
         // machine pointed at a Piper that is no longer listening, which the user sees as having
@@ -1671,22 +1675,34 @@ public sealed partial class MainForm : Form, IMessageFilter
 
     private void OnFormKeyDown(object? sender, KeyEventArgs e)
     {
+        if (!ProcessShortcut(e.KeyData)) return;
+        e.Handled = true;
+        e.SuppressKeyPress = true;
+    }
+
+    /// <summary>
+    /// The window's keyboard shortcuts, for this window's <c>KeyDown</c> and for every floating panel
+    /// window's <c>ProcessCmdKey</c> and <c>KeyDown</c>. Menu accelerators come first: a floating window
+    /// is another top-level window, so WinForms would not route them to this window's menu on its own.
+    /// True when the key was handled.
+    /// </summary>
+    internal bool ProcessShortcut(Keys keyData)
+    {
+        if (Menus.PerformShortcut(_menu, keyData)) return true;
+
+        var e = new KeyEventArgs(keyData);
         if (e.KeyCode == Keys.F12)
         {
             ToggleCapture();
-            e.Handled = true;
         }
         else if (e.Control && e.KeyCode == Keys.K)
         {
             _panelHost.FocusPanel(PanelId.Composer);
             _composer.FocusSearch();
-            e.Handled = true;
         }
         else if (PanelMenus.FocusChordTarget(e, IsTextInputFocused()) is { } panel)
         {
             _panelHost.FocusPanel(panel);
-            e.Handled = true;
-            e.SuppressKeyPress = true;
         }
         // KeyPreview hands this form every key before the focused control sees it, so a chord that
         // means something inside a text box has to leave it alone there: Ctrl+X cut the selected text
@@ -1694,13 +1710,11 @@ public sealed partial class MainForm : Form, IMessageFilter
         // user was typing in the Composer.
         else if (e.Control && e.KeyCode == Keys.R && !IsTextInputFocused() && _sessionList.ResendSelected())
         {
-            e.Handled = true;
-            e.SuppressKeyPress = true;
+            // ResendSelected replayed it; a selection that cannot be replayed leaves Ctrl+R unhandled.
         }
         else if (e.Control && e.KeyCode == Keys.X && !IsTextInputFocused())
         {
             _store.Clear();
-            e.Handled = true;
         }
         else if (e.Control && e.KeyCode is Keys.Add or Keys.Subtract or Keys.NumPad0)
         {
@@ -1710,8 +1724,6 @@ public sealed partial class MainForm : Form, IMessageFilter
                 Keys.Subtract => FontScale.ZoomOut(),
                 _ => FontScale.Reset(),
             });
-            e.Handled = true;
-            e.SuppressKeyPress = true;
         }
         else if (e.Control && e.Shift && e.KeyCode is Keys.Oemplus or Keys.OemMinus)
         {
@@ -1719,31 +1731,17 @@ public sealed partial class MainForm : Form, IMessageFilter
             // chance at. On a layout where "+" is Shift+=, the shifted chord reaches here instead,
             // and the shortcut the README advertises would otherwise do nothing.
             ChangeFontScale(e.KeyCode == Keys.Oemplus ? FontScale.ZoomIn() : FontScale.ZoomOut());
-            e.Handled = true;
-            e.SuppressKeyPress = true;
         }
-    }
-
-    /// <summary>
-    /// Whether keyboard focus is in a control that edits text, where Ctrl+X, Ctrl+R and friends
-    /// belong to the control. <see cref="ContainerControl.ActiveControl"/> stops at the nearest
-    /// container (every panel here is a UserControl), so walk down to the control that has focus.
-    /// </summary>
-    private bool IsTextInputFocused()
-    {
-        Control? focused = ActiveControl;
-        while (focused is ContainerControl { ActiveControl: { } inner } and not UpDownBase) focused = inner;
-
-        // Read-only boxes count too: someone reading a body in the inspector who reaches for Ctrl+X
-        // expects nothing, or at most a copy, not an empty capture.
-        return focused switch
+        else
         {
-            TextBoxBase => true,
-            ComboBox { DropDownStyle: not ComboBoxStyle.DropDownList } => true,
-            UpDownBase => true,
-            _ => false,
-        };
+            return false;
+        }
+
+        return true;
     }
+
+    /// <summary>Whether the window that has the keyboard, this one or a floating panel's, is typing into a text box.</summary>
+    private bool IsTextInputFocused() => TextInputFocus.IsTextInputFocused(Form.ActiveForm ?? this);
 
     /// <summary>
     /// Ctrl+MouseWheel resizes the UI. The wheel message goes to the focused control rather than the
@@ -2017,7 +2015,10 @@ public sealed partial class MainForm : Form, IMessageFilter
             return;
         }
 
+        // Saved while the floating windows still exist, so their bounds are in it; from here on,
+        // closing one hands its panel back without docking it.
         SaveWindowBounds();
+        _panelHost.ShuttingDown = true;
         SaveFontScaleSettings();
         _sessionList.CancelSazSave(TimeSpan.FromSeconds(5));
 
@@ -2089,6 +2090,7 @@ public sealed partial class MainForm : Form, IMessageFilter
             // Do not silently exit if the Windows proxy could not be restored: leaving it
             // pointed at a closed Piper instance would break the user's network access.
             _shutdownInProgress = false;
+            _panelHost.ShuttingDown = false;
             Enabled = true;
             Text = Strings.App.Name;
             _statusTimer.Start();
