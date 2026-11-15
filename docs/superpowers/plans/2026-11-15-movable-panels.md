@@ -464,4 +464,6 @@ internal sealed class Flyout : Control
 
 ## Spike result
 
-_(filled in by Task 1)_
+WebView2 survives reparenting: for both the WebP view and the video view, `CoreWebView2` was the same instance (`ReferenceEquals`) after moving the `InspectorPanel` into a new top-level `Form` and after moving it back, and `InspectorPanel.Handle` did not change.
+Content still rendered after each move (document `readyState` complete, `IMG` for WebP and `VIDEO` for video, checked with `ExecuteScriptAsync`); no recreate was needed.
+Verdict: Inspector can float: yes.
