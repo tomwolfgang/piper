@@ -35,6 +35,19 @@ internal static class PanelHostTests
         ShrunkWindow(check, pumpUntil);
         SnapshotKeepsFractionsWhenTiny(check, pumpUntil);
         HiddenPanelThemed(check, pumpUntil);
+        FocusChord(check);
+    }
+
+    private static void FocusChord(Action<bool, string> check)
+    {
+        Console.WriteLine("== Ctrl+Alt+1..6 focuses a panel, but AltGr+digit in a text box stays a character");
+        check(PanelMenus.FocusChordTarget(new KeyEventArgs(Keys.Control | Keys.Alt | Keys.D1), false) == PanelId.Sessions, "Ctrl+Alt+1 is Sessions");
+        check(PanelMenus.FocusChordTarget(new KeyEventArgs(Keys.Control | Keys.Alt | Keys.D6), false) == PanelId.Log, "Ctrl+Alt+6 is Log");
+        check(PanelMenus.FocusChordTarget(new KeyEventArgs(Keys.Control | Keys.Alt | Keys.D3), true) is null,
+            "in a text box the chord is left alone, so AltGr+3 still types its character");
+        check(PanelMenus.FocusChordTarget(new KeyEventArgs(Keys.Control | Keys.Alt | Keys.D7), false) is null, "Ctrl+Alt+7 names no panel");
+        check(PanelMenus.FocusChordTarget(new KeyEventArgs(Keys.Control | Keys.D1), false) is null, "Ctrl+1 without Alt is not the chord");
+        check(PanelMenus.FocusChordTarget(new KeyEventArgs(Keys.Alt | Keys.D1), false) is null, "nor is Alt+1 without Ctrl");
     }
 
     private static void MoveLogToBottom(Action<bool, string> check, Action<Func<bool>> pumpUntil)

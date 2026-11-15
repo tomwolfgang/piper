@@ -166,7 +166,7 @@ method:POST host:api status:>=400 -is:image body:"order"
 | `Ctrl+MouseWheel` | resize the UI font |
 | `Ctrl++` / `Ctrl+-` | resize the UI font a step at a time |
 | `Ctrl+0` | reset the UI font to 100% |
-| `Ctrl+Alt+1` ... `Ctrl+Alt+6` | show and focus Sessions, Inspectors, Composer, Filters, AutoResponder or Log |
+| `Ctrl+Alt+1` ... `Ctrl+Alt+6` | show and focus Sessions, Inspectors, Composer, Filters, AutoResponder or Log (outside text boxes, where `Ctrl+Alt` is `AltGr` and types a character) |
 | right-click a panel's tab, or `Shift+F10` / Menu key on it | move the panel to the left, right or bottom area, or hide it |
 
 **View > Panels** shows or hides each panel; a hidden panel comes back where it was. The Sessions

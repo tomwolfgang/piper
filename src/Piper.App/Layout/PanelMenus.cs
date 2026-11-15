@@ -49,6 +49,18 @@ internal static class PanelMenus
     }
 
     /// <summary>
+    /// The panel a Ctrl+Alt+1..6 focus shortcut names, or null. AltGr arrives as Ctrl+Alt, so in a
+    /// text box the chord types a character on many layouts (AZERTY's <c>~ # { [ |</c>) and is left
+    /// to the box; everywhere else it focuses the panel.
+    /// </summary>
+    public static PanelId? FocusChordTarget(KeyEventArgs e, bool textInputFocused)
+    {
+        ArgumentNullException.ThrowIfNull(e);
+        if (textInputFocused || !e.Control || !e.Alt || e.KeyCode is < Keys.D1 or > Keys.D6) return null;
+        return (PanelId)(e.KeyCode - Keys.D1);
+    }
+
+    /// <summary>
     /// The tab menu: move to another area (the one the panel is in is greyed out) or hide it. Reset
     /// layout is deliberately absent, so it cannot be clicked by mistake next to Hide.
     /// </summary>

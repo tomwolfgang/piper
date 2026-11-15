@@ -1682,9 +1682,9 @@ public sealed partial class MainForm : Form, IMessageFilter
             _composer.FocusSearch();
             e.Handled = true;
         }
-        else if (e.Control && e.Alt && e.KeyCode is >= Keys.D1 and <= Keys.D6)
+        else if (PanelMenus.FocusChordTarget(e, IsTextInputFocused()) is { } panel)
         {
-            _panelHost.FocusPanel((PanelId)(e.KeyCode - Keys.D1));
+            _panelHost.FocusPanel(panel);
             e.Handled = true;
             e.SuppressKeyPress = true;
         }
