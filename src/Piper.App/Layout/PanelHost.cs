@@ -487,7 +487,12 @@ internal sealed class PanelHost : UserControl
     {
         var bottom = _strips[DockArea.Bottom];
         var content = bottom.TabCount == 0 ? 0 : Scaled(PanelLayout.MinBottomHeight(_layout.DockedIn(DockArea.Bottom)));
-        var wanted = content == 0 ? 0 : content + bottom.ItemSize.Height + LogicalToDeviceUnits(6);
+        // The strip's own chrome (tab row and page frame) differs between visual styles, so it is
+        // measured from the control once it has a size rather than assumed.
+        var chrome = bottom.IsHandleCreated && bottom.Height > 0 && bottom.DisplayRectangle.Height > 0
+            ? bottom.Height - bottom.DisplayRectangle.Height
+            : bottom.ItemSize.Height + LogicalToDeviceUnits(6);
+        var wanted = content == 0 ? 0 : content + chrome;
         var room = Math.Max(_outer.Height - _outer.Panel1MinSize - _outer.SplitterWidth, 0);
         var minimum = Math.Min(wanted, room);
         if (_outer.Panel2MinSize == minimum) return;
