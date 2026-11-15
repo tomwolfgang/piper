@@ -28,6 +28,7 @@ internal sealed class PanelHost : UserControl
     private readonly Dictionary<PanelId, FloatingPanelForm> _floating = [];
     private readonly Dictionary<DockArea, AutoHideStrip> _autoHideStrips = [];
     private readonly Dictionary<DockArea, Flyout> _flyouts = [];
+    private readonly TabDrag _drag;
     private PanelLayout _layout;
     private EventHandler<DarkTabControl>? _stripCreated;
     private Func<Keys, bool> _processShortcut = _ => false;
@@ -46,6 +47,7 @@ internal sealed class PanelHost : UserControl
         ArgumentNullException.ThrowIfNull(layout);
         _registry = registry;
         _layout = layout.Clone();
+        _drag = new TabDrag(this, DragStrips());
 
         foreach (var area in AllAreas) _strips[area] = NewStrip();
         _inner = new SplitContainer { Dock = DockStyle.Fill, Orientation = Orientation.Vertical, SplitterWidth = SplitterWidth };
@@ -217,7 +219,11 @@ internal sealed class PanelHost : UserControl
         set
         {
             _shuttingDown = value;
-            if (value) CloseFlyouts();
+            if (value)
+            {
+                _drag.Cancel();
+                CloseFlyouts();
+            }
             foreach (var window in _floating.Values)
             {
                 window.ShuttingDown = value;
@@ -241,13 +247,20 @@ internal sealed class PanelHost : UserControl
 
     /// <summary>
     /// Moves the panel into a window of its own, at <paramref name="screenLocation"/> or where its page
-    /// is now, the size of that page. A panel already floating is brought forward instead.
+    /// is now, the size of that page. A panel already floating is brought forward instead, and its window
+    /// moved to <paramref name="screenLocation"/> when one is given.
     /// </summary>
     public void FloatPanel(PanelId id, Point? screenLocation = null)
     {
         if (!CanFloat(id)) return;
         if (_layout.IsFloating(id))
         {
+            if (screenLocation is { } moveTo && _floating.TryGetValue(id, out var window) && window.Location != moveTo)
+            {
+                window.Location = moveTo;
+                LayoutChanged?.Invoke(this, EventArgs.Empty);
+            }
+
             ShowPanel(id, PanelReveal.Explicit);
             return;
         }
@@ -293,12 +306,21 @@ internal sealed class PanelHost : UserControl
     /// <summary>The window a floating panel is shown in, or null; for tests.</summary>
     internal FloatingPanelForm? FloatingWindow(PanelId id) => _floating.GetValueOrDefault(id);
 
-    /// <summary>Docks the panel at the end of the area and selects it there; a hidden panel is shown.</summary>
-    public void MoveTo(PanelId id, DockArea area)
+    /// <summary>
+    /// Docks the panel in the area, at <paramref name="index"/> among the area's other panels or at the
+    /// end, and selects it there; a hidden panel is shown. Moving a docked panel to where it already is
+    /// changes nothing, and without an index any place in its own area is where it already is.
+    /// </summary>
+    public void MoveTo(PanelId id, DockArea area, int? index = null)
     {
         var wasHidden = _layout.IsHidden(id);
-        if (!wasHidden && !_layout.IsFloating(id) && _layout.AreaOf(id) == area) return;
-        Rearrange(() => _layout.Move(id, area));
+        if (!wasHidden && !_layout.IsFloating(id) && _layout.AreaOf(id) == area)
+        {
+            var order = _layout.DockedIn(area);
+            if (index is not { } at || order[Math.Clamp(at, 0, order.Count - 1)] == id) return;
+        }
+
+        Rearrange(() => _layout.Move(id, area, index));
         if (wasHidden) Retheme(id);
     }
 
@@ -382,6 +404,7 @@ internal sealed class PanelHost : UserControl
     {
         if (disposing)
         {
+            _drag.Cancel();
             // Each window hands its page back as it goes; the registry disposes the panels.
             foreach (var window in _floating.Values.ToArray()) window.Dispose();
             _floating.Clear();
@@ -401,12 +424,42 @@ internal sealed class PanelHost : UserControl
         var strip = new DarkTabControl { Dock = DockStyle.Fill, Font = Palette.UiFont };
         strip.SelectedIndexChanged += OnStripSelectionChanged;
         strip.TabMenuRequested += OnTabMenuRequested;
+        strip.TabDragStarted += OnTabDragStarted;
         return strip;
     }
+
+    private void OnTabDragStarted(object? sender, (int Index, Point Screen) e)
+    {
+        if (sender is DarkTabControl strip) _drag.Begin(strip, e.Index, e.Screen);
+    }
+
+    /// <summary>Every strip a tab can be dragged from or over, enumerated afresh each time: the docked strips, then each floating window's.</summary>
+    private IEnumerable<DarkTabControl> DragStrips()
+    {
+        foreach (var area in AllAreas) yield return _strips[area];
+        foreach (var window in _floating.Values) yield return window.Strip;
+    }
+
+    /// <summary>The panel a tab page shows, or null.</summary>
+    internal PanelId? PanelOf(TabPage page) => _registry.IdOf(page);
+
+    /// <summary>The area a docked strip shows, or null for any other strip.</summary>
+    internal DockArea? DockedAreaOf(DarkTabControl strip)
+    {
+        foreach (var area in AllAreas)
+            if (_strips[area] == strip) return area;
+        return null;
+    }
+
+    /// <summary>The strips that name an auto-hidden area's panels, with their areas.</summary>
+    internal IEnumerable<(DockArea Area, AutoHideStrip Strip)> AutoHideTargets() =>
+        _autoHideStrips.Select(pair => (pair.Key, pair.Value));
 
     /// <summary>Applies a change to the layout and shows the result, keeping the user's splitters.</summary>
     private void Rearrange(Action change)
     {
+        // A drag under way would be hit-testing strips that are about to change under it.
+        _drag.Cancel();
         // A flyout's page may be about to move; the caller reopens one if it wants it.
         CloseFlyouts();
         CaptureFractions();
@@ -453,6 +506,7 @@ internal sealed class PanelHost : UserControl
             if (_layout.FloatingBounds(id) is { } bounds) window.Bounds = bounds;
             window.Strip.SetTabChecked(page, _checked.Contains(id));
             window.Strip.TabMenuRequested += OnTabMenuRequested;
+            window.Strip.TabDragStarted += OnTabDragStarted;
             window.DockRequested += (_, _) => DockPanel(id);
             window.FormClosed += (_, _) =>
             {

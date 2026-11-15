@@ -169,6 +169,12 @@ method:POST host:api status:>=400 -is:image body:"order"
 | `Ctrl+Alt+1` ... `Ctrl+Alt+6` | show and focus Sessions, Inspectors, Composer, Filters, AutoResponder or Log (outside text boxes, where `Ctrl+Alt` is `AltGr` and types a character) |
 | right-click a panel's tab, or `Shift+F10` / Menu key on it | move the panel to the left, right or bottom area, float it in its own window or dock it again, auto-hide its area, keep a floating window on top, or hide it |
 | `Esc` in an auto-hidden panel's flyout | close the flyout |
+| `Esc` while dragging a panel's tab | cancel the drag |
+
+**Dragging a panel's tab** moves the panel: drop it on another area's tabs to move it there, along
+its own tabs to reorder them, on an auto-hidden area's strip to add it to that area, or outside the
+main window to float it there. An accent marker shows where it will land. Dragging a floating
+window's tab onto an area's tabs docks it there.
 
 **View > Panels** shows or hides each panel; a hidden panel comes back where it was. The Sessions
 list cannot be hidden. **Float** puts a panel in a window of its own, which minimises with Piper,

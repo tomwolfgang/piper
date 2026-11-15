@@ -50,7 +50,341 @@ internal static class PanelHostTests
         FlyoutInsideAtMinimumSize(check, pumpUntil);
         AutoHideStripTracksZoom(check, pumpUntil);
         AutoHideAccessibility(check, pumpUntil);
+        DragLogToBottom(check, pumpUntil);
+        DragReorders(check, pumpUntil);
+        DragEscCancels(check, pumpUntil);
+        ShortClickSelects(check, pumpUntil);
+        SessionDropAfterDrag(check, pumpUntil);
+        DragOutsideFloats(check, pumpUntil);
+        DragFloatingTabDocks(check, pumpUntil);
+        DragOntoAutoHiddenArea(check, pumpUntil);
         FlyoutScreenshots(pumpUntil);
+        DragScreenshots(pumpUntil);
+    }
+
+    private const int MkLButton = 0x0001;
+    private const int VkEscape = 0x1B;
+
+    /// <summary>Presses the left button on a tab and moves past the drag threshold, as the mouse would.</summary>
+    private static void PressAndDrag(DarkTabControl strip, int index, Action<Func<bool>> pumpUntil)
+    {
+        var rect = strip.GetTabRect(index);
+        var centre = new Point(rect.X + rect.Width / 2, rect.Y + rect.Height / 2);
+        PostMessage(strip.Handle, WmLButtonDown, MkLButton, MouseLParam(centre));
+        var drag = SystemInformation.DragSize;
+        PostMessage(strip.Handle, WmMouseMove, MkLButton, MouseLParam(new Point(centre.X + drag.Width + 2, centre.Y + drag.Height + 2)));
+        PumpFor(pumpUntil, 60);
+    }
+
+    /// <summary>A mouse move to a screen point while <paramref name="source"/> holds the capture, which receives every move.</summary>
+    private static void DragOver(DarkTabControl source, Point screen, Action<Func<bool>> pumpUntil)
+    {
+        PostMessage(source.Handle, WmMouseMove, MkLButton, MouseLParam(source.PointToClient(screen)));
+        PumpFor(pumpUntil, 60);
+    }
+
+    private static void ReleaseAt(DarkTabControl source, Point screen, Action<Func<bool>> pumpUntil)
+    {
+        PostMessage(source.Handle, WmLButtonUp, 0, MouseLParam(source.PointToClient(screen)));
+        PumpFor(pumpUntil, 150);
+    }
+
+    /// <summary>A screen point on the left edge of a tab: the gap before it.</summary>
+    private static Point BeforeTab(DarkTabControl strip, int index)
+    {
+        var rect = strip.GetTabRect(index);
+        return strip.PointToScreen(new Point(rect.X + 4, rect.Y + rect.Height / 2));
+    }
+
+    private static PanelId[] Order(Rig rig, DockArea area) => [.. rig.Host.Snapshot().DockedIn(area)];
+
+    private static void DragLogToBottom(Action<bool, string> check, Action<Func<bool>> pumpUntil)
+    {
+        Console.WriteLine("== dragging Log to the Bottom strip moves it");
+        using var rig = new Rig();
+        rig.Form.Show();
+        pumpUntil(() => rig.Grid.Width > 0);
+        rig.Host.MoveTo(PanelId.Composer, DockArea.Bottom);
+        PumpFor(pumpUntil, 100);
+        var right = StripOf(rig, PanelId.Log)!;
+        var bottom = StripOf(rig, PanelId.Composer)!;
+        var log = rig.Registry.PageOf(PanelId.Log);
+
+        PressAndDrag(right, right.TabPages.IndexOf(log), pumpUntil);
+        check(right.Capture, "past the threshold the dragged tab's strip takes the mouse capture");
+        DragOver(right, BeforeTab(bottom, 0), pumpUntil);
+        check(bottom.DropIndex == 0 && bottom.IsDropTarget, $"over the Bottom strip's first tab the marker sits before it (index {bottom.DropIndex})");
+        check(right.DropIndex == -1 && !right.IsDropTarget, "and the strip it left shows no marker");
+        ReleaseAt(right, BeforeTab(bottom, 0), pumpUntil);
+        pumpUntil(() => log.Parent == bottom);
+        check(log.Parent == bottom && Order(rig, DockArea.Bottom).SequenceEqual([PanelId.Log, PanelId.Composer]),
+            $"the Log lands first on the Bottom strip ({string.Join(", ", Order(rig, DockArea.Bottom))})");
+        check(bottom.SelectedTab == log && rig.Host.SelectedPanel(DockArea.Bottom) == PanelId.Log, "selected where it lands");
+        check(!right.Capture && bottom.DropIndex == -1 && !bottom.IsDropTarget, "the capture and the marker are gone");
+    }
+
+    private static void DragReorders(Action<bool, string> check, Action<Func<bool>> pumpUntil)
+    {
+        Console.WriteLine("== reordering within a strip");
+        using var rig = new Rig();
+        rig.Form.Show();
+        pumpUntil(() => rig.Grid.Width > 0);
+        var right = StripOf(rig, PanelId.Log)!;
+        var log = rig.Registry.PageOf(PanelId.Log);
+
+        PressAndDrag(right, right.TabPages.IndexOf(log), pumpUntil);
+        DragOver(right, BeforeTab(right, 0), pumpUntil);
+        check(right.DropIndex == 0 && right.IsDropTarget, $"the marker sits before the first tab of its own strip (index {right.DropIndex})");
+        ReleaseAt(right, BeforeTab(right, 0), pumpUntil);
+        check(Order(rig, DockArea.Right).SequenceEqual([PanelId.Log, PanelId.Inspectors, PanelId.Composer, PanelId.Filters, PanelId.AutoResponder]),
+            $"the Log moves to the front ({string.Join(", ", Order(rig, DockArea.Right))})");
+        check(right.TabPages[0] == log && right.SelectedTab == log, "its tab is first and selected");
+
+        var changes = 0;
+        rig.Host.LayoutChanged += (_, _) => changes++;
+        var inspectors = rig.Registry.PageOf(PanelId.Inspectors);
+        right.SelectWithoutFocus(right.TabPages.IndexOf(inspectors));
+        changes = 0;
+        PressAndDrag(right, 1, pumpUntil);
+        DragOver(right, BeforeTab(right, 2), pumpUntil);
+        ReleaseAt(right, BeforeTab(right, 2), pumpUntil);
+        check(changes == 0 && right.TabPages[1] == inspectors, $"dropping a tab where it already is changes nothing ({changes} layout changes)");
+    }
+
+    private static void DragEscCancels(Action<bool, string> check, Action<Func<bool>> pumpUntil)
+    {
+        Console.WriteLine("== Esc mid-drag changes nothing");
+        using var rig = new Rig();
+        rig.Form.Show();
+        pumpUntil(() => rig.Grid.Width > 0);
+        var right = StripOf(rig, PanelId.Log)!;
+        var left = StripOf(rig, PanelId.Sessions)!;
+        var log = rig.Registry.PageOf(PanelId.Log);
+        var before = Order(rig, DockArea.Right);
+
+        PressAndDrag(right, right.TabPages.IndexOf(log), pumpUntil);
+        DragOver(right, BeforeTab(left, 0), pumpUntil);
+        check(left.DropIndex == 0, "setup: the marker is on the Sessions strip");
+        PostMessage(right.Handle, WmKeyDown, VkEscape, 0);
+        PumpFor(pumpUntil, 60);
+        check(!right.Capture && left.DropIndex == -1 && !left.IsDropTarget, "Esc releases the capture and clears the marker");
+        ReleaseAt(right, BeforeTab(left, 0), pumpUntil);
+        check(log.Parent == right && Order(rig, DockArea.Right).SequenceEqual(before), "and the mouse-up after it moves nothing");
+
+        PressAndDrag(right, right.TabPages.IndexOf(log), pumpUntil);
+        DragOver(right, BeforeTab(left, 0), pumpUntil);
+        right.Capture = false; // WM_CAPTURECHANGED, as when another window takes the mouse
+        PumpFor(pumpUntil, 60);
+        check(left.DropIndex == -1 && !left.IsDropTarget, "losing the capture mid-drag clears the marker");
+        ReleaseAt(right, BeforeTab(left, 0), pumpUntil);
+        check(log.Parent == right && Order(rig, DockArea.Right).SequenceEqual(before), "and leaves the layout as it was");
+
+        PressAndDrag(right, right.TabPages.IndexOf(log), pumpUntil);
+        DragOver(right, BeforeTab(left, 0), pumpUntil);
+        rig.Host.ShuttingDown = true;
+        check(!right.Capture && left.DropIndex == -1, "shutting down mid-drag ends it");
+        rig.Host.ShuttingDown = false;
+        ReleaseAt(right, BeforeTab(left, 0), pumpUntil);
+        check(log.Parent == right && Order(rig, DockArea.Right).SequenceEqual(before), "and the mouse-up after it moves nothing");
+
+        rig.Host.FloatPanel(PanelId.Log);
+        PumpFor(pumpUntil, 150);
+        var window = rig.Host.FloatingWindow(PanelId.Log);
+        check(window is not null, "setup: the Log floats");
+        if (window is null) return;
+        PressAndDrag(window.Strip, 0, pumpUntil);
+        DragOver(window.Strip, BeforeTab(left, 0), pumpUntil);
+        check(left.DropIndex == 0, "setup: a floating tab drags over the Sessions strip");
+        // The page is taken out first, so disposing the strip does not dispose the panel with it.
+        window.Strip.TabPages.Remove(log);
+        window.Strip.Dispose();
+        PumpFor(pumpUntil, 60);
+        check(left.DropIndex == -1 && !left.IsDropTarget, "the dragged strip disposed mid-drag clears the marker");
+        ReleaseAt(left, BeforeTab(left, 0), pumpUntil);
+        rig.Host.DockPanel(PanelId.Log);
+        PumpFor(pumpUntil, 100);
+        check(log.Parent == right && Order(rig, DockArea.Left).SequenceEqual([PanelId.Sessions]), "and nothing lands on the Sessions strip");
+    }
+
+    private static void ShortClickSelects(Action<bool, string> check, Action<Func<bool>> pumpUntil)
+    {
+        Console.WriteLine("== a short click under the drag threshold just selects the tab");
+        using var rig = new Rig();
+        rig.Form.Show();
+        pumpUntil(() => rig.Grid.Width > 0);
+        var right = StripOf(rig, PanelId.Filters)!;
+        // Filters, not Log: the rig's right strip clips the Log tab, and the native control does not
+        // select a tab its scroll arrows half cover.
+        var filters = rig.Registry.PageOf(PanelId.Filters);
+        var before = Order(rig, DockArea.Right);
+        var rect = right.GetTabRect(right.TabPages.IndexOf(filters));
+        var centre = new Point(rect.X + rect.Width / 2, rect.Y + rect.Height / 2);
+
+        PostMessage(right.Handle, WmLButtonDown, MkLButton, MouseLParam(centre));
+        PostMessage(right.Handle, WmMouseMove, MkLButton, MouseLParam(centre with { X = centre.X + 1 }));
+        PumpFor(pumpUntil, 60);
+        check(right.DropIndex == -1 && !right.IsDropTarget, "a one-pixel move starts no drag");
+        PostMessage(right.Handle, WmLButtonUp, 0, MouseLParam(centre with { X = centre.X + 1 }));
+        PumpFor(pumpUntil, 100);
+        check(right.SelectedTab == filters && Order(rig, DockArea.Right).SequenceEqual(before),
+            $"the Filters tab is selected and nothing moved (selected {right.SelectedTab?.Text})");
+        check(!right.Capture && right.DropIndex == -1 && !right.IsDropTarget, "and no capture or marker is left");
+
+        var composer = rig.Registry.PageOf(PanelId.Composer);
+        var composerRect = right.GetTabRect(right.TabPages.IndexOf(composer));
+        var at = new Point(composerRect.X + composerRect.Width / 2, composerRect.Y + composerRect.Height / 2);
+        const int WmRButtonDown = 0x0204, WmRButtonUp = 0x0205, MkRButton = 0x0002;
+        PostMessage(right.Handle, WmRButtonDown, MkRButton, MouseLParam(at));
+        PostMessage(right.Handle, WmMouseMove, MkRButton, MouseLParam(at with { X = at.X + 40 }));
+        PumpFor(pumpUntil, 60);
+        check(right.DropIndex == -1 && !right.IsDropTarget, "a right-button drag starts no tab drag");
+        PostMessage(right.Handle, WmRButtonUp, 0, MouseLParam(at with { X = at.X + 40 }));
+        PumpFor(pumpUntil, 100);
+        rig.Host.TabMenu.Close();
+        check(Order(rig, DockArea.Right).SequenceEqual(before), "and moves nothing");
+    }
+
+    private static void SessionDropAfterDrag(Action<bool, string> check, Action<Func<bool>> pumpUntil)
+    {
+        Console.WriteLine("== a session OLE drop onto a strip still loads the Composer after a tab drag");
+        using var rig = new Rig();
+        var dropped = new List<PanelId>();
+        var drop = new SessionDrop(rig.Registry, (id, _) => dropped.Add(id));
+        rig.Host.StripCreated += (_, strip) => drop.Attach(strip);
+        rig.Form.Show();
+        pumpUntil(() => rig.Grid.Width > 0);
+        var right = StripOf(rig, PanelId.Composer)!;
+        var composer = rig.Registry.PageOf(PanelId.Composer);
+
+        PressAndDrag(right, right.TabPages.IndexOf(composer), pumpUntil);
+        DragOver(right, BeforeTab(right, 0), pumpUntil);
+        ReleaseAt(right, BeforeTab(right, 0), pumpUntil);
+        check(right.TabPages[0] == composer, "setup: the Composer was dragged to the front");
+
+        var session = new Session { Request = new HttpRequestData { Method = "GET", Url = new Uri("http://example.test/after-drag") } };
+        DropOn(right, right.TabPages.IndexOf(composer), session);
+        check(right.AllowDrop && dropped.SequenceEqual([PanelId.Composer]), "a session dropped on the Composer tab still reaches it");
+    }
+
+    private static void DragOutsideFloats(Action<bool, string> check, Action<Func<bool>> pumpUntil)
+    {
+        Console.WriteLine("== a tab dropped outside the main window floats there; a floating window refuses tab drops");
+        using var rig = new Rig();
+        rig.Form.Show();
+        pumpUntil(() => rig.Grid.Width > 0);
+        var right = StripOf(rig, PanelId.Log)!;
+        var outside = new Point(rig.Form.Bounds.Right + 80, rig.Form.Bounds.Top + 120);
+
+        PressAndDrag(right, right.TabPages.IndexOf(rig.Registry.PageOf(PanelId.Log)), pumpUntil);
+        DragOver(right, outside, pumpUntil);
+        check(right.DropIndex == -1 && !right.IsDropTarget, "outside the window no strip is marked");
+        ReleaseAt(right, outside, pumpUntil);
+        var window = rig.Host.FloatingWindow(PanelId.Log);
+        check(rig.Host.IsFloating(PanelId.Log) && window is { Visible: true }, "the Log floats in a window of its own");
+        if (window is null) return;
+        var screens = Screen.AllScreens.Select(screen => screen.WorkingArea).ToArray();
+        check(!screens.Any(area => area.Contains(outside)) || window.Location == outside, $"at the drop point ({window.Location} vs {outside})");
+
+        var before = Order(rig, DockArea.Right);
+        var composer = rig.Registry.PageOf(PanelId.Composer);
+        var onWindow = window.Strip.PointToScreen(new Point(window.Strip.GetTabRect(0).Right + 20, window.Strip.GetTabRect(0).Y + 4));
+        PressAndDrag(right, right.TabPages.IndexOf(composer), pumpUntil);
+        DragOver(right, onWindow, pumpUntil);
+        check(window.Strip.DropIndex == -1 && !window.Strip.IsDropTarget, "a floating window's strip shows no marker");
+        ReleaseAt(right, onWindow, pumpUntil);
+        check(composer.Parent == right && Order(rig, DockArea.Right).SequenceEqual(before) && rig.Host.FloatingWindow(PanelId.Log) == window,
+            "and dropping on it moves nothing");
+    }
+
+    private static void DragFloatingTabDocks(Action<bool, string> check, Action<Func<bool>> pumpUntil)
+    {
+        Console.WriteLine("== dragging a floating window's tab onto a docked strip docks it there and closes the window");
+        using var rig = new Rig();
+        rig.Form.Show();
+        pumpUntil(() => rig.Grid.Width > 0);
+        rig.Host.FloatPanel(PanelId.Log, new Point(300, 300));
+        PumpFor(pumpUntil, 150);
+        var window = rig.Host.FloatingWindow(PanelId.Log);
+        var right = StripOf(rig, PanelId.Composer)!;
+        check(window is not null, "setup: the Log floats");
+        if (window is null) return;
+
+        PressAndDrag(window.Strip, 0, pumpUntil);
+        DragOver(window.Strip, BeforeTab(right, 1), pumpUntil);
+        check(right.DropIndex == 1, $"the marker sits before the right strip's second tab (index {right.DropIndex})");
+        ReleaseAt(window.Strip, BeforeTab(right, 1), pumpUntil);
+        pumpUntil(() => window.IsDisposed);
+        check(!rig.Host.IsFloating(PanelId.Log) && Order(rig, DockArea.Right)[1] == PanelId.Log, $"the Log docks second on the right ({string.Join(", ", Order(rig, DockArea.Right))})");
+        check(window.IsDisposed && rig.Host.FloatingWindow(PanelId.Log) is null, "and its window closes");
+    }
+
+    private static void DragOntoAutoHiddenArea(Action<bool, string> check, Action<Func<bool>> pumpUntil)
+    {
+        Console.WriteLine("== a tab dropped on an auto-hidden area's strip joins that area, which stays auto-hidden");
+        using var rig = new Rig();
+        rig.Form.Show();
+        pumpUntil(() => rig.Grid.Width > 0);
+        rig.Host.MoveTo(PanelId.Log, DockArea.Bottom);
+        rig.Host.SetAutoHidden(DockArea.Bottom, true);
+        PumpFor(pumpUntil, 100);
+        var right = StripOf(rig, PanelId.Composer)!;
+        var strip = rig.Host.AutoHideStripOf(DockArea.Bottom);
+        var item = strip.ItemBounds(PanelId.Log);
+        var onStrip = strip.PointToScreen(new Point(item.Right + 30, item.Y + item.Height / 2));
+
+        PressAndDrag(right, right.TabPages.IndexOf(rig.Registry.PageOf(PanelId.Composer)), pumpUntil);
+        DragOver(right, onStrip, pumpUntil);
+        check(strip.IsDropTarget && right.DropIndex == -1, "the auto-hidden area's strip is outlined as the target");
+        ReleaseAt(right, onStrip, pumpUntil);
+        check(!strip.IsDropTarget, "and the outline goes with the drop");
+        check(Order(rig, DockArea.Bottom).SequenceEqual([PanelId.Log, PanelId.Composer]) && rig.Host.IsAutoHidden(DockArea.Bottom),
+            $"the Composer joins the auto-hidden Bottom ({string.Join(", ", Order(rig, DockArea.Bottom))})");
+        check(strip.Panels.Select(panel => panel.Id).SequenceEqual([PanelId.Log, PanelId.Composer]), "and is named on its strip");
+    }
+
+    /// <summary>
+    /// Copies the screen mid-drag, with the marker on the Bottom strip, into the directory named by
+    /// PIPER_UI_SCREENSHOTS for a visual review, in both themes. Not a check: nothing is asserted.
+    /// </summary>
+    private static void DragScreenshots(Action<Func<bool>> pumpUntil)
+    {
+        if (Environment.GetEnvironmentVariable("PIPER_UI_SCREENSHOTS") is not { Length: > 0 } directory) return;
+        Console.WriteLine($"== screenshots of a tab drag into {directory}");
+        var wasLight = Palette.IsLightMode;
+        try
+        {
+            foreach (var light in new[] { false, true })
+            {
+                if (Palette.IsLightMode != light) Palette.ToggleMode();
+                using var rig = new Rig();
+                rig.Host.MoveTo(PanelId.Composer, DockArea.Bottom);
+                rig.Host.MoveTo(PanelId.AutoResponder, DockArea.Bottom);
+                rig.Host.MoveTo(PanelId.Filters, DockArea.Bottom);
+                rig.Host.ShowPanel(PanelId.Composer, PanelReveal.Explicit);
+                rig.Form.Show();
+                Palette.Apply(rig.Form);
+                rig.Host.ApplyTheme();
+                pumpUntil(() => rig.Grid.Width > 0);
+                rig.Form.TopMost = true;
+                PumpFor(pumpUntil, 300);
+                var right = StripOf(rig, PanelId.Log)!;
+                var bottom = StripOf(rig, PanelId.Composer)!;
+                PressAndDrag(right, right.TabPages.IndexOf(rig.Registry.PageOf(PanelId.Log)), pumpUntil);
+                // Between two unselected tabs, where the marker is not beside the selected tab's accent.
+                DragOver(right, BeforeTab(bottom, 2), pumpUntil);
+                PumpFor(pumpUntil, 200);
+                var client = rig.Form.RectangleToScreen(rig.Form.ClientRectangle);
+                using var bitmap = new Bitmap(client.Width, client.Height);
+                using (var graphics = Graphics.FromImage(bitmap)) graphics.CopyFromScreen(client.Location, Point.Empty, client.Size);
+                bitmap.Save(Path.Combine(directory, light ? "task-8-drag-marker-light.png" : "task-8-drag-marker.png"));
+                PostMessage(right.Handle, WmKeyDown, VkEscape, 0);
+                PumpFor(pumpUntil, 60);
+            }
+        }
+        finally
+        {
+            if (Palette.IsLightMode != wasLight) Palette.ToggleMode();
+        }
     }
 
     private const int WmLButtonDown = 0x0201;

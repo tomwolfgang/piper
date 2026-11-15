@@ -28,6 +28,7 @@ internal sealed class AutoHideStrip : Control
     private Rectangle[] _items = [];
     private int _hovered = -1;
     private PanelId? _open;
+    private bool _dropTarget;
 
     public AutoHideStrip(DockArea edge)
     {
@@ -58,6 +59,19 @@ internal sealed class AutoHideStrip : Control
     public event EventHandler<PanelId>? PanelDragHover;
 
     public DockArea Edge => _edge;
+
+    /// <summary>True while a dragged panel tab is over this strip and would join its area; outlined in the accent colour.</summary>
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    internal bool IsDropTarget
+    {
+        get => _dropTarget;
+        set
+        {
+            if (_dropTarget == value) return;
+            _dropTarget = value;
+            Invalidate();
+        }
+    }
 
     public bool IsVertical => _edge != DockArea.Bottom;
 
@@ -201,6 +215,10 @@ internal sealed class AutoHideStrip : Control
             case DockArea.Right: g.DrawLine(edge, 0, 0, 0, Height); break;
             default: g.DrawLine(edge, 0, 0, Width, 0); break;
         }
+
+        if (!_dropTarget) return;
+        using var outline = new Pen(Palette.Accent, MarkThickness) { Alignment = PenAlignment.Inset };
+        g.DrawRectangle(outline, 0, 0, Width - 1, Height - 1);
     }
 
     protected override AccessibleObject CreateAccessibilityInstance() => new StripAccessibleObject(this);

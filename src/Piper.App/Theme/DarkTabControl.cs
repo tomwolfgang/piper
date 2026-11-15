@@ -16,6 +16,12 @@ internal sealed class DarkTabControl : TabControl
 {
     private readonly HashSet<TabPage> _checkedTabs = [];
 
+    /// <summary>The tab the left button went down on, until the mouse leaves the drag threshold or the button comes up; -1 otherwise.</summary>
+    private int _pressIndex = -1;
+    private Point _pressPoint;
+    private int _dropIndex = -1;
+    private bool _dropTarget;
+
     public DarkTabControl()
     {
         SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint
@@ -45,8 +51,9 @@ internal sealed class DarkTabControl : TabControl
         g.Clear(Palette.Background);
 
         var stripHeight = TabCount > 0 ? GetTabRect(0).Bottom : ItemSize.Height;
+        var stripColor = _dropTarget ? Tint(Palette.SurfaceAlt) : Palette.SurfaceAlt;
 
-        using (var strip = new SolidBrush(Palette.SurfaceAlt))
+        using (var strip = new SolidBrush(stripColor))
             g.FillRectangle(strip, new Rectangle(0, 0, Width, stripHeight));
 
         for (var i = 0; i < TabCount; i++)
@@ -54,7 +61,7 @@ internal sealed class DarkTabControl : TabControl
             var bounds = GetTabRect(i);
             var selected = i == SelectedIndex;
 
-            using (var face = new SolidBrush(selected ? Palette.Background : Palette.SurfaceAlt))
+            using (var face = new SolidBrush(selected ? Palette.Background : stripColor))
                 g.FillRectangle(face, bounds);
 
             if (selected)
@@ -81,8 +88,14 @@ internal sealed class DarkTabControl : TabControl
                 TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
         }
 
-        using (var edge = new Pen(Palette.Border))
+        using (var edge = new Pen(_dropTarget ? Palette.Accent : Palette.Border))
             g.DrawLine(edge, 0, stripHeight, Width, stripHeight);
+
+        if (!_dropTarget) return;
+        // The outline shows in the margin the pages leave; the pages themselves are child windows.
+        using (var outline = new Pen(Palette.Accent))
+            g.DrawRectangle(outline, 0, 0, Width - 1, Height - 1);
+        DrawDropMarker(g);
     }
 
     protected override void OnSelectedIndexChanged(EventArgs e)
@@ -127,6 +140,114 @@ internal sealed class DarkTabControl : TabControl
     }
 
     internal bool IsTabChecked(TabPage tab) => _checkedTabs.Contains(tab);
+
+    /// <summary>The gap a dragged tab would land in, from 0 (before the first tab) to <see cref="TabControl.TabCount"/>, or -1.</summary>
+    internal int DropIndex => _dropIndex;
+
+    /// <summary>True while a dragged tab is over this strip and would land on it.</summary>
+    internal bool IsDropTarget => _dropTarget;
+
+    /// <summary>
+    /// Marks this strip as where a dragged tab would land, with the insertion marker in gap
+    /// <paramref name="index"/>, or clears both. Only what changed is repainted: the whole strip when
+    /// the outline comes or goes (its pages are child windows and are left alone), otherwise just the
+    /// old and new marker.
+    /// </summary>
+    internal void SetDropTarget(bool target, int index)
+    {
+        if (!target || TabCount == 0) index = -1;
+        else index = Math.Clamp(index, 0, TabCount);
+        if (target == _dropTarget && index == _dropIndex) return;
+
+        var outlineChanged = target != _dropTarget;
+        var oldMarker = MarkerBounds(_dropIndex);
+        _dropTarget = target;
+        _dropIndex = index;
+        if (IsDisposed || !IsHandleCreated) return;
+        if (outlineChanged)
+        {
+            Invalidate();
+            return;
+        }
+
+        if (!oldMarker.IsEmpty) Invalidate(oldMarker);
+        if (MarkerBounds(index) is { IsEmpty: false } marker) Invalidate(marker);
+    }
+
+    private const int MarkerWidth = 2;
+    private const int MarkerSerif = 3;
+
+    /// <summary>The insertion marker's area for a gap: a 2 px bar the height of the tabs with short caps, or empty.</summary>
+    private Rectangle MarkerBounds(int index)
+    {
+        if (index < 0 || TabCount == 0) return Rectangle.Empty;
+        var tab = GetTabRect(Math.Min(index, TabCount - 1));
+        var x = index < TabCount ? tab.Left : tab.Right;
+        x = Math.Clamp(x, MarkerSerif, Math.Max(MarkerSerif, Width - MarkerSerif));
+        return new Rectangle(x - MarkerSerif, tab.Top, MarkerSerif * 2, tab.Height);
+    }
+
+    private void DrawDropMarker(Graphics g)
+    {
+        var bounds = MarkerBounds(_dropIndex);
+        if (bounds.IsEmpty) return;
+        var x = bounds.Left + MarkerSerif - MarkerWidth / 2;
+        using var accent = new SolidBrush(Palette.Accent);
+        g.FillRectangle(accent, new Rectangle(x, bounds.Top, MarkerWidth, bounds.Height));
+        // Short caps top and bottom, so the marker reads as an insertion point, not a separator.
+        g.FillRectangle(accent, new Rectangle(bounds.Left, bounds.Top, bounds.Width, MarkerWidth));
+        g.FillRectangle(accent, new Rectangle(bounds.Left, bounds.Bottom - MarkerWidth, bounds.Width, MarkerWidth));
+    }
+
+    /// <summary>The strip's colour lifted a little towards the accent, for the strip a dragged tab would land on.</summary>
+    private static Color Tint(Color color)
+    {
+        const int Weight = 28; // of 255
+        static int Mix(int from, int to) => from + (to - from) * Weight / 255;
+        var accent = Palette.Accent;
+        return Color.FromArgb(Mix(color.R, accent.R), Mix(color.G, accent.G), Mix(color.B, accent.B));
+    }
+
+    /// <summary>
+    /// Raised once the mouse has moved past <see cref="SystemInformation.DragSize"/> with the left button
+    /// held down on a tab, with that tab's index and the pointer's screen position.
+    /// </summary>
+    public event EventHandler<(int Index, Point Screen)>? TabDragStarted;
+
+    protected override void OnMouseDown(MouseEventArgs e)
+    {
+        base.OnMouseDown(e);
+        // A double-click is not the start of a drag: on a floating window's tab it docks the panel.
+        _pressIndex = e.Button == MouseButtons.Left && e.Clicks == 1 ? TabIndexAt(e.Location) : -1;
+        _pressPoint = e.Location;
+    }
+
+    protected override void OnMouseMove(MouseEventArgs e)
+    {
+        base.OnMouseMove(e);
+        // The press, not e.Button, says the left button is down: a press ends on mouse-up or when the
+        // capture goes, and e.Button is read from the keyboard state rather than from the message.
+        if (_pressIndex < 0 || _pressIndex >= TabCount) return;
+        var size = SystemInformation.DragSize;
+        var threshold = new Rectangle(_pressPoint.X - size.Width / 2, _pressPoint.Y - size.Height / 2, size.Width, size.Height);
+        if (threshold.Contains(e.Location)) return;
+
+        var index = _pressIndex;
+        _pressIndex = -1;
+        TabDragStarted?.Invoke(this, (index, PointToScreen(e.Location)));
+    }
+
+    protected override void OnMouseUp(MouseEventArgs e)
+    {
+        _pressIndex = -1;
+        base.OnMouseUp(e);
+    }
+
+    protected override void OnMouseCaptureChanged(EventArgs e)
+    {
+        if (!Capture) _pressIndex = -1;
+        base.OnMouseCaptureChanged(e);
+    }
 
     /// <summary>
     /// Raised with a tab's index when the user asks for that tab's menu: by right-clicking it, or with
