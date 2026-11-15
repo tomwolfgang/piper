@@ -25,6 +25,7 @@ internal sealed class PanelHost : UserControl
     private readonly Dictionary<DockArea, DarkTabControl> _strips = [];
     private readonly HashSet<PanelId> _checked = [];
     private readonly ContextMenuStrip _tabMenu = new();
+    private readonly ContextMenuStrip _areaMenu = new();
     private readonly Dictionary<PanelId, FloatingPanelForm> _floating = [];
     private readonly Dictionary<DockArea, AutoHideStrip> _autoHideStrips = [];
     private readonly Dictionary<DockArea, Flyout> _flyouts = [];
@@ -77,6 +78,8 @@ internal sealed class PanelHost : UserControl
                 Panels = () => _registry.Contents,
             };
             flyout.Strip.TabMenuRequested += OnTabMenuRequested;
+            flyout.MinimumExtentOf = page => MinimumExtent(area, page);
+            WireHeader(area, flyout);
             flyout.Closed += OnFlyoutClosed;
             flyout.Resized += (_, _) => LayoutChanged?.Invoke(this, EventArgs.Empty);
             _flyouts[area] = flyout;
@@ -194,6 +197,9 @@ internal sealed class PanelHost : UserControl
 
     /// <summary>The flyout an auto-hidden area opens; for tests.</summary>
     internal Flyout FlyoutOf(DockArea area) => _flyouts[area];
+
+    /// <summary>The menu a flyout header's panels button opens, exposed so tests can see and close it.</summary>
+    internal ContextMenuStrip AreaMenu => _areaMenu;
 
     public bool IsHidden(PanelId id) => _layout.IsHidden(id);
 
@@ -356,8 +362,15 @@ internal sealed class PanelHost : UserControl
 
         foreach (var id in AllPanels) Retheme(id);
         foreach (var strip in _autoHideStrips.Values) strip.Invalidate();
-        foreach (var flyout in _flyouts.Values) flyout.Invalidate(true);
+        foreach (var flyout in _flyouts.Values)
+        {
+            // A zoom changes the page's minimum size.
+            if (flyout.IsOpen) flyout.Frame = _outer.Bounds;
+            flyout.Invalidate(true);
+        }
         Palette.Apply(_tabMenu);
+        Palette.Apply(_areaMenu);
+        UpdateBottomMinimum();
     }
 
     /// <summary>The tab menu's items for a panel, built fresh each time it opens.</summary>
@@ -387,6 +400,7 @@ internal sealed class PanelHost : UserControl
     protected override void OnLayout(LayoutEventArgs e)
     {
         base.OnLayout(e);
+        UpdateBottomMinimum();
         // An open flyout keeps to the area the split fills, whatever the window's size.
         foreach (var flyout in _flyouts.Values)
             if (flyout.IsOpen) flyout.Frame = _outer.Bounds;
@@ -409,6 +423,7 @@ internal sealed class PanelHost : UserControl
             foreach (var window in _floating.Values.ToArray()) window.Dispose();
             _floating.Clear();
             _tabMenu.Dispose();
+            _areaMenu.Dispose();
         }
 
         base.Dispose(disposing);
@@ -418,6 +433,85 @@ internal sealed class PanelHost : UserControl
     private int LeftDistance() => (int)Math.Round(_layout.LeftFraction * _inner.Width);
 
     private int BottomDistance() => _outer.Height - (int)Math.Round(_layout.BottomFraction * _outer.Height) - _outer.SplitterWidth;
+
+    /// <summary>Scales a size at 96 DPI and 100% zoom to this control's DPI and the current zoom.</summary>
+    private int Scaled(int logical) => (int)Math.Round(LogicalToDeviceUnits(logical) * Palette.ZoomMultiplier);
+
+    /// <summary>The least size across a flyout's edge its page needs: a width for a side flyout, a height for the Bottom one.</summary>
+    private int MinimumExtent(DockArea area, TabPage page)
+    {
+        if (_registry.IdOf(page) is not { } id) return 0;
+        return Scaled(area == DockArea.Bottom ? PanelLayout.MinBottomHeight([id]) : PanelLayout.MinFlyoutWidth(id));
+    }
+
+    /// <summary>
+    /// Keeps the Bottom area tall enough for the panels in it, tab row included, as far as the window
+    /// allows, so the split never squeezes it below that, by default or by its splitter. The splitter
+    /// is only moved when it already breaks the new minimum.
+    /// </summary>
+    private void UpdateBottomMinimum()
+    {
+        var bottom = _strips[DockArea.Bottom];
+        var content = bottom.TabCount == 0 ? 0 : Scaled(PanelLayout.MinBottomHeight(_layout.DockedIn(DockArea.Bottom)));
+        var wanted = content == 0 ? 0 : content + bottom.ItemSize.Height + LogicalToDeviceUnits(6);
+        var room = Math.Max(_outer.Height - _outer.Panel1MinSize - _outer.SplitterWidth, 0);
+        var minimum = Math.Min(wanted, room);
+        if (_outer.Panel2MinSize == minimum) return;
+        _outer.Panel2MinSize = minimum;
+        if (BothShown(_outer) && _outer.Height - _outer.SplitterDistance - _outer.SplitterWidth < minimum)
+            SetDistance(_outer, _outer.Height, _outer.Height - minimum - _outer.SplitterWidth);
+    }
+
+    /// <summary>
+    /// Gives a flyout's header its buttons: the panels button lists the area's panels, the pin docks the
+    /// area again, the close button hides the panel, and a right-click on the title opens its tab menu.
+    /// The pin and close act after the mouse message, as the flyout closes under them.
+    /// </summary>
+    private void WireHeader(DockArea area, Flyout flyout)
+    {
+        var header = flyout.Header;
+        header.PinClicked += (_, _) => AfterInput(() => SetAutoHidden(area, false));
+        header.CloseClicked += (_, _) =>
+        {
+            if (flyout.Page is { } page && _registry.IdOf(page) is { } id) AfterInput(() => HidePanel(id));
+        };
+        header.PanelsRequested += (_, screen) => ShowAreaMenu(area, flyout, screen);
+        header.MenuRequested += (_, screen) =>
+        {
+            if (flyout.Page is { } page && _registry.IdOf(page) is { } id) ShowTabMenu(id, screen);
+        };
+    }
+
+    private void AfterInput(Action action)
+    {
+        if (!IsHandleCreated || IsDisposed) return;
+        BeginInvoke(() =>
+        {
+            if (!IsDisposed && !_shuttingDown) action();
+        });
+    }
+
+    /// <summary>Lists the area's panels under the header's panels button; choosing one opens it in the flyout with the focus.</summary>
+    private void ShowAreaMenu(DockArea area, Flyout flyout, Point screen)
+    {
+        // The previous items are disposed only now, never from their own click handler.
+        foreach (var old in _areaMenu.Items.Cast<ToolStripItem>().ToArray()) old.Dispose();
+        var open = flyout.Page is { } page ? _registry.IdOf(page) : null;
+        _areaMenu.Items.AddRange(PanelMenus.AreaItems(this, _layout.DockedIn(area), open));
+        _areaMenu.Font = Palette.UiFont;
+        Palette.Apply(_areaMenu);
+        _areaMenu.Show(screen);
+    }
+
+    /// <summary>Opens a panel's tab menu at a screen point: from a flyout's header or a floating window's title bar.</summary>
+    private void ShowTabMenu(PanelId id, Point screen)
+    {
+        foreach (var old in _tabMenu.Items.Cast<ToolStripItem>().ToArray()) old.Dispose();
+        _tabMenu.Items.AddRange(TabMenuItems(id));
+        _tabMenu.Font = Palette.UiFont;
+        Palette.Apply(_tabMenu);
+        _tabMenu.Show(screen);
+    }
 
     private DarkTabControl NewStrip()
     {
@@ -508,6 +602,9 @@ internal sealed class PanelHost : UserControl
             window.Strip.TabMenuRequested += OnTabMenuRequested;
             window.Strip.TabDragStarted += OnTabDragStarted;
             window.DockRequested += (_, _) => DockPanel(id);
+            window.MenuRequested += (_, screen) => ShowTabMenu(id, screen);
+            window.CaptionDragging += (_, screen) => _drag.TrackWindow(id, window, screen);
+            window.CaptionDragEnded += (_, end) => _drag.EndWindow(window, end.Screen, end.Moved);
             window.FormClosed += (_, _) =>
             {
                 // The owner closing, or a shutdown, ends the window without a dock; forget it.
@@ -627,8 +724,17 @@ internal sealed class PanelHost : UserControl
         if (_fractionsPending || FindForm() is { WindowState: FormWindowState.Minimized }) return;
         if (BothShown(_inner) && Fits(_inner, _inner.Width) && Math.Abs(_inner.SplitterDistance - LeftDistance()) > 1)
             _layout.LeftFraction = (double)_inner.SplitterDistance / _inner.Width;
-        if (BothShown(_outer) && Fits(_outer, _outer.Height) && Math.Abs(_outer.SplitterDistance - BottomDistance()) > 1)
+        // Compared with where the fraction lands once the Bottom area's minimum has had its say, so a
+        // splitter that minimum holds up does not record a fraction the user never chose.
+        if (BothShown(_outer) && Fits(_outer, _outer.Height) && Math.Abs(_outer.SplitterDistance - Clamped(_outer, _outer.Height, BottomDistance())) > 1)
             _layout.BottomFraction = (double)(_outer.Height - _outer.SplitterDistance - _outer.SplitterWidth) / _outer.Height;
+    }
+
+    /// <summary>Where <see cref="SetDistance"/> would put a splitter asked for <paramref name="distance"/>.</summary>
+    private static int Clamped(SplitContainer split, int extent, int distance)
+    {
+        var max = extent - split.Panel2MinSize - split.SplitterWidth;
+        return max < split.Panel1MinSize ? distance : Math.Clamp(distance, split.Panel1MinSize, max);
     }
 
     private static bool Fits(SplitContainer split, int extent) =>

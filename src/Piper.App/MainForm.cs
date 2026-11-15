@@ -129,6 +129,7 @@ public sealed partial class MainForm : Form, IMessageFilter
             ScrollBars = ScrollBars.Both,
             Font = Palette.Mono,
             BorderStyle = BorderStyle.None,
+            PlaceholderText = Strings.Log.Empty,
         };
 
         _panels = new PanelRegistry(new Dictionary<PanelId, (Control Content, string Title)>

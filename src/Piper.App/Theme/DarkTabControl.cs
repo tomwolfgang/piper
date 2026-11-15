@@ -21,6 +21,7 @@ internal sealed class DarkTabControl : TabControl
     private Point _pressPoint;
     private int _dropIndex = -1;
     private bool _dropTarget;
+    private bool _showTabs = true;
 
     public DarkTabControl()
     {
@@ -45,10 +46,32 @@ internal sealed class DarkTabControl : TabControl
     /// </summary>
     private void ResizeTabStrip() => ItemSize = new Size(0, Font.Height + 11);
 
+    /// <summary>
+    /// False hides the tab row: the selected page fills the whole control. A window or flyout that
+    /// holds a single panel and names it elsewhere sets this, so the name is not shown twice. The tabs
+    /// still exist for the code that finds a panel by its tab, but nothing can click them.
+    /// </summary>
+    [System.ComponentModel.DefaultValue(true)]
+    public bool ShowTabs
+    {
+        get => _showTabs;
+        set
+        {
+            if (_showTabs == value) return;
+            _showTabs = value;
+            // The display rectangle is cached until a resize; this one moves the page.
+            OnResize(EventArgs.Empty);
+            Invalidate();
+        }
+    }
+
+    private const int TcmAdjustRect = 0x1300 + 40;
+
     protected override void OnPaint(PaintEventArgs e)
     {
         var g = e.Graphics;
         g.Clear(Palette.Background);
+        if (!_showTabs) return;
 
         var stripHeight = TabCount > 0 ? GetTabRect(0).Bottom : ItemSize.Height;
         var stripColor = _dropTarget ? Tint(Palette.SurfaceAlt) : Palette.SurfaceAlt;
@@ -64,7 +87,8 @@ internal sealed class DarkTabControl : TabControl
             using (var face = new SolidBrush(selected ? Palette.Background : stripColor))
                 g.FillRectangle(face, bounds);
 
-            if (selected)
+            // While a tab is dragged over the strip the insertion marker is the only accent on it.
+            if (selected && !_dropTarget)
             {
                 using var accent = new SolidBrush(Palette.Accent);
                 g.FillRectangle(accent, new Rectangle(bounds.X, bounds.Y, bounds.Width, 2));
@@ -93,8 +117,14 @@ internal sealed class DarkTabControl : TabControl
 
         if (!_dropTarget) return;
         // The outline shows in the margin the pages leave; the pages themselves are child windows.
-        using (var outline = new Pen(Palette.Accent))
-            g.DrawRectangle(outline, 0, 0, Width - 1, Height - 1);
+        var outline = DropOutlineWidth;
+        using (var accent = new SolidBrush(Palette.Accent))
+        {
+            g.FillRectangle(accent, 0, 0, Width, outline);
+            g.FillRectangle(accent, 0, Height - outline, Width, outline);
+            g.FillRectangle(accent, 0, 0, outline, Height);
+            g.FillRectangle(accent, Width - outline, 0, outline, Height);
+        }
         DrawDropMarker(g);
     }
 
@@ -174,35 +204,51 @@ internal sealed class DarkTabControl : TabControl
         if (MarkerBounds(index) is { IsEmpty: false } marker) Invalidate(marker);
     }
 
-    private const int MarkerWidth = 2;
-    private const int MarkerSerif = 3;
+    /// <summary>The insertion marker's bar, at 96 DPI; its caps are <see cref="MarkerCap"/> wide.</summary>
+    private int MarkerWidth => LogicalToDeviceUnits(3);
+    private int MarkerCap => LogicalToDeviceUnits(9);
+    /// <summary>The ring of background drawn round the marker, so it stands apart from a neighbouring accent.</summary>
+    private const int MarkerHalo = 1;
+    private int DropOutlineWidth => LogicalToDeviceUnits(2);
 
-    /// <summary>The insertion marker's area for a gap: a 2 px bar the height of the tabs with short caps, or empty.</summary>
+    /// <summary>The insertion marker's area for a gap, halo included: a bar the height of the tabs with caps, or empty.</summary>
     private Rectangle MarkerBounds(int index)
     {
         if (index < 0 || TabCount == 0) return Rectangle.Empty;
         var tab = GetTabRect(Math.Min(index, TabCount - 1));
         var x = index < TabCount ? tab.Left : tab.Right;
-        x = Math.Clamp(x, MarkerSerif, Math.Max(MarkerSerif, Width - MarkerSerif));
-        return new Rectangle(x - MarkerSerif, tab.Top, MarkerSerif * 2, tab.Height);
+        var half = MarkerCap / 2 + MarkerHalo;
+        x = Math.Clamp(x, half, Math.Max(half, Width - half - 1));
+        return new Rectangle(x - half, tab.Top, half * 2 + 1, tab.Height);
     }
 
     private void DrawDropMarker(Graphics g)
     {
         var bounds = MarkerBounds(_dropIndex);
         if (bounds.IsEmpty) return;
-        var x = bounds.Left + MarkerSerif - MarkerWidth / 2;
+        var centre = bounds.Left + bounds.Width / 2;
+        var bar = MarkerWidth;
+        var cap = MarkerCap;
+        var top = bounds.Top + MarkerHalo;
+        var bottom = bounds.Bottom - MarkerHalo;
+        // A bar with caps top and bottom, so the marker reads as an insertion point, not a separator.
+        Rectangle[] parts =
+        [
+            new(centre - bar / 2, top, bar, bottom - top),
+            new(centre - cap / 2, top, cap, bar),
+            new(centre - cap / 2, bottom - bar, cap, bar),
+        ];
+        using (var halo = new SolidBrush(Palette.Background))
+            foreach (var part in parts)
+                g.FillRectangle(halo, Rectangle.Inflate(part, MarkerHalo, MarkerHalo));
         using var accent = new SolidBrush(Palette.Accent);
-        g.FillRectangle(accent, new Rectangle(x, bounds.Top, MarkerWidth, bounds.Height));
-        // Short caps top and bottom, so the marker reads as an insertion point, not a separator.
-        g.FillRectangle(accent, new Rectangle(bounds.Left, bounds.Top, bounds.Width, MarkerWidth));
-        g.FillRectangle(accent, new Rectangle(bounds.Left, bounds.Bottom - MarkerWidth, bounds.Width, MarkerWidth));
+        foreach (var part in parts) g.FillRectangle(accent, part);
     }
 
-    /// <summary>The strip's colour lifted a little towards the accent, for the strip a dragged tab would land on.</summary>
+    /// <summary>The strip's colour lifted towards the accent, for the strip a dragged tab would land on.</summary>
     private static Color Tint(Color color)
     {
-        const int Weight = 28; // of 255
+        const int Weight = 56; // of 255
         static int Mix(int from, int to) => from + (to - from) * Weight / 255;
         var accent = Palette.Accent;
         return Color.FromArgb(Mix(color.R, accent.R), Mix(color.G, accent.G), Mix(color.B, accent.B));
@@ -272,6 +318,13 @@ internal sealed class DarkTabControl : TabControl
     /// </summary>
     protected override void WndProc(ref Message m)
     {
+        // With the tabs hidden the page's rectangle is the whole control, both ways round.
+        if (m.Msg == TcmAdjustRect && !_showTabs)
+        {
+            m.Result = 0;
+            return;
+        }
+
         if (m.Msg == WmContextMenu && m.WParam == Handle && TabMenuRequested is { } handler)
         {
             var index = m.LParam == -1 ? SelectedIndex : TabIndexAt(PointToClient(ScreenPoint(m.LParam)));

@@ -6,11 +6,14 @@ using Piper.App.Theme;
 namespace Piper.App.Layout;
 
 /// <summary>
-/// A window holding one floating panel, in a one-page strip of its own so its tab still has the tab
-/// menu and still takes dropped sessions. It is owned by the main window, so it minimises with Piper
-/// and stays above it, and it is not a tool window, so it shows in Alt+Tab. The page is only lent to
-/// it: whenever the window closes or is disposed the page is taken out first and goes back to the
-/// <see cref="PanelRegistry"/>, which alone disposes panels.
+/// A window holding one floating panel, in a one-page strip of its own with the tab row hidden, so the
+/// strip still takes dropped sessions while the title bar alone names the panel. The title bar stands in
+/// for the tab: right-click it for the tab menu, double-click it to dock, or drag it over an area's tabs
+/// to dock the panel there. It is owned by the main window, so it minimises with Piper and stays above
+/// it, and it is not a tool window, so it shows in Alt+Tab; it has no icon and no minimise or maximise
+/// box, as a tool window would not. The page is only lent to it: whenever the window closes or is
+/// disposed the page is taken out first and goes back to the <see cref="PanelRegistry"/>, which alone
+/// disposes panels.
 /// </summary>
 internal sealed class FloatingPanelForm : Form
 {
@@ -34,25 +37,48 @@ internal sealed class FloatingPanelForm : Form
 
         Owner = owner;
         ShowInTaskbar = false;
+        // Sizable, not SizableToolWindow: a tool window's WS_EX_TOOLWINDOW takes it out of Alt+Tab.
         FormBorderStyle = FormBorderStyle.Sizable;
+        MinimizeBox = false;
+        MaximizeBox = false;
+        ShowIcon = false;
         StartPosition = FormStartPosition.Manual;
         MinimumSize = new Size(PanelLayout.MinFloatingWidth, PanelLayout.MinFloatingHeight);
+        // Still set: Alt+Tab shows it even though the title bar does not.
         Icon = owner.Icon;
         Text = page.Text;
         KeyPreview = true;
         KeyDown += keyDown;
 
-        Strip = new DarkTabControl { Dock = DockStyle.Fill, Font = Palette.UiFont };
+        Strip = new DarkTabControl { Dock = DockStyle.Fill, Font = Palette.UiFont, ShowTabs = false };
         Strip.TabPages.Add(page);
-        Strip.MouseDoubleClick += OnStripDoubleClick;
         Controls.Add(Strip);
     }
 
     /// <summary>
     /// Raised when the user asks for the panel to go back to its area: by closing the window, by
-    /// double-clicking its tab. Not raised when the owner closes or while Piper shuts down.
+    /// double-clicking its title bar. Not raised when the owner closes or while Piper shuts down.
     /// </summary>
     public event EventHandler? DockRequested;
+
+    /// <summary>Raised with the screen point of a right-click on the title bar, for the panel's tab menu.</summary>
+    public event EventHandler<Point>? MenuRequested;
+
+    /// <summary>Raised with the pointer's screen position as the user drags the window by its title bar.</summary>
+    public event EventHandler<Point>? CaptionDragging;
+
+    /// <summary>
+    /// Raised when a drag by the title bar ends, with the pointer's screen position and whether the
+    /// window moved: Esc puts it back where it started, and that is not a drop.
+    /// </summary>
+    public event EventHandler<(Point Screen, bool Moved)>? CaptionDragEnded;
+
+    /// <summary>Where the pointer is; tests replace it, as they cannot run the system's move loop.</summary>
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    internal Func<Point> PointerPosition { get; set; } = () => Cursor.Position;
+
+    private Point _moveStart;
+    private bool _captionDragging;
 
     /// <summary>The window's one-page strip.</summary>
     public DarkTabControl Strip { get; }
@@ -109,6 +135,51 @@ internal sealed class FloatingPanelForm : Form
     protected override bool ProcessCmdKey(ref Message msg, Keys keyData) =>
         _processShortcut(keyData) || base.ProcessCmdKey(ref msg, keyData);
 
+    private const int WmNcLButtonDblClk = 0x00A3;
+    private const int WmNcRButtonUp = 0x00A5;
+    private const int WmMoving = 0x0216;
+    private const int WmEnterSizeMove = 0x0231;
+    private const int WmExitSizeMove = 0x0232;
+    private const int HtCaption = 2;
+
+    /// <summary>The title bar stands in for the hidden tab: double-click docks, right-click opens the tab menu, dragging can dock.</summary>
+    protected override void WndProc(ref Message m)
+    {
+        switch (m.Msg)
+        {
+            case WmNcLButtonDblClk when m.WParam == HtCaption:
+                // With no maximise box Windows would do nothing; docking closes this window, so not inside its own message.
+                BeginInvoke(() =>
+                {
+                    if (!_closed && !IsDisposed && !ShuttingDown) DockRequested?.Invoke(this, EventArgs.Empty);
+                });
+                return;
+            case WmNcRButtonUp when m.WParam == HtCaption:
+                // Instead of the system menu, which Alt+Space still opens.
+                MenuRequested?.Invoke(this, ScreenPoint(m.LParam));
+                return;
+            case WmEnterSizeMove:
+                _moveStart = Location;
+                _captionDragging = false;
+                break;
+            case WmMoving:
+                _captionDragging = true;
+                if (!ShuttingDown) CaptionDragging?.Invoke(this, PointerPosition());
+                break;
+            case WmExitSizeMove:
+                if (_captionDragging)
+                {
+                    _captionDragging = false;
+                    CaptionDragEnded?.Invoke(this, (PointerPosition(), Location != _moveStart));
+                }
+                break;
+        }
+
+        base.WndProc(ref m);
+    }
+
+    private static Point ScreenPoint(nint lParam) => new((short)(lParam & 0xFFFF), (short)((lParam >> 16) & 0xFFFF));
+
     protected override void OnFormClosed(FormClosedEventArgs e)
     {
         _closed = true;
@@ -130,15 +201,5 @@ internal sealed class FloatingPanelForm : Form
     private void ReleasePage()
     {
         if (_page.Parent == Strip) Strip.TabPages.Remove(_page);
-    }
-
-    private void OnStripDoubleClick(object? sender, MouseEventArgs e)
-    {
-        if (e.Button != MouseButtons.Left || Strip.TabIndexAt(e.Location) < 0) return;
-        // Docking closes this window, which must not happen inside its own strip's mouse handling.
-        BeginInvoke(() =>
-        {
-            if (!_closed && !IsDisposed && !ShuttingDown) DockRequested?.Invoke(this, EventArgs.Empty);
-        });
     }
 }

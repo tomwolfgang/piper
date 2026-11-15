@@ -8,8 +8,9 @@ namespace Piper.App.Layout;
 /// <summary>
 /// An auto-hidden area's panel, slid out over the neighbouring area as in Visual Studio. It is a child
 /// control at the top of the z-order, so nothing under it moves or reflows, and it has no animation or
-/// translucency. The page sits in a one-page strip of its own, so its tab keeps the tab menu and still
-/// takes dropped sessions. The page is only lent to it: closing or disposing hands it back.
+/// translucency. A <see cref="ToolWindowHeader"/> names the panel and carries its buttons; the page sits
+/// under it in a one-page strip with its tab row hidden, so the strip still takes dropped sessions. The
+/// page is only lent to it: closing or disposing hands it back.
 /// </summary>
 /// <remarks>
 /// It closes on a mouse-down outside it and its strip (watched by a message filter that exists only
@@ -56,8 +57,10 @@ internal sealed class Flyout : Control
         SetStyle(ControlStyles.Selectable, false);
         TabStop = false;
         Visible = false;
-        Strip = new DarkTabControl { Font = Palette.UiFont };
+        Strip = new DarkTabControl { Font = Palette.UiFont, ShowTabs = false };
+        Header = new ToolWindowHeader();
         Controls.Add(Strip);
+        Controls.Add(Header);
     }
 
     /// <summary>Raised after the flyout closes, with whether the focus was inside it.</summary>
@@ -66,8 +69,18 @@ internal sealed class Flyout : Control
     /// <summary>Raised once the user has finished dragging the inner edge.</summary>
     public event EventHandler? Resized;
 
-    /// <summary>The flyout's one-page strip.</summary>
+    /// <summary>The flyout's one-page strip, its tab row hidden under the header.</summary>
     public DarkTabControl Strip { get; }
+
+    /// <summary>The title bar above the page.</summary>
+    public ToolWindowHeader Header { get; }
+
+    /// <summary>
+    /// The least size across its edge, in pixels, the page needs to stay usable: its width for a side
+    /// flyout, its height for the Bottom one. The flyout keeps to it unless the frame itself is smaller.
+    /// </summary>
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    public Func<TabPage, int> MinimumExtentOf { get; set; } = _ => 0;
 
     /// <summary>The auto-hide strip that opens this flyout; a click on it is not a click outside.</summary>
     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
@@ -113,6 +126,7 @@ internal sealed class Flyout : Control
             _generation++;
             Strip.TabPages.Add(page);
             Page = page;
+            Header.Text = page.Text;
             _closeOnLeave = false;
             WatchWebViews();
             InstallFilter();
@@ -182,9 +196,16 @@ internal sealed class Flyout : Control
         return false;
     }
 
+    protected override void OnEnter(EventArgs e)
+    {
+        base.OnEnter(e);
+        Header.Active = true;
+    }
+
     protected override void OnLeave(EventArgs e)
     {
         base.OnLeave(e);
+        Header.Active = false;
         if (_closeOnLeave) CloseLater(requireNoFocus: true);
     }
 
@@ -199,7 +220,10 @@ internal sealed class Flyout : Control
             DockArea.Right => new Rectangle(inner.X + GripSize, inner.Y + 1, inner.Width - 1 - GripSize, inner.Height - 2),
             _ => new Rectangle(inner.X + 1, inner.Y + GripSize, inner.Width - 2, inner.Height - 1 - GripSize),
         };
-        Strip.Bounds = new Rectangle(inner.Location, new Size(Math.Max(inner.Width, 0), Math.Max(inner.Height, 0)));
+        var width = Math.Max(inner.Width, 0);
+        var header = Math.Min(Header.PreferredHeight, Math.Max(inner.Height, 0));
+        Header.Bounds = new Rectangle(inner.X, inner.Y, width, header);
+        Strip.Bounds = new Rectangle(inner.X, inner.Y + header, width, Math.Max(inner.Height - header, 0));
     }
 
     protected override void OnPaint(PaintEventArgs e)
@@ -301,20 +325,26 @@ internal sealed class Flyout : Control
         _ => new Rectangle(0, 0, Width, GripSize),
     };
 
-    /// <summary>Places the flyout along its edge of <see cref="Frame"/>, its size the stored fraction, never outside the frame.</summary>
+    /// <summary>
+    /// Places the flyout along its edge of <see cref="Frame"/>, its size the stored fraction but never
+    /// less than the page's minimum, and never outside the frame.
+    /// </summary>
     private void Reposition()
     {
         var frame = _frame;
         var fraction = PanelLayout.ClampFraction(_fraction(), PanelLayout.DefaultFlyoutFraction);
+        // The page's minimum plus the flyout's own border, grip and, for the Bottom one, its header.
+        var minimum = Page is { } page ? Math.Max(MinimumExtentOf(page), 0) : 0;
+        if (minimum > 0) minimum += 1 + GripSize + (_edge == DockArea.Bottom ? Header.PreferredHeight : 0);
         Rectangle target;
         if (_edge == DockArea.Bottom)
         {
-            var height = Math.Clamp((int)Math.Round(fraction * frame.Height), 0, Math.Max(frame.Height, 0));
+            var height = Math.Clamp(Math.Max((int)Math.Round(fraction * frame.Height), minimum), 0, Math.Max(frame.Height, 0));
             target = new Rectangle(frame.Left, frame.Bottom - height, Math.Max(frame.Width, 0), height);
         }
         else
         {
-            var width = Math.Clamp((int)Math.Round(fraction * frame.Width), 0, Math.Max(frame.Width, 0));
+            var width = Math.Clamp(Math.Max((int)Math.Round(fraction * frame.Width), minimum), 0, Math.Max(frame.Width, 0));
             var left = _edge == DockArea.Left ? frame.Left : frame.Right - width;
             target = new Rectangle(left, frame.Top, width, Math.Max(frame.Height, 0));
         }

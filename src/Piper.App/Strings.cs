@@ -139,6 +139,11 @@ internal static class Strings
 
         /// <summary>The sessions list's name in View > Panels.</summary>
         public static string Sessions => I18n.T("panels.sessions");
+
+        /// <summary>The tooltips of the buttons on an auto-hidden panel's flyout header.</summary>
+        public static string HeaderPanels => I18n.T("panels.headerPanels");
+        public static string HeaderPin => I18n.T("panels.headerPin");
+        public static string HeaderClose => I18n.T("panels.headerClose");
     }
 
     public static class Menu
@@ -364,6 +369,8 @@ internal static class Strings
     /// <summary>Lines written to the Log tab.</summary>
     public static class Log
     {
+        /// <summary>Shown in the empty Log panel.</summary>
+        public static string Empty => I18n.T("log.empty");
         public static string AnalyticsOn => I18n.T("log.analyticsOn");
         public static string AnalyticsOff => I18n.T("log.analyticsOff");
         public static string AnalyticsOffIdentifierKept => I18n.T("log.analyticsOffIdentifierKept");

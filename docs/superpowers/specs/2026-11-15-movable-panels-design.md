@@ -60,7 +60,8 @@ area or one floating window.
 
 **Default layout** (today's): Left holds `sessions`. Right holds `inspectors`, `composer`, `filters`,
 `autoresponder` and `log`, with Inspectors selected. Bottom is empty. The Left/Right split is 55%,
-and the Bottom area takes 30% of the height once something is in it.
+and the Bottom area takes 35% of the height once something is in it, but never less than its
+panels need: 260 px of page for the Inspectors or the Composer, 120 px otherwise, scaled.
 
 ```
 +---------------------------+------------------------------------+
@@ -98,13 +99,19 @@ An empty area collapses its side of the split.
 
 ### Floating windows
 
-- One panel per window. Its strip refuses tab drops but still accepts session drops.
+- One panel per window. Its strip hides its tab row, so the title bar alone names the panel; it
+  refuses tab drops but still accepts session drops.
 - Each window is owned by the main window. It minimises with Piper, stays above it and shows in
   Alt+Tab (it is not a tool window). `Palette.ApplyWindowChrome` is called on it for the dark title
   bar.
-- The title is the panel's name.
-- To dock it again, close it, double-click its tab, or choose **Dock**. All three put the panel back
-  in the area it came from.
+- The title is the panel's name. The window has no icon and no minimise or maximise box. It keeps
+  the `Sizable` border rather than `SizableToolWindow`, whose `WS_EX_TOOLWINDOW` would take it out
+  of Alt+Tab.
+- The title bar stands in for the tab: right-click it for the tab menu, and drag it over an area's
+  tabs or an auto-hidden area's strip to dock the panel there (Esc, which puts the window back,
+  docks nothing).
+- To dock it again, close it, double-click its title bar, or choose **Dock**. All three put the
+  panel back in the area it came from.
 - **Always on top** sets `TopMost`.
 - **Keyboard:** a floating window passes `ProcessCmdKey` and `KeyDown` to the same dispatcher
   MainForm uses, so menu accelerators, Ctrl+R, Ctrl+X and the zoom keys work there too. The
@@ -132,8 +139,16 @@ An empty area collapses its side of the split.
   - focus moving into a WebView2 outside the flyout (needed because clicks inside WebView2 never
     reach the message filter);
   - Esc while it has focus.
+- The flyout has a title bar, as a Visual Studio tool window does: the panel's name, a button
+  listing the area's panels, a pin that docks the area again and a close button that hides the
+  panel. It is accent-coloured while the focus is in the flyout, and right-clicking it opens the
+  tab menu. The flyout's one-tab row is hidden.
 - The flyout's inner edge can be dragged to resize it. The size is stored as a fraction of the
-  window and clamped.
+  window (45% by default) and clamped, and the flyout is never narrower than its panel needs
+  (Composer 560 px, AutoResponder 460, Inspectors 420, Filters 380, Log 300, scaled) unless the
+  window itself is.
+- An area whose last panel leaves it stops auto-hiding, so a panel moved into it later is docked
+  and shown.
 - **The area holding `sessions` cannot be auto-hidden.** Its menu item is disabled, so the grid is
   never buried under a flyout.
 

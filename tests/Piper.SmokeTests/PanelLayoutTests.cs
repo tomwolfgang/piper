@@ -17,7 +17,8 @@ internal static class PanelLayoutTests
             runner.AreEqual("", Join(layout.DockedIn(DockArea.Bottom)), "nothing starts at the bottom");
             runner.AreEqual(PanelId.Inspectors, layout.SelectedIn(DockArea.Right), "inspectors is selected on the right");
             runner.AreEqual(0.55, layout.LeftFraction, "left fraction");
-            runner.AreEqual(0.30, layout.BottomFraction, "bottom fraction");
+            runner.AreEqual(0.35, layout.BottomFraction, "bottom fraction");
+            runner.AreEqual(0.45, layout.FlyoutFraction(DockArea.Right), "flyout fraction");
             return Task.CompletedTask;
         });
 
@@ -120,6 +121,51 @@ internal static class PanelLayoutTests
             return Task.CompletedTask;
         });
 
+        await runner.RunAsync("an area whose last panel leaves stops auto-hiding", () =>
+        {
+            var moved = PanelLayout.Default();
+            moved.Move(PanelId.Log, DockArea.Bottom);
+            runner.IsTrue(moved.SetAutoHidden(DockArea.Bottom, true), "setup: the bottom auto-hides");
+            moved.Move(PanelId.Log, DockArea.Right);
+            runner.IsFalse(moved.IsAutoHidden(DockArea.Bottom), "moving its last panel out clears the auto-hide");
+            moved.Move(PanelId.Composer, DockArea.Bottom);
+            runner.IsFalse(moved.IsAutoHidden(DockArea.Bottom), "so a panel moved in later is docked and shown");
+
+            var two = PanelLayout.Default();
+            two.Move(PanelId.Log, DockArea.Bottom);
+            two.Move(PanelId.Filters, DockArea.Bottom);
+            two.SetAutoHidden(DockArea.Bottom, true);
+            two.Move(PanelId.Log, DockArea.Right);
+            runner.IsTrue(two.IsAutoHidden(DockArea.Bottom), "an area that still holds a panel stays auto-hidden");
+
+            var floated = PanelLayout.Default();
+            floated.Move(PanelId.Log, DockArea.Bottom);
+            floated.SetAutoHidden(DockArea.Bottom, true);
+            floated.Float(PanelId.Log, new Rectangle(0, 0, 400, 300), 96);
+            runner.IsFalse(floated.IsAutoHidden(DockArea.Bottom), "floating the last panel clears it too");
+
+            var hidden = PanelLayout.Default();
+            hidden.Move(PanelId.Log, DockArea.Bottom);
+            hidden.SetAutoHidden(DockArea.Bottom, true);
+            hidden.Hide(PanelId.Log);
+            runner.IsFalse(hidden.IsAutoHidden(DockArea.Bottom), "and so does hiding it");
+            return Task.CompletedTask;
+        });
+
+        await runner.RunAsync("each panel has a minimum flyout width and bottom height", () =>
+        {
+            runner.AreEqual(560, PanelLayout.MinFlyoutWidth(PanelId.Composer), "Composer");
+            runner.AreEqual(460, PanelLayout.MinFlyoutWidth(PanelId.AutoResponder), "AutoResponder");
+            runner.AreEqual(380, PanelLayout.MinFlyoutWidth(PanelId.Filters), "Filters");
+            runner.AreEqual(420, PanelLayout.MinFlyoutWidth(PanelId.Inspectors), "Inspectors");
+            runner.AreEqual(300, PanelLayout.MinFlyoutWidth(PanelId.Log), "Log");
+            runner.AreEqual(260, PanelLayout.MinBottomHeight([PanelId.Log, PanelId.Inspectors]), "the Inspectors need 260");
+            runner.AreEqual(260, PanelLayout.MinBottomHeight([PanelId.Composer]), "so does the Composer");
+            runner.AreEqual(120, PanelLayout.MinBottomHeight([PanelId.Log, PanelId.Filters]), "anything else 120");
+            runner.AreEqual(0, PanelLayout.MinBottomHeight([]), "an empty area needs nothing");
+            return Task.CompletedTask;
+        });
+
         await runner.RunAsync("fractions reject NaN, infinity and out of range", () =>
         {
             runner.AreEqual(0.55, PanelLayout.ClampFraction(double.NaN, 0.55), "NaN falls back");
@@ -132,7 +178,7 @@ internal static class PanelLayoutTests
             runner.AreEqual(0.55, layout.LeftFraction, "the setter clamps");
             layout.SetFlyoutFraction(DockArea.Bottom, 50);
             runner.AreEqual(0.9, layout.FlyoutFraction(DockArea.Bottom), "flyout clamps");
-            runner.AreEqual(0.35, PanelLayout.Default().FlyoutFraction(DockArea.Right), "flyout default");
+            runner.AreEqual(0.45, PanelLayout.Default().FlyoutFraction(DockArea.Right), "flyout default");
             return Task.CompletedTask;
         });
 

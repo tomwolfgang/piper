@@ -79,6 +79,9 @@ public static class Palette
     public static Font UiFont => _uiFont;
     public static Font UiFontBold => _uiFontBold;
 
+    /// <summary>The zoom the fonts are scaled by, for chrome sized in pixels that must grow with them.</summary>
+    public static float ZoomMultiplier => FontScale.Multiplier;
+
     /// <summary>
     /// Picks up a new <see cref="FontScale.Step"/>. Call before <see cref="Apply"/>, which is what
     /// pushes the new fonts onto the live control tree.

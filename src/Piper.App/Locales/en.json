@@ -65,7 +65,10 @@
     "autoHide": "&Auto-hide area",
     "topMost": "Always on &top",
     "hide": "&Hide",
-    "sessions": "Sessions"
+    "sessions": "Sessions",
+    "headerPanels": "Panels in this area",
+    "headerPin": "Dock this area",
+    "headerClose": "Hide this panel"
   },
 
   "menu": {
@@ -247,6 +250,7 @@
 
   "log": {
     "line": "{{time, HH:mm:ss}}  {{message}}",
+    "empty": "No log entries yet",
 
     "rootCaPath": "Root CA: {{path}}",
     "rootCaTrusted": "Root CA is trusted by the current user. HTTPS decryption will work.",

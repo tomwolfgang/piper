@@ -90,6 +90,19 @@ internal static class PanelMenus
         ];
     }
 
+    /// <summary>
+    /// The menu under a flyout header's panels button: one item per panel in the area, the one showing
+    /// checked. Choosing one opens it in the flyout with the focus.
+    /// </summary>
+    public static ToolStripItem[] AreaItems(PanelHost host, IEnumerable<PanelId> panels, PanelId? open)
+    {
+        ArgumentNullException.ThrowIfNull(host);
+        ArgumentNullException.ThrowIfNull(panels);
+        return panels
+            .Select(id => (ToolStripItem)new ToolStripMenuItem(Title(id), null, (_, _) => host.FocusPanel(id)) { Checked = id == open })
+            .ToArray();
+    }
+
     /// <summary>Checked while the panel's area is auto-hidden; greyed out for a floating panel and for the sessions area.</summary>
     private static ToolStripMenuItem AutoHideItem(PanelHost host, DockArea? current) =>
         current is { } area

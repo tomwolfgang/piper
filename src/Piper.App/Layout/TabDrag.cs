@@ -9,7 +9,8 @@ namespace Piper.App.Layout;
 /// strip rather than using OLE <c>DoDragDrop</c>, because sessions already use OLE drag onto these strips
 /// and WebView2 is an OLE drop target of its own. Every way a drag can end (mouse-up, Esc, losing the
 /// capture, the strip going away, the host shutting down or rearranging) releases the capture and clears
-/// the marker; only a mouse-up changes the layout.
+/// the marker; only a mouse-up changes the layout. It also marks, and docks on release, a floating
+/// window the user drags by its title bar, whose tab row is hidden.
 /// </summary>
 internal sealed class TabDrag : IMessageFilter
 {
@@ -27,6 +28,8 @@ internal sealed class TabDrag : IMessageFilter
     private AutoHideStrip? _markedAutoHide;
     /// <summary>The kind of drop the cursor shows, or null before the first move.</summary>
     private DropKind? _shownKind;
+    /// <summary>The floating window being dragged by its title bar, or null.</summary>
+    private Form? _window;
 
     /// <param name="strips">Every strip a tab can be dragged from or over, read afresh on each move: the docked strips and every floating window's.</param>
     public TabDrag(PanelHost host, IEnumerable<DarkTabControl> strips)
@@ -75,9 +78,53 @@ internal sealed class TabDrag : IMessageFilter
         Track(screenStart);
     }
 
+    /// <summary>
+    /// Marks where a floating window dragged by its title bar would dock its panel if released now: an
+    /// area's tabs or an auto-hidden area's strip. Windows runs that drag in its own move loop, so the
+    /// window reports each move and the end instead of this holding the capture.
+    /// </summary>
+    public void TrackWindow(PanelId id, Form window, Point screen)
+    {
+        ArgumentNullException.ThrowIfNull(window);
+        if (_source is not null || _host.IsDisposed || _host.ShuttingDown || window.IsDisposed) return;
+        _window = window;
+        _panel = id;
+        var drop = HitTest(screen);
+        Mark(drop.Kind == DropKind.Strip ? drop.Strip : null, drop.Gap);
+        MarkAutoHide(drop.Kind == DropKind.AutoHide ? drop.AutoHide : null);
+    }
+
+    /// <summary>
+    /// Ends a title-bar drag of a floating window: released over an area's tabs or an auto-hidden area's
+    /// strip after a real move, the panel docks there. Anywhere else the window simply stays where it went.
+    /// </summary>
+    public void EndWindow(Form window, Point screen, bool moved)
+    {
+        ArgumentNullException.ThrowIfNull(window);
+        if (_window != window) return;
+        var drop = HitTest(screen);
+        var id = _panel;
+        Cancel();
+        if (!moved || drop.Kind is not (DropKind.Strip or DropKind.AutoHide) || _host.IsDisposed || !_host.IsHandleCreated) return;
+
+        // Applied after the window's move loop: docking closes the window being moved.
+        _host.BeginInvoke(() =>
+        {
+            if (_host.IsDisposed || _host.ShuttingDown) return;
+            _host.MoveTo(id, drop.Area, drop.Kind == DropKind.Strip ? drop.Gap : null);
+        });
+    }
+
     /// <summary>Ends a drag, if one is under way, without changing the layout.</summary>
     public void Cancel()
     {
+        if (_window is not null)
+        {
+            _window = null;
+            Mark(null, -1);
+            MarkAutoHide(null);
+        }
+
         if (_source is not { } source) return;
         // Cleared first: releasing the capture below raises the capture event again.
         _source = null;
@@ -173,7 +220,7 @@ internal sealed class TabDrag : IMessageFilter
     {
         var strips = _strips.Where(strip => !strip.IsDisposed && strip.IsHandleCreated).ToArray();
         foreach (var strip in strips)
-            if (_host.DockedAreaOf(strip) is null && strip.FindForm() is { Visible: true } window && window.Bounds.Contains(screen))
+            if (_host.DockedAreaOf(strip) is null && strip.FindForm() is { Visible: true } window && window != _window && window.Bounds.Contains(screen))
                 return new Drop(DropKind.None);
 
         foreach (var strip in strips)

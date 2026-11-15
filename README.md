@@ -174,15 +174,17 @@ method:POST host:api status:>=400 -is:image body:"order"
 **Dragging a panel's tab** moves the panel: drop it on another area's tabs to move it there, along
 its own tabs to reorder them, on an auto-hidden area's strip to add it to that area, or outside the
 main window to float it there. An accent marker shows where it will land. Dragging a floating
-window's tab onto an area's tabs docks it there.
+window by its title bar onto an area's tabs docks it there.
 
 **View > Panels** shows or hides each panel; a hidden panel comes back where it was. The Sessions
 list cannot be hidden. **Float** puts a panel in a window of its own, which minimises with Piper,
-shows in Alt+Tab and takes the same keyboard shortcuts as the main window. Closing that window,
-double-clicking its tab or choosing **Dock** puts the panel back in the area it came from.
+shows in Alt+Tab and takes the same keyboard shortcuts as the main window; right-click its title
+bar for the panel's menu. Closing that window, double-clicking its title bar or choosing **Dock**
+puts the panel back in the area it came from.
 **Auto-hide area** folds an area into a thin strip of panel names along the window edge, as in
 Visual Studio; clicking a name slides that panel out over the rest of the window without moving
-anything under it, and clicking elsewhere, `Esc` or switching away closes it again. The area
+anything under it, and clicking elsewhere, `Esc` or switching away closes it again. The flyout's
+title bar lists the area's panels, docks the area again with its pin, or hides the panel. The area
 holding the Sessions list cannot be auto-hidden. **View > Reset layout** puts every panel back in
 its default place, pins every area and docks every floating window. The layout, floating windows included, is remembered between runs.
 

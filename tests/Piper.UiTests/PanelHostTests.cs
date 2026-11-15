@@ -58,6 +58,12 @@ internal static class PanelHostTests
         DragOutsideFloats(check, pumpUntil);
         DragFloatingTabDocks(check, pumpUntil);
         DragOntoAutoHiddenArea(check, pumpUntil);
+        EmptiedAutoHiddenArea(check, pumpUntil);
+        FlyoutMinimumWidth(check, pumpUntil);
+        FlyoutHeader(check, pumpUntil);
+        BottomKeepsMinimum(check, pumpUntil);
+        FloatingWindowChrome(check, pumpUntil);
+        FloatingCaptionDocks(check, pumpUntil);
         FlyoutScreenshots(pumpUntil);
         DragScreenshots(pumpUntil);
     }
@@ -868,15 +874,13 @@ internal static class PanelHostTests
 
         rig.Host.FloatPanel(PanelId.Log);
         PumpFor(pumpUntil, 100);
-        var floatingStrip = log.Parent as DarkTabControl;
-        check(floatingStrip is not null && floatingStrip.FindForm() is FloatingPanelForm, "setup: the Log floats again");
-        if (floatingStrip is null) return;
-        var tab = floatingStrip.GetTabRect(0);
-        var lParam = ((tab.Y + tab.Height / 2) << 16) | (tab.X + tab.Width / 2);
-        SendMessage(floatingStrip.Handle, WmLButtonDblClk, 1, lParam);
-        SendMessage(floatingStrip.Handle, WmLButtonUp, 0, lParam);
+        var floatingWindow = log.FindForm() as FloatingPanelForm;
+        check(floatingWindow is not null, "setup: the Log floats again");
+        if (floatingWindow is null) return;
+        var caption = MouseLParam(new Point(floatingWindow.Left + 60, floatingWindow.Top + 8));
+        SendMessage(floatingWindow.Handle, WmNcLButtonDblClk, HtCaption, caption);
         PumpFor(pumpUntil, 100);
-        check(log.Parent == bottom && !rig.Host.Snapshot().IsFloating(PanelId.Log), "double-clicking a floating window's tab docks the panel");
+        check(log.Parent == bottom && !rig.Host.Snapshot().IsFloating(PanelId.Log), "double-clicking a floating window's title bar docks the panel");
     }
 
     private static void FloatingTabMenu(Action<bool, string> check, Action<Func<bool>> pumpUntil)
@@ -1279,6 +1283,262 @@ internal static class PanelHostTests
         rig.Host.MoveTo(PanelId.Log, DockArea.Right);
         PumpFor(pumpUntil, 100);
         check(!inner.Panel2Collapsed && right.TabCount == 1, "moving one back shows the right area again");
+    }
+
+    private static void EmptiedAutoHiddenArea(Action<bool, string> check, Action<Func<bool>> pumpUntil)
+    {
+        Console.WriteLine("== moving the last panel out of an auto-hidden area stops it hiding, so a panel moved in later is docked and shown");
+        using var rig = new Rig();
+        rig.Form.Show();
+        pumpUntil(() => rig.Grid.Width > 0);
+        rig.Host.SetAutoHidden(DockArea.Right, true);
+        PumpFor(pumpUntil, 100);
+        foreach (var id in new[] { PanelId.Inspectors, PanelId.Composer, PanelId.Filters, PanelId.AutoResponder, PanelId.Log })
+            rig.Host.MoveTo(id, DockArea.Bottom);
+        PumpFor(pumpUntil, 100);
+        check(!rig.Host.IsAutoHidden(DockArea.Right), "the emptied Right area is no longer auto-hidden");
+        check(!rig.Host.AutoHideStripOf(DockArea.Right).Visible, "and shows no strip");
+
+        rig.Host.MoveTo(PanelId.Log, DockArea.Right);
+        PumpFor(pumpUntil, 100);
+        var log = rig.Registry.PageOf(PanelId.Log);
+        check(StripOf(rig, PanelId.Log) is { Visible: true } strip && rig.Host.DockedAreaOf(strip) == DockArea.Right && log.Visible,
+            "the Log moved in is docked in the Right strip and on screen");
+        check(!rig.Host.IsAutoHidden(DockArea.Right) && !rig.Host.AutoHideStripOf(DockArea.Right).Visible, "not tucked behind an auto-hide strip");
+    }
+
+    /// <summary>A size at 96 DPI and 100% zoom, scaled as the host scales its minimums.</summary>
+    private static int Scaled(Control control, int logical) => (int)Math.Round(control.LogicalToDeviceUnits(logical) * Palette.ZoomMultiplier);
+
+    private static void FlyoutMinimumWidth(Action<bool, string> check, Action<Func<bool>> pumpUntil)
+    {
+        Console.WriteLine("== a flyout is never narrower than its panel's minimum, unless the window is");
+        using var rig = new Rig();
+        rig.Form.Show();
+        pumpUntil(() => rig.Grid.Width > 0);
+        rig.Host.SetAutoHidden(DockArea.Right, true);
+        rig.Host.SetFlyoutFraction(DockArea.Right, 0.1);
+        PumpFor(pumpUntil, 100);
+        var flyout = rig.Host.FlyoutOf(DockArea.Right);
+
+        foreach (var id in new[] { PanelId.Composer, PanelId.AutoResponder, PanelId.Inspectors, PanelId.Filters, PanelId.Log })
+        {
+            rig.Host.ShowPanel(id, PanelReveal.Explicit);
+            PumpFor(pumpUntil, 100);
+            var page = rig.Registry.PageOf(id);
+            var minimum = Scaled(rig.Host, PanelLayout.MinFlyoutWidth(id));
+            check(flyout.IsOpen && page.Width >= minimum, $"at a 10% fraction the {id} page is still {minimum} px wide ({page.Width})");
+        }
+
+        rig.Host.ShowPanel(PanelId.Composer, PanelReveal.Explicit);
+        PumpFor(pumpUntil, 100);
+        var composer = rig.Registry.ContentOf(PanelId.Composer);
+        var history = Descendants(composer).OfType<SplitContainer>().FirstOrDefault(split => split.FixedPanel == FixedPanel.Panel1);
+        check(history is not null && history.Panel2.Width >= Scaled(rig.Host, 360) - 1 && history.Panel1.Width >= Scaled(rig.Host, 160) - 1,
+            $"the Composer at its minimum keeps the history and the editor usable ({history?.Panel1.Width} + {history?.Panel2.Width})");
+
+        rig.Form.FormBorderStyle = FormBorderStyle.None; // so the window can be smaller than a caption allows
+        rig.Form.Size = new Size(420, 400);
+        PumpFor(pumpUntil, 200);
+        var frame = rig.Host.ClientSize.Width - rig.Host.AutoHideStripOf(DockArea.Right).Width;
+        check(flyout.IsOpen && flyout.Width == frame && rig.Host.ClientRectangle.Contains(flyout.Bounds),
+            $"in a window narrower than the minimum it fills the window and stays inside ({flyout.Bounds} in {rig.Host.ClientRectangle})");
+    }
+
+    private static void FlyoutHeader(Action<bool, string> check, Action<Func<bool>> pumpUntil)
+    {
+        Console.WriteLine("== the flyout has a title bar: its panels button lists the area, the pin docks it, the close button hides the panel");
+        using var rig = new Rig();
+        rig.Form.Show();
+        pumpUntil(() => rig.Grid.Width > 0);
+        rig.Host.SetAutoHidden(DockArea.Right, true);
+        PumpFor(pumpUntil, 100);
+        var flyout = rig.Host.FlyoutOf(DockArea.Right);
+        var header = flyout.Header;
+
+        rig.Host.FocusPanel(PanelId.Filters);
+        PumpFor(pumpUntil, 100);
+        var filters = rig.Registry.PageOf(PanelId.Filters);
+        check(flyout.IsOpen && header.Visible && header.Text == "Filters", $"the header names the panel ({header.Text})");
+        check(header.Active, "and shows the accent while the focus is in the flyout");
+        check(!flyout.Strip.ShowTabs && filters.Top <= 2 && filters.Bottom >= flyout.Strip.Height - 2,
+            $"the one-tab row is gone: the page fills the strip under the header ({filters.Bounds} in {flyout.Strip.Size})");
+        check(header.Bottom <= flyout.Strip.Top && header.Height == header.Font.Height + 10, $"the header sits above the page, Font.Height + 10 tall ({header.Height})");
+        var accessible = header.AccessibilityObject;
+        check(accessible.GetChildCount() == 3 && Enumerable.Range(0, 3).All(i => accessible.GetChild(i)?.Role == AccessibleRole.PushButton),
+            "a screen reader sees its three push buttons");
+
+        ClickHeader(header, ToolWindowHeader.Button.Panels);
+        PumpFor(pumpUntil, 100);
+        var menu = rig.Host.AreaMenu;
+        var items = menu.Items.OfType<ToolStripMenuItem>().ToArray();
+        check(menu.Visible && items.Select(item => item.Text).SequenceEqual(["Inspectors", "Composer", "Filters", "AutoResponder", "Log"]),
+            $"the panels button lists the area's panels ({string.Join(", ", items.Select(item => item.Text))})");
+        check(items.Single(item => item.Checked).Text == "Filters", "with the open one checked");
+        items.First(item => item.Text == "Composer").PerformClick();
+        menu.Close();
+        PumpFor(pumpUntil, 100);
+        check(flyout.IsOpen && flyout.Page == rig.Registry.PageOf(PanelId.Composer) && header.Text == "Composer"
+              && rig.Registry.ContentOf(PanelId.Composer).ContainsFocus, "choosing one opens it in the flyout with the focus");
+
+        SendMessage(header.Handle, WmRButtonDown, 2, MouseLParam(new Point(12, header.Height / 2)));
+        SendMessage(header.Handle, WmRButtonUp, 0, MouseLParam(new Point(12, header.Height / 2)));
+        PumpFor(pumpUntil, 50);
+        check(rig.Host.TabMenu.Visible && rig.Host.TabMenu.Items.OfType<ToolStripMenuItem>().Any(item => item.Text == Strings.Panels.AutoHide),
+            "a right-click on the title opens the panel's tab menu");
+        rig.Host.TabMenu.Close();
+        PumpFor(pumpUntil, 50);
+
+        ClickHeader(header, ToolWindowHeader.Button.Close);
+        PumpFor(pumpUntil, 100);
+        check(rig.Host.IsHidden(PanelId.Composer) && !flyout.IsOpen, "the close button hides the panel and closes the flyout");
+        check(rig.Host.IsAutoHidden(DockArea.Right) && rig.Host.AutoHideStripOf(DockArea.Right).Panels.Count == 4, "and leaves the area auto-hidden");
+
+        rig.Host.ShowPanel(PanelId.Filters, PanelReveal.Explicit);
+        PumpFor(pumpUntil, 100);
+        ClickHeader(header, ToolWindowHeader.Button.Pin);
+        PumpFor(pumpUntil, 100);
+        check(!rig.Host.IsAutoHidden(DockArea.Right) && !flyout.IsOpen, "the pin docks the area again and closes the flyout");
+        check(StripOf(rig, PanelId.Filters) is { } strip && rig.Host.DockedAreaOf(strip) == DockArea.Right && strip.SelectedTab == filters,
+            "with the panel it showed selected in the Right strip");
+    }
+
+    private static void ClickHeader(ToolWindowHeader header, ToolWindowHeader.Button button)
+    {
+        var bounds = header.ButtonBounds(button);
+        var centre = MouseLParam(new Point(bounds.X + bounds.Width / 2, bounds.Y + bounds.Height / 2));
+        SendMessage(header.Handle, WmLButtonDown, 1, centre);
+        SendMessage(header.Handle, WmLButtonUp, 0, centre);
+    }
+
+    private const int WmRButtonDown = 0x0204;
+    private const int WmRButtonUp = 0x0205;
+
+    private static void BottomKeepsMinimum(Action<bool, string> check, Action<Func<bool>> pumpUntil)
+    {
+        Console.WriteLine("== the Bottom area keeps the height its panels need at the default window size");
+        using var rig = new Rig();
+        rig.Form.Size = new Size(1500, 950); // as MainForm opens
+        rig.Form.Show();
+        pumpUntil(() => rig.Grid.Width > 0);
+        rig.Host.MoveTo(PanelId.Inspectors, DockArea.Bottom);
+        PumpFor(pumpUntil, 150);
+        var inspectors = rig.Registry.PageOf(PanelId.Inspectors);
+        var tall = Scaled(rig.Host, 260);
+        check(inspectors.Height >= tall, $"the Inspectors at the bottom get at least {tall} px ({inspectors.Height})");
+        var outer = (SplitContainer)StripOf(rig, PanelId.Inspectors)!.Parent!.Parent!;
+        check(outer.Panel2MinSize >= tall, $"and the splitter cannot squeeze them below it ({outer.Panel2MinSize})");
+        check(Math.Abs(rig.Host.Snapshot().BottomFraction - PanelLayout.DefaultBottomFraction) < 0.005,
+            $"a splitter held by the minimum records no new fraction ({rig.Host.Snapshot().BottomFraction})");
+
+        rig.Form.Size = new Size(1200, 800);
+        PumpFor(pumpUntil, 150);
+        check(inspectors.Height >= tall, $"at 1200x800 too ({inspectors.Height})");
+
+        rig.Host.MoveTo(PanelId.Inspectors, DockArea.Right);
+        rig.Host.MoveTo(PanelId.Log, DockArea.Bottom);
+        PumpFor(pumpUntil, 150);
+        check(outer.Panel2MinSize < tall && rig.Registry.PageOf(PanelId.Log).Height >= Scaled(rig.Host, 120),
+            $"the Log alone needs less, 120 px ({outer.Panel2MinSize}, {rig.Registry.PageOf(PanelId.Log).Height})");
+    }
+
+    [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW")]
+    private static extern nint GetWindowLongPtr(nint hwnd, int index);
+
+    private static void FloatingWindowChrome(Action<bool, string> check, Action<Func<bool>> pumpUntil)
+    {
+        Console.WriteLine("== a floating window is a plain sizable window titled once, with no minimise or maximise box");
+        using var rig = new Rig();
+        rig.Form.Show();
+        pumpUntil(() => rig.Grid.Width > 0);
+        rig.Host.FloatPanel(PanelId.Composer, new Point(200, 200));
+        PumpFor(pumpUntil, 150);
+        var window = rig.Host.FloatingWindow(PanelId.Composer);
+        check(window is not null, "setup: the Composer floats");
+        if (window is null) return;
+        check(!window.MinimizeBox && !window.MaximizeBox && !window.ShowIcon && window.FormBorderStyle == FormBorderStyle.Sizable,
+            "no minimise or maximise box and no icon, but an ordinary sizable border");
+        const int GwlExStyle = -20, WsExToolWindow = 0x80;
+        var exStyle = GetWindowLongPtr(window.Handle, GwlExStyle);
+        check((exStyle & WsExToolWindow) == 0, $"it is not a tool window, which Alt+Tab would leave out (ex-style 0x{exStyle:X})");
+        var composer = rig.Registry.PageOf(PanelId.Composer);
+        check(!window.Strip.ShowTabs && composer.Top <= 2 && composer.Height >= window.Strip.Height - 4,
+            $"the one-tab row is gone, so the title shows once ({composer.Bounds} in {window.Strip.Size})");
+        check(window.Text == "Composer", "the title bar names the panel");
+    }
+
+    private static void FloatingCaptionDocks(Action<bool, string> check, Action<Func<bool>> pumpUntil)
+    {
+        Console.WriteLine("== a floating window's title bar stands in for its tab: menu, double-click and drag onto an area's tabs");
+        using var rig = new Rig();
+        rig.Form.Show();
+        pumpUntil(() => rig.Grid.Width > 0);
+        rig.Host.FloatPanel(PanelId.Log, new Point(300, 300));
+        PumpFor(pumpUntil, 150);
+        var window = rig.Host.FloatingWindow(PanelId.Log);
+        check(window is not null, "setup: the Log floats");
+        if (window is null) return;
+        var caption = MouseLParam(new Point(window.Left + 60, window.Top + 8));
+
+        SendMessage(window.Handle, WmNcRButtonUp, HtCaption, caption);
+        PumpFor(pumpUntil, 50);
+        check(rig.Host.TabMenu.Visible && rig.Host.TabMenu.Items.OfType<ToolStripMenuItem>().Any(item => item.Text == Strings.Panels.Dock),
+            "a right-click on the title bar opens the tab menu, with Dock");
+        rig.Host.TabMenu.Close();
+        PumpFor(pumpUntil, 50);
+
+        var right = StripOf(rig, PanelId.Composer)!;
+        var target = BeforeTab(right, 1);
+        window.PointerPosition = () => target;
+        SendMessage(window.Handle, WmEnterSizeMove, 0, 0);
+        window.Location = new Point(window.Left + 40, window.Top + 40);
+        MovingMessage(window);
+        PumpFor(pumpUntil, 60);
+        check(right.IsDropTarget && right.DropIndex == 1, $"dragging the title bar over the Right tabs marks where it would dock (index {right.DropIndex})");
+        SendMessage(window.Handle, WmExitSizeMove, 0, 0);
+        pumpUntil(() => window.IsDisposed);
+        check(!rig.Host.IsFloating(PanelId.Log) && Order(rig, DockArea.Right)[1] == PanelId.Log && !right.IsDropTarget,
+            $"releasing it there docks the Log second on the right ({string.Join(", ", Order(rig, DockArea.Right))})");
+
+        rig.Host.FloatPanel(PanelId.Log, new Point(300, 300));
+        PumpFor(pumpUntil, 150);
+        window = rig.Host.FloatingWindow(PanelId.Log)!;
+        window.PointerPosition = () => target;
+        SendMessage(window.Handle, WmEnterSizeMove, 0, 0);
+        MovingMessage(window);
+        SendMessage(window.Handle, WmExitSizeMove, 0, 0);
+        PumpFor(pumpUntil, 100);
+        check(rig.Host.IsFloating(PanelId.Log) && !window.IsDisposed && !right.IsDropTarget,
+            "a drag that ends where it began, as Esc leaves it, docks nothing");
+
+        SendMessage(window.Handle, WmNcLButtonDblClk, HtCaption, caption);
+        PumpFor(pumpUntil, 100);
+        check(!rig.Host.IsFloating(PanelId.Log) && window.IsDisposed, "double-clicking the title bar docks the panel");
+    }
+
+    private const int WmNcLButtonDblClk = 0x00A3;
+    private const int WmNcRButtonUp = 0x00A5;
+    private const int WmMoving = 0x0216;
+    private const int WmEnterSizeMove = 0x0231;
+    private const int WmExitSizeMove = 0x0232;
+    private const int HtCaption = 2;
+
+    /// <summary>A WM_MOVING as the system move loop sends it, with the window's rectangle.</summary>
+    private static void MovingMessage(Form window)
+    {
+        var rect = Marshal.AllocHGlobal(16);
+        try
+        {
+            Marshal.WriteInt32(rect, 0, window.Left);
+            Marshal.WriteInt32(rect, 4, window.Top);
+            Marshal.WriteInt32(rect, 8, window.Right);
+            Marshal.WriteInt32(rect, 12, window.Bottom);
+            SendMessage(window.Handle, WmMoving, 9, rect);
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(rect);
+        }
     }
 
     private static void HideThenReveal(Action<bool, string> check, Action<Func<bool>> pumpUntil)

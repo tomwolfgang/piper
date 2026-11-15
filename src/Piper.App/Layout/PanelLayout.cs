@@ -20,8 +20,8 @@ internal enum PanelReveal { Explicit, Passive }
 internal sealed class PanelLayout
 {
     public const double DefaultLeftFraction = 0.55;
-    public const double DefaultBottomFraction = 0.30;
-    public const double DefaultFlyoutFraction = 0.35;
+    public const double DefaultBottomFraction = 0.35;
+    public const double DefaultFlyoutFraction = 0.45;
     public const int MinFloatingWidth = 300;
     public const int MinFloatingHeight = 200;
 
@@ -215,6 +215,31 @@ internal sealed class PanelLayout
         set => _bottomFraction = ClampFraction(value, DefaultBottomFraction);
     }
 
+    /// <summary>
+    /// The narrowest a side flyout may be while it shows the panel, in pixels at 96 DPI and 100% zoom,
+    /// so the panel's own controls stay usable. The caller scales it and never exceeds the window.
+    /// </summary>
+    public static int MinFlyoutWidth(PanelId id) => id switch
+    {
+        PanelId.Composer => 560,
+        PanelId.AutoResponder => 460,
+        PanelId.Inspectors => 420,
+        PanelId.Filters => 380,
+        _ => 300,
+    };
+
+    /// <summary>
+    /// The least height, in pixels at 96 DPI and 100% zoom, the Bottom area's page needs to stay usable
+    /// with these panels in it: the Inspectors and the Composer need room for their editors.
+    /// </summary>
+    public static int MinBottomHeight(IEnumerable<PanelId> panels)
+    {
+        ArgumentNullException.ThrowIfNull(panels);
+        var height = 0;
+        foreach (var id in panels) height = Math.Max(height, id is PanelId.Inspectors or PanelId.Composer ? 260 : 120);
+        return height;
+    }
+
     public double FlyoutFraction(DockArea area) => _areas[area].Flyout;
 
     public void SetFlyoutFraction(DockArea area, double value) =>
@@ -321,10 +346,15 @@ internal sealed class PanelLayout
         for (var i = 0; i < order.Count; i++) _entries[order[i]].Order = i;
     }
 
+    /// <summary>
+    /// Keeps the area's selection on one of its docked panels. An area left with none stops auto-hiding,
+    /// so a panel moved into it later is docked and shown rather than tucked behind its strip.
+    /// </summary>
     private void EnsureSelection(DockArea area)
     {
         var docked = DockedIn(area);
         var state = _areas[area];
+        if (docked.Count == 0) state.AutoHidden = false;
         if (state.Selected is not { } selected || !docked.Contains(selected))
             state.Selected = docked.Count > 0 ? docked[0] : null;
     }

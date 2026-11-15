@@ -184,16 +184,22 @@ public sealed class ComposerPanel : UserControl
 
         // ------------------------------------------------------------- assembly
 
+        // The history keeps its width as the panel resizes, so a narrow panel squeezes the history to
+        // its minimum before the editor; the minimums are applied once the split has a real size.
         var split = new SplitContainer
         {
             Dock = DockStyle.Fill,
             Orientation = Orientation.Vertical,
             SplitterWidth = 4,
+            FixedPanel = FixedPanel.Panel1,
         };
-        split.Panel1MinSize = 260;
         split.Panel1.Controls.Add(_historyTree);
         split.Panel2.Controls.Add(editorPane);
         Controls.Add(split);
+        split.SizeChanged += (_, _) =>
+        {
+            if (split.IsHandleCreated) ApplyHistorySplitMinimums();
+        };
 
         _split = split;
 
@@ -303,6 +309,46 @@ public sealed class ComposerPanel : UserControl
         // Set the splitter once the control has a real width; doing it in the constructor
         // clamps against the design-time size.
         if (_split.Width > 400) _split.SplitterDistance = Math.Min(380, _split.Width / 3);
+        ApplyHistorySplitMinimums();
+    }
+
+    /// <summary>A zoom changes the scaled minimums.</summary>
+    protected override void OnFontChanged(EventArgs e)
+    {
+        base.OnFontChanged(e);
+        if (IsHandleCreated) ApplyHistorySplitMinimums();
+    }
+
+    /// <summary>The history list's least width and the editor's, at 96 DPI and 100% zoom.</summary>
+    private const int MinHistoryWidth = 160;
+    private const int MinEditorWidth = 360;
+
+    /// <summary>
+    /// Keeps the history list and the editor at their minimum widths, scaled for the DPI and the zoom,
+    /// or shrinks both in proportion when the panel is too narrow for the two. A split too small for its
+    /// minimums would otherwise throw or hide the editor entirely.
+    /// </summary>
+    private void ApplyHistorySplitMinimums()
+    {
+        var available = _split.Width - _split.SplitterWidth;
+        if (available <= 0) return;
+        var zoom = FontScale.Multiplier;
+        var history = (int)Math.Round(LogicalToDeviceUnits(MinHistoryWidth) * zoom);
+        var editor = (int)Math.Round(LogicalToDeviceUnits(MinEditorWidth) * zoom);
+        if (history + editor > available)
+        {
+            history = available * history / (history + editor);
+            editor = available - history;
+        }
+
+        // The splitter's setter checks it against the minimums in force, so a minimum that shrinks
+        // shrinks first, the splitter moves inside the new range, and only then does one grow.
+        if (history < _split.Panel1MinSize) _split.Panel1MinSize = history;
+        if (editor < _split.Panel2MinSize) _split.Panel2MinSize = editor;
+        var distance = Math.Clamp(_split.SplitterDistance, history, available - editor);
+        if (distance != _split.SplitterDistance) _split.SplitterDistance = distance;
+        if (_split.Panel1MinSize != history) _split.Panel1MinSize = history;
+        if (_split.Panel2MinSize != editor) _split.Panel2MinSize = editor;
     }
 
     /// <summary>
