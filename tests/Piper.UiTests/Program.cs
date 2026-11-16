@@ -13,6 +13,7 @@ using Piper.Core.Sessions;
 internal static class Program
 {
     private const int LvmGetTopIndex = 0x1000 + 39;
+    private const int LvmGetCountPerPage = 0x1000 + 40;
     private const int WmMouseMove = 0x0200;
     private const int WmLButtonDown = 0x0201;
     private const int WmLButtonUp = 0x0202;
@@ -1025,14 +1026,20 @@ internal static class Program
     {
         Check(list.VirtualListSize == rows, $"{rows} rows are listed (got {list.VirtualListSize})");
         if (list.VirtualListSize != rows || rows == 0) return;
-        var topIndex = (int)SendMessage(list.Handle, LvmGetTopIndex, 0, 0);
         var first = list.GetItemRect(0);
+        // Rows that do not fit one screen (a high-DPI runner has taller rows) legitimately stay scrolled
+        // to the end, so only the newest row has to be on screen.
+        if (rows > (int)SendMessage(list.Handle, LvmGetCountPerPage, 0, 0))
+        {
+            Check(list.GetItemRect(rows - 1).Bottom <= list.ClientSize.Height, "the newest row is on screen");
+            return;
+        }
+
+        var topIndex = (int)SendMessage(list.Handle, LvmGetTopIndex, 0, 0);
         Check(topIndex == 0, $"the view starts at row 0 (top index {topIndex})");
         // Just under the header: one row height at most, not partway down the grid.
         Check(first.Top >= 0 && first.Top <= first.Height * 2, $"row 0 is drawn at the top (y={first.Top})");
-        // Only where every row fits, so a high-DPI runner with taller rows does not fail it spuriously.
-        if (first.Top + rows * first.Height <= list.ClientSize.Height)
-            Check(list.GetItemRect(rows - 1).Bottom <= list.ClientSize.Height, "the newest row is on screen");
+        Check(list.GetItemRect(rows - 1).Bottom <= list.ClientSize.Height, "the newest row is on screen");
     }
 
     /// <summary>Selects <paramref name="row"/> (none for -1), opens the grid's context menu and returns a submenu.</summary>
