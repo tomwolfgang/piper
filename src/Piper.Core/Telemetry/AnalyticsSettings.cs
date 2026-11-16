@@ -44,7 +44,12 @@ public static class AnalyticsSettingsStore
     public static string DefaultSpoolDirectory => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Piper", "analytics");
 
-    public static void Save(AnalyticsSettings settings, string? path = null)
+    /// <summary>
+    /// Writes the settings, reporting whether they reached disk. A failure is not thrown because
+    /// reporting must never cost the user anything, but it is returned: an opt-out that did not
+    /// persist leaves the file saying Enabled, and collection would resume on the next launch.
+    /// </summary>
+    public static bool Save(AnalyticsSettings settings, string? path = null)
     {
         ArgumentNullException.ThrowIfNull(settings);
         path ??= DefaultPath;
@@ -54,12 +59,15 @@ public static class AnalyticsSettingsStore
             var directory = Path.GetDirectoryName(path);
             if (!string.IsNullOrEmpty(directory)) Directory.CreateDirectory(directory);
             File.WriteAllText(path, JsonSerializer.Serialize(settings));
+            return true;
         }
         catch (IOException)
         {
+            return false;
         }
         catch (UnauthorizedAccessException)
         {
+            return false;
         }
     }
 
