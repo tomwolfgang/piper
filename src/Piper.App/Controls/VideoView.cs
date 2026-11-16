@@ -40,7 +40,7 @@ internal sealed class VideoView : Panel
     private readonly Func<WebView2, Task> _ensureCore;
     private readonly List<MemoryStream> _streams = [];
     private WebView2? _view;
-    private bool _hardened;
+    private CoreWebView2? _hardenedCore;
     private byte[]? _video;
     private string _mime = "application/octet-stream";
     private Uri? _pageUri;
@@ -92,10 +92,11 @@ internal sealed class VideoView : Panel
             await _ensureCore(view);
             if (generation != _generation || IsDisposed || view.CoreWebView2 is not { } core) return VideoShowResult.Superseded;
 
-            if (!_hardened)
+            // By instance, not once: a core the view has not seen, such as one under a new control, starts wide open.
+            if (!ReferenceEquals(_hardenedCore, core))
             {
                 Harden(core);
-                _hardened = true;
+                _hardenedCore = core;
             }
 
             started = true;

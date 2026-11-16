@@ -20,4 +20,30 @@ internal static class Menus
 {
     public static ToolStripMenuItem Item(string text, string shortcut, EventHandler onClick) =>
         new(text, null, onClick) { ShortcutKeyDisplayString = shortcut };
+
+    /// <summary>
+    /// Clicks the enabled item of <paramref name="menu"/> whose <see cref="ToolStripMenuItem.ShortcutKeys"/>
+    /// is <paramref name="keyData"/>, as WinForms does for the window that holds the menu, and says whether
+    /// there was one. A floating panel's window needs this, because WinForms only routes a menu's
+    /// accelerators from its own window.
+    /// </summary>
+    public static bool PerformShortcut(ToolStrip menu, Keys keyData)
+    {
+        ArgumentNullException.ThrowIfNull(menu);
+        if (keyData == Keys.None || Find(menu.Items, keyData) is not { } item) return false;
+        item.PerformClick();
+        return true;
+
+        static ToolStripMenuItem? Find(ToolStripItemCollection items, Keys keys)
+        {
+            foreach (var item in items.OfType<ToolStripMenuItem>())
+            {
+                if (!item.Enabled) continue;
+                if (item.ShortcutKeys == keys) return item;
+                if (item.HasDropDownItems && Find(item.DropDownItems, keys) is { } found) return found;
+            }
+
+            return null;
+        }
+    }
 }

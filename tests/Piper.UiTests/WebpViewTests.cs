@@ -168,6 +168,39 @@ internal static class WebpViewTests
 
         check(!weak.IsAlive, "after Clear nothing in the view keeps the body array alive");
 
+        Console.WriteLine("== a recreated CoreWebView2 is hardened again");
+        // Moving a panel to a floating window can recreate the handles under the view.
+        var firstCore = view.View.CoreWebView2;
+        RecreateHandle.Invoke(view.View, null);
+        var settled = 0;
+        pumpUntil(() => ++settled > 20);
+        check(Await(view.ShowAsync(Webp)) == WebpShowResult.Shown, "after the handle is recreated a WebP is shown again");
+        Console.WriteLine($"   (RecreateHandle {(ReferenceEquals(firstCore, view.View?.CoreWebView2) ? "kept" : "replaced")} the CoreWebView2)");
+        CheckBlocked("after RecreateHandle");
+
+        // A core the view has not seen before must be hardened too: swap in a new WebView2 control,
+        // which is how a new core arrives, and show again.
+        var oldControl = view.View!;
+        view.Controls.Remove(oldControl);
+        oldControl.Dispose();
+        typeof(WebpView).GetField("_view", BindingFlags.NonPublic | BindingFlags.Instance)!.SetValue(view, null);
+        check(Await(view.ShowAsync(Webp)) == WebpShowResult.Shown && !ReferenceEquals(firstCore, view.View?.CoreWebView2),
+            "a WebP is shown in a new CoreWebView2");
+        var newCore = view.View!.CoreWebView2;
+        check(!newCore.Settings.IsScriptEnabled && !newCore.Settings.AreDevToolsEnabled && !newCore.Settings.AreDefaultContextMenusEnabled,
+            "the new core's settings are locked down");
+        CheckBlocked("in the new core");
+        view.Clear();
+
+        void CheckBlocked(string when)
+        {
+            var before = view.Blocked;
+            view.View!.CoreWebView2.Navigate("https://localhost:1/other");
+            var waited = Environment.TickCount64 + 5000;
+            pumpUntil(() => view.Blocked > before || Environment.TickCount64 > waited);
+            check(view.Blocked > before && view.View?.Source?.Host == WebpView.Host, $"{when} a navigation away is cancelled");
+        }
+
         Console.WriteLine("== a failed show after a successful one hides the view");
         var starts = 0;
         using var flakyForm = new Form { Width = 500, Height = 400 };
@@ -199,4 +232,7 @@ internal static class WebpViewTests
     }
 
     private static string TempRoot => Path.Combine(Path.GetTempPath(), "Piper");
+
+    internal static readonly MethodInfo RecreateHandle =
+        typeof(Control).GetMethod("RecreateHandle", BindingFlags.Instance | BindingFlags.NonPublic)!;
 }

@@ -78,11 +78,15 @@ public sealed class AutoResponderPanel : UserControl
         };
         _passthrough.CheckedChanged += (_, _) => OnEdited();
 
+        // Sized to its one button, so it never overflows: docked right, a strip stacks vertically by
+        // default, and a fixed width that the label outgrew at 150% hid the button behind a
+        // system-light overflow arrow.
         var actions = new ToolStrip
         {
             Dock = DockStyle.Right,
-            AutoSize = false,
-            Width = 86,
+            LayoutStyle = ToolStripLayoutStyle.HorizontalStackWithOverflow,
+            AutoSize = true,
+            CanOverflow = false,
             GripStyle = ToolStripGripStyle.Hidden,
             Font = Palette.UiFont,
         };

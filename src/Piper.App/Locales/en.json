@@ -23,7 +23,8 @@
     "f3": "F3",
     "zoomIn": "Ctrl++",
     "zoomOut": "Ctrl+-",
-    "zoomReset": "Ctrl+0"
+    "zoomReset": "Ctrl+0",
+    "focusPanel": "Ctrl+Alt+{{n}}"
   },
 
   "common": {
@@ -45,11 +46,29 @@
   },
 
   "tabs": {
+    "sessions": "Sessions",
     "inspectors": "Inspectors",
     "composer": "Composer",
     "filters": "Filters",
     "autoResponder": "AutoResponder",
     "log": "Log"
+  },
+
+  "panels": {
+    "title": "&Panels",
+    "resetLayout": "Reset &layout",
+    "moveLeft": "Move to &Left",
+    "moveRight": "Move to &Right",
+    "moveBottom": "Move to &Bottom",
+    "float": "&Float",
+    "dock": "&Dock",
+    "autoHide": "&Auto-hide area",
+    "topMost": "Always on &top",
+    "hide": "&Hide",
+    "sessions": "Sessions",
+    "headerPanels": "Panels in this area",
+    "headerPin": "Dock this area",
+    "headerClose": "Hide this panel"
   },
 
   "menu": {
@@ -231,6 +250,7 @@
 
   "log": {
     "line": "{{time, HH:mm:ss}}  {{message}}",
+    "empty": "No log entries yet",
 
     "rootCaPath": "Root CA: {{path}}",
     "rootCaTrusted": "Root CA is trusted by the current user. HTTPS decryption will work.",

@@ -103,13 +103,21 @@ public sealed class MessageInspector : UserControl
             Visible = false,
             TextAlign = ContentAlignment.MiddleLeft,
             ForeColor = Palette.TextDim,
-            Padding = new Padding(6, 0, 0, 0),
+            Padding = new Padding(LogicalToDeviceUnits(8), 0, 0, 0),
         };
 
-        var summaryLine = new Panel { Dock = DockStyle.Top, Height = 28, Padding = new Padding(6, 5, 0, 3) };
-        summaryLine.Controls.Add(_summary);
+        // A field the font's height plus 8 px, framed once: the framed box in a fixed 28 px row lost
+        // its bottom edge as soon as the font grew.
+        var summaryLine = new FieldRow(_summary, bottomEdgeOnly: false);
 
-        var summaryBar = new Panel { Dock = DockStyle.Top, Height = 52, Padding = new Padding(0, 0, 6, 0) };
+        // Sized to the start line, plus the size line while it is shown.
+        var summaryBar = new Panel
+        {
+            Dock = DockStyle.Top,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            Padding = new Padding(LogicalToDeviceUnits(6), LogicalToDeviceUnits(4), LogicalToDeviceUnits(6), LogicalToDeviceUnits(2)),
+        };
         summaryBar.Controls.Add(_size);
         summaryBar.Controls.Add(summaryLine);
 
