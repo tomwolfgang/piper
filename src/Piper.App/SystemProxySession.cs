@@ -35,33 +35,48 @@ public sealed class SystemProxyEnableException(Exception failure, Exception? und
 /// keeps two changes from interleaving - a stop that arrives while a start is still writing waits for
 /// it and then undoes it, rather than reading a half-written state - and it is a plain monitor, never
 /// released by a UI continuation, so the blocking shutdown path can take it from the UI thread
-/// without deadlocking.
+/// without deadlocking. It is shared with <see cref="SystemProxyRecovery"/>, because there is one
+/// machine proxy and one undo record: the exit hook must not clear the record between the moment a
+/// change saves it and the moment it points the machine at Piper.
 /// </remarks>
 public sealed class SystemProxySession(ISystemProxySettings settings, string? backupPath = null)
 {
-    private readonly object _gate = new();
     private SystemProxy.Snapshot? _snapshot;
+    private bool _closed;
 
     /// <summary>True while Piper has the machine pointed at itself and owes it a restore.</summary>
     public bool IsHeld
     {
         get
         {
-            lock (_gate) return _snapshot is not null;
+            lock (SystemProxyRecovery.Gate) return _snapshot is not null;
         }
     }
 
     /// <summary>
     /// Records the current settings, writes the undo record, then points the machine at
-    /// <paramref name="endpoint"/>. Returns false, changing nothing, when Piper already holds it:
-    /// a second capture would record Piper's own endpoint as the user's settings.
+    /// <paramref name="endpoint"/>. Returns false, changing nothing, when Piper already holds it (a
+    /// second capture would record Piper's own endpoint as the user's settings) or once
+    /// <see cref="Shutdown"/> has run.
     /// </summary>
+    /// <exception cref="SystemProxyLeftoverException">
+    /// An earlier run's record is still on disk, is good (or could not be read to tell), and could
+    /// not be undone now. Writing this session's record would overwrite the only copy of the user's
+    /// settings, which startup promised to keep for next time, so nothing is changed. A damaged
+    /// record can never be used and is replaced.
+    /// </exception>
     /// <exception cref="SystemProxyEnableException">The registry change failed.</exception>
     public bool Enable(string endpoint)
     {
-        lock (_gate)
+        lock (SystemProxyRecovery.Gate)
         {
-            if (_snapshot is not null) return false;
+            if (_snapshot is not null || _closed) return false;
+
+            // Any record on disk now is not this session's. Try once more to undo it, as startup
+            // does; one that is still there must survive rather than be replaced below.
+            var leftover = SystemProxyRecovery.RestoreLeftovers(settings, backupPath);
+            if (leftover.Outcome is LeftoverOutcome.RestoreFailed or LeftoverOutcome.Unreadable)
+                throw new SystemProxyLeftoverException(leftover);
 
             // Written to disk before the registry changes so an abrupt exit still leaves something
             // to undo. If either throws, nothing has been changed yet.
@@ -94,11 +109,26 @@ public sealed class SystemProxySession(ISystemProxySettings settings, string? ba
     /// </summary>
     public bool Restore()
     {
-        lock (_gate)
+        lock (SystemProxyRecovery.Gate)
         {
             if (_snapshot is null) return false;
             RestoreHeld();
             return true;
+        }
+    }
+
+    /// <summary>
+    /// Restores the proxy if Piper holds it, then refuses every later <see cref="Enable"/>, so a
+    /// change still queued when the window closes cannot point the machine at a Piper that is going
+    /// away. If the restore throws, the session stays open: the window is still there, and a retry
+    /// must be able to run.
+    /// </summary>
+    public void Shutdown()
+    {
+        lock (SystemProxyRecovery.Gate)
+        {
+            if (_snapshot is not null) RestoreHeld();
+            _closed = true;
         }
     }
 
@@ -109,7 +139,7 @@ public sealed class SystemProxySession(ISystemProxySettings settings, string? ba
     /// </summary>
     public LeftoverResult RecoverLeftovers(bool setAsideCorrupt)
     {
-        lock (_gate)
+        lock (SystemProxyRecovery.Gate)
         {
             return _snapshot is not null
                 ? new LeftoverResult(LeftoverOutcome.Nothing)
@@ -123,6 +153,16 @@ public sealed class SystemProxySession(ISystemProxySettings settings, string? ba
         _snapshot = null;
         SystemProxyBackupStore.Clear(backupPath);
     }
+}
+
+/// <summary>
+/// Enabling the system proxy was refused because an earlier run's undo record is still on disk and
+/// could not be undone; <see cref="Leftover"/> says why.
+/// </summary>
+public sealed class SystemProxyLeftoverException(LeftoverResult leftover)
+    : Exception(Strings.LeftoverProxy.EnableRefused(leftover.Detail ?? string.Empty))
+{
+    public LeftoverResult Leftover { get; } = leftover;
 }
 
 public enum LeftoverOutcome
@@ -163,6 +203,9 @@ public sealed record LeftoverResult(
 /// </summary>
 public static class SystemProxyRecovery
 {
+    /// <summary>The one lock every change to the machine proxy and its undo record goes through.</summary>
+    internal static readonly object Gate = new();
+
     /// <summary>
     /// Never throws: it runs at startup and on the way out of the process, where there is nothing
     /// above it to catch. Every outcome a user needs to hear about is in the result instead.
@@ -176,6 +219,12 @@ public static class SystemProxyRecovery
     {
         ArgumentNullException.ThrowIfNull(settings);
 
+        // Reentrant, so a session that already holds it can call this.
+        lock (Gate) return RestoreLeftoversLocked(settings, backupPath, setAsideCorrupt);
+    }
+
+    private static LeftoverResult RestoreLeftoversLocked(ISystemProxySettings settings, string? backupPath, bool setAsideCorrupt)
+    {
         var loaded = SystemProxyBackupStore.Load(backupPath);
         if (loaded.Status == SystemProxyBackupStatus.Missing) return new LeftoverResult(LeftoverOutcome.Nothing);
 

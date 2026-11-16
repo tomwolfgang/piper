@@ -25,6 +25,25 @@
     <ProjectReference Include="..\..\src\Piper.Core\Piper.Core.csproj" />
     <Compile Include="..\..\src\Piper.App\WindowActivation.cs" Link="WindowActivation.cs" />
     <Compile Include="..\..\src\Piper.App\Theme\StatusImages.cs" Link="StatusImages.cs" />
+    <!-- The panel host and the internal types it is built from, for PanelHostTests. -->
+    <Compile Include="..\..\src\Piper.App\Layout\PanelLayout.cs" Link="PanelLayout.cs" />
+    <Compile Include="..\..\src\Piper.App\Layout\PanelRegistry.cs" Link="PanelRegistry.cs" />
+    <Compile Include="..\..\src\Piper.App\Layout\PanelHost.cs" Link="PanelHost.cs" />
+    <Compile Include="..\..\src\Piper.App\Layout\PanelMenus.cs" Link="PanelMenus.cs" />
+    <Compile Include="..\..\src\Piper.App\Layout\SessionDrop.cs" Link="SessionDrop.cs" />
+    <Compile Include="..\..\src\Piper.App\Layout\FloatingPanelForm.cs" Link="FloatingPanelForm.cs" />
+    <Compile Include="..\..\src\Piper.App\Layout\AutoHideStrip.cs" Link="AutoHideStrip.cs" />
+    <Compile Include="..\..\src\Piper.App\Layout\Flyout.cs" Link="Flyout.cs" />
+    <Compile Include="..\..\src\Piper.App\Layout\TabDrag.cs" Link="TabDrag.cs" />
+    <Compile Include="..\..\src\Piper.App\Layout\ToolWindowHeader.cs" Link="ToolWindowHeader.cs" />
+    <Compile Include="..\..\src\Piper.App\TextInputFocus.cs" Link="TextInputFocus.cs" />
+    <!-- The panel menus' labels, read from the same catalogue the app embeds. -->
+    <Compile Include="..\..\src\Piper.App\Strings.cs" Link="Strings.cs" />
+    <Compile Include="..\..\src\Piper.App\I18n.cs" Link="I18n.cs" />
+    <Compile Include="..\..\src\Piper.App\Menus.cs" Link="Menus.cs" />
+    <EmbeddedResource Include="..\..\src\Piper.App\Locales\en.json" LogicalName="Piper.App.Locales.en.json" />
+    <Compile Include="..\..\src\Piper.App\Theme\DarkTabControl.cs" Link="DarkTabControl.cs" />
+    <Compile Include="..\..\src\Piper.App\Theme\DarkListView.cs" Link="DarkListView.cs" />
   </ItemGroup>
 
 </Project>

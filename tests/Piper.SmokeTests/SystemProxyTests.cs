@@ -238,7 +238,8 @@ internal static class SystemProxyTests
         runner.IsTrue(Same(UserSettings, settings.Current) && !File.Exists(path), "and cleans up");
 
         // No backup, no change: when the record cannot be written the registry is never touched.
-        var blocked = new SystemProxySession(settings, dir.Path); // a directory, so the move fails
+        File.WriteAllText(dir.File("not-a-directory"), "");
+        var blocked = new SystemProxySession(settings, Path.Combine(dir.File("not-a-directory"), "backup.json"));
         var enablesBefore = settings.Enables;
         runner.IsTrue(Throws<Exception>(() => blocked.Enable(Endpoint)) is not null, "enable fails without a record");
         runner.AreEqual(enablesBefore, settings.Enables, "and never pointed the machine at Piper");
@@ -272,6 +273,84 @@ internal static class SystemProxyTests
         runner.IsTrue(await enabling, "the enable completes");
         runner.IsTrue(await restoring, "then the restore undoes it");
         runner.IsTrue(Same(UserSettings, settings.Current) && !session.IsHeld && !File.Exists(path), "leaving the user's settings and no record");
+
+        // The exit hook's recovery takes the same lock: run between an enable's save and its
+        // registry write, it would find the machine not yet pointing at Piper, drop the record as
+        // stale, and leave nothing to undo the change that followed.
+        using var secondEnableEntered = new ManualResetEventSlim();
+        using var releaseSecondEnable = new ManualResetEventSlim();
+        settings.OnEnable = () =>
+        {
+            secondEnableEntered.Set();
+            releaseSecondEnable.Wait(TimeSpan.FromSeconds(10));
+        };
+        enabling = Task.Run(() => session.Enable(Endpoint));
+        runner.IsTrue(secondEnableEntered.Wait(TimeSpan.FromSeconds(10)), "an enable is in flight");
+        var exitHook = Task.Run(() => SystemProxyRecovery.RestoreLeftovers(settings, path));
+        runner.IsTrue(!exitHook.Wait(TimeSpan.FromMilliseconds(200)), "the exit hook waits for it");
+        releaseSecondEnable.Set();
+        settings.OnEnable = null;
+        runner.IsTrue(await enabling, "the enable completes");
+        runner.AreEqual(LeftoverOutcome.Restored, (await exitHook).Outcome, "then the exit hook undoes it");
+        runner.IsTrue(Same(UserSettings, settings.Current) && !File.Exists(path), "leaving the user's settings");
+        session.Restore(); // Its record is gone and the settings are back; this only drops the hold.
+    });
+
+    public static Task RunSessionShutdownAsync(TestRunner runner) => runner.RunAsync("system proxy session: nothing enables after shutdown, nor over an unowned record", () =>
+    {
+        using var dir = new TempDir();
+        var path = dir.File("system-proxy-backup.json");
+        var settings = new FakeProxySettings(UserSettings);
+
+        // A startup continuation that resumes after the window decided what to restore must not
+        // point the machine at a Piper that is closing.
+        var session = new SystemProxySession(settings, path);
+        runner.IsTrue(session.Enable(Endpoint), "enable takes the proxy");
+        session.Shutdown();
+        runner.IsTrue(Same(UserSettings, settings.Current) && !File.Exists(path), "shutdown restores it");
+        var enablesBefore = settings.Enables;
+        runner.IsTrue(!session.Enable(Endpoint), "an enable after shutdown is refused");
+        runner.AreEqual(enablesBefore, settings.Enables, "and never touches the registry");
+        runner.IsTrue(!session.IsHeld && !File.Exists(path), "nor writes a record");
+
+        var idle = new SystemProxySession(settings, path);
+        idle.Shutdown();
+        runner.IsTrue(!idle.Enable(Endpoint) && !File.Exists(path), "shutdown closes a session that held nothing too");
+
+        // A failed restore leaves the session open, so the window can retry.
+        var failing = new SystemProxySession(settings, path);
+        failing.Enable(Endpoint);
+        settings.RestoreFailure = new UnauthorizedAccessException("denied");
+        runner.IsTrue(Throws<UnauthorizedAccessException>(failing.Shutdown) is not null, "a failed shutdown reports it");
+        settings.RestoreFailure = null;
+        failing.Shutdown();
+        runner.IsTrue(Same(UserSettings, settings.Current) && !File.Exists(path), "and a retry restores");
+
+        // Startup could not undo an earlier run and promised to keep its record for next time: a
+        // capture must not overwrite that record with Piper's own.
+        SystemProxyBackupStore.Save(SystemProxyBackup.From(Endpoint, UserSettings), path);
+        settings.Current = new SystemProxy.Snapshot(1, Endpoint, "<local>", null, null);
+        settings.RestoreFailure = new UnauthorizedAccessException("registry denied");
+        var fresh = new SystemProxySession(settings, path);
+        enablesBefore = settings.Enables;
+        var refused = Throws<SystemProxyLeftoverException>(() => fresh.Enable(Endpoint));
+        runner.AreEqual(LeftoverOutcome.RestoreFailed, refused?.Leftover.Outcome, "enable refuses over a record it does not own");
+        runner.AreEqual(enablesBefore, settings.Enables, "without touching the registry");
+        runner.AreEqual("corp-proxy:3128", SystemProxyBackupStore.Load(path).Backup?.ProxyServer, "and the earlier run's record survives");
+
+        settings.RestoreFailure = null;
+        using (new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.None))
+        {
+            runner.AreEqual(LeftoverOutcome.Unreadable, Throws<SystemProxyLeftoverException>(() => fresh.Enable(Endpoint))?.Leftover.Outcome,
+                "nor over one it cannot read");
+        }
+
+        runner.IsTrue(fresh.Enable(Endpoint), "once the leftover can be undone, enable undoes it first");
+        runner.AreEqual("corp-proxy:3128", SystemProxyBackupStore.Load(path).Backup?.ProxyServer, "so it records the user's settings, not the dead proxy");
+        fresh.Restore();
+        runner.IsTrue(Same(UserSettings, settings.Current) && !File.Exists(path), "and closing puts them back");
+
+        return Task.CompletedTask;
     });
 
     private static T? Throws<T>(Action action) where T : Exception

@@ -23,7 +23,8 @@
     "f3": "F3",
     "zoomIn": "Ctrl++",
     "zoomOut": "Ctrl+-",
-    "zoomReset": "Ctrl+0"
+    "zoomReset": "Ctrl+0",
+    "focusPanel": "Ctrl+Alt+{{n}}"
   },
 
   "common": {
@@ -45,11 +46,29 @@
   },
 
   "tabs": {
+    "sessions": "Sessions",
     "inspectors": "Inspectors",
     "composer": "Composer",
     "filters": "Filters",
     "autoResponder": "AutoResponder",
     "log": "Log"
+  },
+
+  "panels": {
+    "title": "&Panels",
+    "resetLayout": "Reset &layout",
+    "moveLeft": "Move to &Left",
+    "moveRight": "Move to &Right",
+    "moveBottom": "Move to &Bottom",
+    "float": "&Float",
+    "dock": "&Dock",
+    "autoHide": "&Auto-hide area",
+    "topMost": "Always on &top",
+    "hide": "&Hide",
+    "sessions": "Sessions",
+    "headerPanels": "Panels in this area",
+    "headerPin": "Dock this area",
+    "headerClose": "Hide this panel"
   },
 
   "menu": {
@@ -231,6 +250,7 @@
 
   "log": {
     "line": "{{time, HH:mm:ss}}  {{message}}",
+    "empty": "No log entries yet",
 
     "rootCaPath": "Root CA: {{path}}",
     "rootCaTrusted": "Root CA is trusted by the current user. HTTPS decryption will work.",
@@ -332,7 +352,8 @@
     "corrupt": "Piper's record of your proxy settings from its last session is damaged, so it could not put them back and has not changed them.\n\nIf websites do not load when Piper is closed, open Windows Settings > Network & internet > Proxy and turn off \"Use a proxy server\" (or set it back to the proxy you normally use).",
     "corruptKept": "Piper's record of your proxy settings from its last session is damaged, so it could not put them back and has not changed them.\n\nIf websites do not load when Piper is closed, open Windows Settings > Network & internet > Proxy and turn off \"Use a proxy server\" (or set it back to the proxy you normally use).\n\nThe damaged record was kept as {{path}}.",
     "unreadable": "Piper could not read its record of your proxy settings from its last session, so it has not changed them. It will try again the next time it starts.\n\nIf websites do not load when Piper is closed, open Windows Settings > Network & internet > Proxy and turn off \"Use a proxy server\" (or set it back to the proxy you normally use).\n\n{{message}}",
-    "restoreFailed": "Piper's last session left your system proxy pointing at {{endpoint}}, and putting your previous settings back failed. Piper will try again the next time it starts.\n\nIf websites do not load when Piper is closed, open Windows Settings > Network & internet > Proxy and turn off \"Use a proxy server\" (or set it back to the proxy you normally use).\n\n{{message}}"
+    "restoreFailed": "Piper's last session left your system proxy pointing at {{endpoint}}, and putting your previous settings back failed. Piper will try again the next time it starts.\n\nIf websites do not load when Piper is closed, open Windows Settings > Network & internet > Proxy and turn off \"Use a proxy server\" (or set it back to the proxy you normally use).\n\n{{message}}",
+    "enableRefused": "Piper did not change the system proxy: its record of your proxy settings from its last session is still there and could not be put back, and replacing it would lose them.\n\n{{message}}"
   },
 
   "diagnostics": {

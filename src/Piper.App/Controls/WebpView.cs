@@ -39,7 +39,7 @@ internal sealed class WebpView : Panel
     private readonly Func<WebView2, Task> _ensureCore;
     private readonly List<MemoryStream> _streams = [];
     private WebView2? _view;
-    private bool _hardened;
+    private CoreWebView2? _hardenedCore;
     private byte[]? _webp;
     private Uri? _pageUri;
     private Uri? _imageUri;
@@ -85,10 +85,11 @@ internal sealed class WebpView : Panel
             await _ensureCore(view);
             if (generation != _generation || IsDisposed || view.CoreWebView2 is not { } core) return WebpShowResult.Superseded;
 
-            if (!_hardened)
+            // By instance, not once: a core the view has not seen, such as one under a new control, starts wide open.
+            if (!ReferenceEquals(_hardenedCore, core))
             {
                 Harden(core);
-                _hardened = true;
+                _hardenedCore = core;
             }
 
             started = true;

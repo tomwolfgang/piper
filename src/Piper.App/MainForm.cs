@@ -5,6 +5,7 @@ using System.Security;
 using System.Security.Principal;
 using System.Windows.Forms;
 using Piper.App.Controls;
+using Piper.App.Layout;
 using Piper.App.Theme;
 using Piper.Core.Proxy;
 using Piper.Core.Security;
@@ -29,9 +30,10 @@ public sealed partial class MainForm : Form, IMessageFilter
     private readonly ComposerPanel _composer;
     private readonly FilterPanel _filterPanel;
     private readonly AutoResponderPanel _autoResponder;
-    private TabPage _autoResponderPage = null!;
     private readonly TextBox _logView;
-    private readonly DarkTabControl _rightTabs;
+    private readonly PanelRegistry _panels;
+    private readonly PanelHost _panelHost;
+    private readonly MenuStrip _menu;
 
     private readonly ToolStripStatusLabel _zoomLabel;
     private ToolStripMenuItem? _zoomInItem;
@@ -87,7 +89,7 @@ public sealed partial class MainForm : Form, IMessageFilter
         Height = 950;
         StartPosition = FormStartPosition.CenterScreen;
         MinimumSize = new Size(900, 600);
-        RestoreWindowBounds();
+        var savedPanels = RestoreWindowBounds();
         if (_restoreMaximized) WindowState = FormWindowState.Maximized;
 
         if (StatusBarSettingsStore.Load() is { } statusBarSettings)
@@ -131,27 +133,19 @@ public sealed partial class MainForm : Form, IMessageFilter
             ScrollBars = ScrollBars.Both,
             Font = Palette.Mono,
             BorderStyle = BorderStyle.None,
+            PlaceholderText = Strings.Log.Empty,
         };
 
-        _rightTabs = new DarkTabControl { Dock = DockStyle.Fill, Font = Palette.UiFont };
-        var inspectorsPage = NewPage(Strings.Tabs.Inspectors, _inspector);
-        _rightTabs.TabPages.Add(inspectorsPage);
-        _rightTabs.TabPages.Add(NewPage(Strings.Tabs.Composer, _composer));
-        var filtersPage = NewPage(Strings.Tabs.Filters, _filterPanel);
-        _rightTabs.TabPages.Add(filtersPage);
-        _autoResponderPage = NewPage(Strings.Tabs.AutoResponder, _autoResponder);
-        _rightTabs.TabPages.Add(_autoResponderPage);
-        _rightTabs.TabPages.Add(NewPage(Strings.Tabs.Log, _logView));
-
-        var split = new SplitContainer
+        _panels = new PanelRegistry(new Dictionary<PanelId, (Control Content, string Title)>
         {
-            Dock = DockStyle.Fill,
-            Orientation = Orientation.Vertical,
-            SplitterWidth = 4,
-        };
-        split.Panel1.Controls.Add(_sessionList);
-        split.Panel2.Controls.Add(_rightTabs);
-        _mainSplit = split;
+            [PanelId.Sessions] = (_sessionList, Strings.Tabs.Sessions),
+            [PanelId.Inspectors] = (_inspector, Strings.Tabs.Inspectors),
+            [PanelId.Composer] = (_composer, Strings.Tabs.Composer),
+            [PanelId.Filters] = (_filterPanel, Strings.Tabs.Filters),
+            [PanelId.AutoResponder] = (_autoResponder, Strings.Tabs.AutoResponder),
+            [PanelId.Log] = (_logView, Strings.Tabs.Log),
+        });
+        _panelHost = new PanelHost(_panels, savedPanels) { Dock = DockStyle.Fill };
 
         var toolbar = BuildToolbar();
         var statusBar = BuildStatusBar(out _statusLabel, out _captureStatusLabel, out _captureScopeLabel,
@@ -160,15 +154,21 @@ public sealed partial class MainForm : Form, IMessageFilter
         _captureScopeLabel.Click += (_, _) => ShowCaptureScopeMenu();
         var trustBar = BuildTrustUi(statusBar);
         ApplyCaptureScope();
-        _rightTabs.AllowDrop = true;
-        _rightTabs.DragEnter += OnSessionDragEnter;
-        _rightTabs.DragOver += OnSessionDragOver;
-        _rightTabs.DragDrop += OnSessionDragDrop;
+        var sessionDrop = new SessionDrop(_panels, (id, session) =>
+        {
+            if (id == PanelId.AutoResponder) _autoResponder.AddRuleFromSession(session);
+            else _composer.LoadSession(session);
+        });
+        _panelHost.StripCreated += (_, strip) => sessionDrop.Attach(strip);
+        // An auto-hidden area's flyout closes when Piper loses the foreground, as in Visual Studio.
+        Deactivate += (_, _) => _panelHost.CloseFlyouts(deactivated: true);
 
-        Controls.Add(split);
+        Controls.Add(_panelHost);
+        // The Sessions tab comes before the grid in tab order; without this it, not the grid, takes the first focus.
+        ActiveControl = _sessionList;
         Controls.Add(trustBar);
         Controls.Add(toolbar);
-        Controls.Add(BuildMenu());
+        Controls.Add(_menu = BuildMenu());
         Controls.Add(statusBar);
         EnableSazFileDrop(this);
 
@@ -182,7 +182,7 @@ public sealed partial class MainForm : Form, IMessageFilter
         };
         _sessionList.SendToComposerRequested += (_, session) =>
         {
-            _rightTabs.SelectedIndex = 1;
+            _panelHost.ShowPanel(PanelId.Composer, PanelReveal.Explicit);
             _composer.LoadSession(session);
         };
         _sessionList.ResendRequested += (_, session) => _ = _composer.ResendAsync(session);
@@ -190,7 +190,7 @@ public sealed partial class MainForm : Form, IMessageFilter
         // already been loaded into. Sending the row to the Composer instead made the gesture a
         // duplicate of middle-click and Ctrl+E, and left no row gesture that brought the
         // inspector back.
-        _sessionList.SessionActivated += (_, _) => _rightTabs.SelectedTab = inspectorsPage;
+        _sessionList.SessionActivated += (_, _) => _panelHost.ShowPanel(PanelId.Inspectors, PanelReveal.Explicit);
 
         // The filterset gets its own visibility slot rather than the grid's ad-hoc filter box.
         // Writing it into FilterText destroyed whatever the user had typed there, and worse, let
@@ -214,7 +214,7 @@ public sealed partial class MainForm : Form, IMessageFilter
             // on a non-empty query would stop unticking from being written, and the filterset
             // would come back applied on the next start.
             FilterSettingsStore.Save(_filterPanel.Settings);
-            _rightTabs.SetTabChecked(filtersPage, !admissionQuery.IsEmpty);
+            _panelHost.SetTabChecked(PanelId.Filters, !admissionQuery.IsEmpty);
         };
         _filterPanel.SettingsChanged += (_, _) => FilterSettingsStore.Save(_filterPanel.Settings);
         _sessionList.CopyAsNotice += (_, message) => AppendLog(message);
@@ -236,7 +236,7 @@ public sealed partial class MainForm : Form, IMessageFilter
                 NotifyRulesProblemOnce(Strings.AutoResponder.RulesNotSavedProtected(AutoResponderSettingsStore.DefaultPath));
             else
                 ReportAutoResponderSave(AutoResponderSettingsStore.Save(settings));
-            _rightTabs.SetTabChecked(_autoResponderPage, settings.Enabled && settings.Rules.Count > 0);
+            _panelHost.SetTabChecked(PanelId.AutoResponder, settings.Enabled && settings.Rules.Count > 0);
             foreach (var warning in _options.AutoResponder.Warnings) AppendLog(Strings.Log.AutoResponderWarning(warning));
         };
 
@@ -254,7 +254,7 @@ public sealed partial class MainForm : Form, IMessageFilter
 
         _sessionList.SendToAutoResponderRequested += (_, session) =>
         {
-            _rightTabs.SelectedTab = _autoResponderPage;
+            _panelHost.ShowPanel(PanelId.AutoResponder, PanelReveal.Explicit);
             _autoResponder.AddRuleFromSession(session);
         };
 
@@ -266,6 +266,7 @@ public sealed partial class MainForm : Form, IMessageFilter
 
         KeyPreview = true;
         KeyDown += OnFormKeyDown;
+        _panelHost.RouteKeys(ProcessShortcut, OnFormKeyDown);
 
         // Ctrl+wheel cannot be picked up by KeyPreview or ProcessCmdKey, and WM_MOUSEWHEEL goes to
         // whichever control has focus, so a message filter is the only hook that covers the whole
@@ -294,7 +295,6 @@ public sealed partial class MainForm : Form, IMessageFilter
         // app comes up with no visible main form at all.
     }
 
-    private readonly SplitContainer _mainSplit;
     private readonly System.Windows.Forms.Timer _statusTimer;
 
     protected override void OnHandleCreated(EventArgs e)
@@ -377,10 +377,13 @@ public sealed partial class MainForm : Form, IMessageFilter
         else _pendingRulesNotice = _pendingRulesNotice is null ? message : $"{_pendingRulesNotice}\n\n{message}";
     }
 
+    private bool IsClosingOrGone => IsDisposed || _shutdownInProgress || _closeAfterShutdown;
+
     protected override async void OnShown(EventArgs e)
     {
         base.OnShown(e);
-        _mainSplit.SplitterDistance = (int)(_mainSplit.Width * 0.55);
+        // Only now: an owned window opened from the constructor would appear before its owner.
+        _panelHost.ShowFloatingWindows();
 
         // A run that was killed, crashed, or was still open when Windows shut down leaves the
         // machine pointed at a Piper that is no longer listening, which the user sees as having
@@ -400,7 +403,9 @@ public sealed partial class MainForm : Form, IMessageFilter
             if (!IsDisposed) _captureStatusLabel.Enabled = true;
         }
 
-        if (IsDisposed) return;
+        // A close that began while recovery ran has already decided what to restore; going on to
+        // start capture and enable the proxy behind it would leave it pointed at a closed Piper.
+        if (IsClosingOrGone) return;
         ReportLeftoverProxy(leftover);
 
         // After the restore, not before: this dialog stays up until it is dismissed, and behind it
@@ -409,7 +414,7 @@ public sealed partial class MainForm : Form, IMessageFilter
         {
             _unusableSavedRules = null;
             var described = await SetAsideAndDescribeAsync(unusable);
-            if (IsDisposed) return;
+            if (IsClosingOrGone) return;
 
             AppendLog(described);
             _pendingRulesNotice = _pendingRulesNotice is null ? described : $"{described}\n\n{_pendingRulesNotice}";
@@ -429,6 +434,9 @@ public sealed partial class MainForm : Form, IMessageFilter
             QueueStartupUpdateCheck();
             return;
         }
+
+        // The dialogs above are modal, and a Windows shutdown can close the window behind them.
+        if (IsClosingOrGone) return;
 
         if (startCapture)
         {
@@ -463,7 +471,7 @@ public sealed partial class MainForm : Form, IMessageFilter
                 }
             }
 
-            if (IsDisposed) return;
+            if (IsClosingOrGone) return;
         }
 
         QueueStartupUpdateCheck();
@@ -615,45 +623,6 @@ public sealed partial class MainForm : Form, IMessageFilter
         }
     }
 
-    private static TabPage NewPage(string title, Control content)
-    {
-        var page = new TabPage(title);
-        page.Controls.Add(content);
-        return page;
-    }
-
-    private void OnSessionDragEnter(object? sender, DragEventArgs e) => SetSessionDragEffect(e);
-
-    private void OnSessionDragOver(object? sender, DragEventArgs e) => SetSessionDragEffect(e);
-
-    private void SetSessionDragEffect(DragEventArgs e)
-    {
-        if (!HasCapturedRequest(e.Data) || SessionDropTarget(e) is not { } target)
-        {
-            e.Effect = DragDropEffects.None;
-            return;
-        }
-
-        // Selecting on hover makes the target clear even when it was not the active tab.
-        _rightTabs.SelectedTab = target;
-        e.Effect = DragDropEffects.Copy;
-    }
-
-    private void OnSessionDragDrop(object? sender, DragEventArgs e)
-    {
-        if (SessionDropTarget(e) is not { } target
-            || e.Data?.GetData(typeof(Session)) is not Session session
-            || session.Request is null)
-            return;
-
-        _rightTabs.SelectedTab = target;
-        if (target == _autoResponderPage) _autoResponder.AddRuleFromSession(session);
-        else _composer.LoadSession(session);
-    }
-
-    private static bool HasCapturedRequest(IDataObject? data) =>
-        data?.GetData(typeof(Session)) is Session { Request: not null };
-
     private void EnableSazFileDrop(Control control)
     {
         control.AllowDrop = true;
@@ -721,29 +690,6 @@ public sealed partial class MainForm : Form, IMessageFilter
         return Strings.Log.DropNoneImportable(paths.Length,
             DiagnosticsBundle.Summarise(rejected, paths.Length, MaxLoggedNames));
     }
-
-    /// <summary>
-    /// The tab a dragged session would land on, or null where a drop means nothing. Composer and
-    /// AutoResponder both take sessions; every other tab refuses them.
-    /// </summary>
-    private TabPage? SessionDropTarget(DragEventArgs e)
-    {
-        var point = _rightTabs.PointToClient(new Point(e.X, e.Y));
-
-        for (var i = 0; i < _rightTabs.TabCount; i++)
-        {
-            if (!_rightTabs.GetTabRect(i).Contains(point)) continue;
-            var tab = _rightTabs.TabPages[i];
-            return AcceptsSessions(tab) ? tab : null;
-        }
-
-        // Once hover has activated a tab that takes sessions, keep accepting the drop on its page too.
-        var stripBottom = _rightTabs.TabCount > 0 ? _rightTabs.GetTabRect(0).Bottom : 0;
-        return point.Y >= stripBottom && AcceptsSessions(_rightTabs.SelectedTab) ? _rightTabs.SelectedTab : null;
-    }
-
-    private bool AcceptsSessions(TabPage? tab) =>
-        tab is not null && (tab == _autoResponderPage || tab.Controls.Contains(_composer));
 
     // ------------------------------------------------------------------ chrome
 
@@ -819,7 +765,14 @@ public sealed partial class MainForm : Form, IMessageFilter
         _zoomInItem = NewZoomItem(Strings.Menu.ZoomIn, Keys.Control | Keys.Oemplus, Strings.Shortcuts.ZoomIn, FontScale.ZoomIn);
         _zoomOutItem = NewZoomItem(Strings.Menu.ZoomOut, Keys.Control | Keys.OemMinus, Strings.Shortcuts.ZoomOut, FontScale.ZoomOut);
         _zoomResetItem = NewZoomItem(Strings.Menu.ResetZoom, Keys.Control | Keys.D0, Strings.Shortcuts.ZoomReset, FontScale.Reset);
-        view.DropDownItems.AddRange([_zoomInItem, _zoomOutItem, new ToolStripSeparator(), _zoomResetItem]);
+        // Reset layout saves at once: it is the way back from a layout that has gone wrong.
+        var resetLayout = new ToolStripMenuItem(Strings.Panels.ResetLayout, null, (_, _) =>
+        {
+            _panelHost.ResetLayout();
+            SaveWindowBounds();
+        });
+        view.DropDownItems.AddRange([_zoomInItem, _zoomOutItem, new ToolStripSeparator(), _zoomResetItem,
+            new ToolStripSeparator(), PanelMenus.Panels(_panelHost), resetLayout]);
         UpdateZoomMenu();
         return view;
     }
@@ -869,7 +822,7 @@ public sealed partial class MainForm : Form, IMessageFilter
             passthrough.Click += (_, _) => _autoResponder.SetPassthroughUnmatched(passthrough.Checked);
             rules.DropDownItems.Add(passthrough);
 
-            rules.DropDownItems.Add(Strings.Menu.AutoResponderRules, null, (_, _) => _rightTabs.SelectedTab = _autoResponderPage);
+            rules.DropDownItems.Add(Strings.Menu.AutoResponderRules, null, (_, _) => _panelHost.ShowPanel(PanelId.AutoResponder, PanelReveal.Explicit));
         };
         return rules;
     }
@@ -1146,7 +1099,7 @@ public sealed partial class MainForm : Form, IMessageFilter
             MessageBox.Show(this, string.Join("\n\n", shown), Strings.App.Name, MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
         if (IsDisposed) return;
-        _rightTabs.SelectedIndex = importedToComposer ? 1 : 0;
+        _panelHost.ShowPanel(importedToComposer ? PanelId.Composer : PanelId.Inspectors, PanelReveal.Explicit);
     }
 
     private ToolStrip BuildToolbar()
@@ -1159,7 +1112,7 @@ public sealed partial class MainForm : Form, IMessageFilter
         var composer = new ToolStripButton(Strings.Toolbar.Composer) { DisplayStyle = ToolStripItemDisplayStyle.Text };
         composer.Click += (_, _) =>
         {
-            _rightTabs.SelectedIndex = 1;
+            _panelHost.FocusPanel(PanelId.Composer);
             _composer.FocusSearch();
         };
 
@@ -1186,6 +1139,7 @@ public sealed partial class MainForm : Form, IMessageFilter
         RefreshStatusIcons();
         UpdateThemeToggle();
         InvalidateTheme(this);
+        _panelHost.ApplyTheme();
     }
 
     private void UpdateThemeToggle()
@@ -1286,29 +1240,34 @@ public sealed partial class MainForm : Form, IMessageFilter
         return bar;
     }
 
-    private void RestoreWindowBounds()
+    /// <summary>Restores the saved window bounds and returns the saved panel layout, made safe to show.</summary>
+    private PanelLayout RestoreWindowBounds()
     {
-        if (WindowLayoutStore.Load() is not { } layout) return;
+        if (WindowLayoutStore.Load() is not { } layout) return PanelLayout.Default();
+        var panels = layout.Panels;
+        panels.Normalise(Screen.AllScreens.Select(screen => screen.WorkingArea).ToList());
         var bounds = layout.ToRectangle();
-        if (bounds.Width < MinimumSize.Width || bounds.Height < MinimumSize.Height) return;
+        if (bounds.Width < MinimumSize.Width || bounds.Height < MinimumSize.Height) return panels;
 
         // A monitor may have been disconnected since the last run. Require a meaningful visible
         // portion before restoring, otherwise retain the centred default window.
         var visible = Screen.AllScreens
             .Select(screen => Rectangle.Intersect(screen.WorkingArea, bounds))
             .Any(area => area.Width >= 48 && area.Height >= 48);
-        if (!visible) return;
+        if (!visible) return panels;
 
         StartPosition = FormStartPosition.Manual;
         Bounds = bounds;
         _restoreMaximized = layout.Maximized;
+        return panels;
     }
 
     private void SaveWindowBounds()
     {
         var bounds = WindowState == FormWindowState.Normal ? Bounds : RestoreBounds;
         if (bounds.Width >= MinimumSize.Width && bounds.Height >= MinimumSize.Height)
-            WindowLayoutStore.Save(bounds, WindowState == FormWindowState.Maximized);
+            WindowLayoutStore.Save(new WindowLayoutStore.WindowLayout(bounds, WindowState == FormWindowState.Maximized,
+                _panelHost.Snapshot()));
     }
 
     private static ToolStripStatusLabel NewStatusAction(string text, Image image, string tooltip) => new(text, image)
@@ -1495,7 +1454,7 @@ public sealed partial class MainForm : Form, IMessageFilter
             AppendLog(Strings.Log.ListenFailed(_options.Port, ex.GetType().Name, ex.Message));
             AppendLog(Strings.Log.PortInUseHint);
             UpdateCaptureStatus();
-            _rightTabs.SelectedIndex = 4; // surface the Log tab (Inspectors, Composer, Filters, AutoResponder, Log)
+            _panelHost.ShowPanel(PanelId.Log, PanelReveal.Passive);
         }
     }
 
@@ -1816,16 +1775,36 @@ public sealed partial class MainForm : Form, IMessageFilter
 
     private void OnFormKeyDown(object? sender, KeyEventArgs e)
     {
+        if (!ProcessShortcut(e.KeyData)) return;
+        e.Handled = true;
+        e.SuppressKeyPress = true;
+    }
+
+    /// <summary>
+    /// The window's keyboard shortcuts, for this window's <c>KeyDown</c> and for every floating panel
+    /// window's <c>ProcessCmdKey</c> and <c>KeyDown</c>. Menu accelerators come first: a floating window
+    /// is another top-level window, so WinForms would not route them to this window's menu on its own.
+    /// True when the key was handled.
+    /// </summary>
+    internal bool ProcessShortcut(Keys keyData)
+    {
+        // A floating window can still take keys while the window shuts down; none of these may run then.
+        if (_shutdownInProgress) return false;
+        if (Menus.PerformShortcut(_menu, keyData)) return true;
+
+        var e = new KeyEventArgs(keyData);
         if (e.KeyCode == Keys.F12)
         {
             ToggleCapture();
-            e.Handled = true;
         }
         else if (e.Control && e.KeyCode == Keys.K)
         {
-            _rightTabs.SelectedIndex = 1;
+            _panelHost.FocusPanel(PanelId.Composer);
             _composer.FocusSearch();
-            e.Handled = true;
+        }
+        else if (PanelMenus.FocusChordTarget(e, IsTextInputFocused()) is { } panel)
+        {
+            _panelHost.FocusPanel(panel);
         }
         // KeyPreview hands this form every key before the focused control sees it, so a chord that
         // means something inside a text box has to leave it alone there: Ctrl+X cut the selected text
@@ -1833,13 +1812,11 @@ public sealed partial class MainForm : Form, IMessageFilter
         // user was typing in the Composer.
         else if (e.Control && e.KeyCode == Keys.R && !IsTextInputFocused() && _sessionList.ResendSelected())
         {
-            e.Handled = true;
-            e.SuppressKeyPress = true;
+            // ResendSelected replayed it; a selection that cannot be replayed leaves Ctrl+R unhandled.
         }
         else if (e.Control && e.KeyCode == Keys.X && !IsTextInputFocused())
         {
             _store.Clear();
-            e.Handled = true;
         }
         else if (e.Control && e.KeyCode is Keys.Add or Keys.Subtract or Keys.NumPad0)
         {
@@ -1849,8 +1826,6 @@ public sealed partial class MainForm : Form, IMessageFilter
                 Keys.Subtract => FontScale.ZoomOut(),
                 _ => FontScale.Reset(),
             });
-            e.Handled = true;
-            e.SuppressKeyPress = true;
         }
         else if (e.Control && e.Shift && e.KeyCode is Keys.Oemplus or Keys.OemMinus)
         {
@@ -1858,31 +1833,17 @@ public sealed partial class MainForm : Form, IMessageFilter
             // chance at. On a layout where "+" is Shift+=, the shifted chord reaches here instead,
             // and the shortcut the README advertises would otherwise do nothing.
             ChangeFontScale(e.KeyCode == Keys.Oemplus ? FontScale.ZoomIn() : FontScale.ZoomOut());
-            e.Handled = true;
-            e.SuppressKeyPress = true;
         }
-    }
-
-    /// <summary>
-    /// Whether keyboard focus is in a control that edits text, where Ctrl+X, Ctrl+R and friends
-    /// belong to the control. <see cref="ContainerControl.ActiveControl"/> stops at the nearest
-    /// container (every panel here is a UserControl), so walk down to the control that has focus.
-    /// </summary>
-    private bool IsTextInputFocused()
-    {
-        Control? focused = ActiveControl;
-        while (focused is ContainerControl { ActiveControl: { } inner } and not UpDownBase) focused = inner;
-
-        // Read-only boxes count too: someone reading a body in the inspector who reaches for Ctrl+X
-        // expects nothing, or at most a copy, not an empty capture.
-        return focused switch
+        else
         {
-            TextBoxBase => true,
-            ComboBox { DropDownStyle: not ComboBoxStyle.DropDownList } => true,
-            UpDownBase => true,
-            _ => false,
-        };
+            return false;
+        }
+
+        return true;
     }
+
+    /// <summary>Whether the window that has the keyboard, this one or a floating panel's, is typing into a text box.</summary>
+    private bool IsTextInputFocused() => TextInputFocus.IsTextInputFocused(Form.ActiveForm ?? this);
 
     /// <summary>
     /// Ctrl+MouseWheel resizes the UI. The wheel message goes to the focused control rather than the
@@ -1935,6 +1896,7 @@ public sealed partial class MainForm : Form, IMessageFilter
         UpdateZoomStatus();
         UpdateZoomMenu();
         InvalidateTheme(this);
+        _panelHost.ApplyTheme();
     }
 
     /// <summary>
@@ -2155,25 +2117,35 @@ public sealed partial class MainForm : Form, IMessageFilter
             return;
         }
 
+        // Windows shutdown, Task Manager and Application.Exit do not honour a cancelled close:
+        // deferring the cleanup to a continuation there would let the process go away with the
+        // system proxy still pointed at Piper. Take the blocking path instead, and restore the proxy
+        // before anything else, so no failure saving the layout or settings can skip it.
+        var blocking = e.CloseReason is CloseReason.WindowsShutDown or CloseReason.TaskManagerClosing
+            or CloseReason.ApplicationExitCall;
+        if (blocking)
+        {
+            _closeAfterShutdown = true;
+            // Synchronous on purpose (see above). The session's lock is never released by a UI
+            // continuation, so this waits for a change still running on a worker thread rather
+            // than deadlocking on it. Shutdown also stops any change still queued from enabling
+            // the proxy again afterwards.
+            try { _systemProxy.Shutdown(); }
+            catch (Exception ex) { AppendLog(Strings.Log.SystemProxyRestoreFailed(ex.Message)); }
+        }
+
+        // Saved while the floating windows still exist, so their bounds are in it; from here on,
+        // closing one hands its panel back without docking it. On the asynchronous path this also
+        // disables the floating windows before the proxy is restored.
         SaveWindowBounds();
+        _panelHost.ShuttingDown = true;
         SaveFontScaleSettings();
         _sessionList.CancelSazSave(TimeSpan.FromSeconds(5));
 
-        // Windows shutdown, Task Manager and Application.Exit do not honour a cancelled close:
-        // deferring the cleanup to a continuation there would let the process go away with the
-        // system proxy still pointed at Piper. Take the blocking path instead.
-        if (e.CloseReason is CloseReason.WindowsShutDown or CloseReason.TaskManagerClosing
-            or CloseReason.ApplicationExitCall)
+        if (blocking)
         {
-            _closeAfterShutdown = true;
             FilterSettingsStore.Save(_filterPanel.Settings);
             SaveStatusBarSettings();
-            // Synchronous on purpose (see above). The session's lock is never released by a UI
-            // continuation, so this waits for a change still running on a worker thread rather
-            // than deadlocking on it.
-            try { _systemProxy.Restore(); }
-            catch (Exception ex) { AppendLog(Strings.Log.SystemProxyRestoreFailed(ex.Message)); }
-
             base.OnFormClosing(e);
             return;
         }
@@ -2214,9 +2186,11 @@ public sealed partial class MainForm : Form, IMessageFilter
                 _statusLabel.Text = Strings.StatusBar.RestoringSystemProxy;
                 _sessionsLabel.Text = Strings.StatusBar.PleaseWait;
                 await Task.Yield(); // Let the status change paint before WinINET is notified.
-
-                await Task.Run(_systemProxy.Restore);
             }
+
+            // Also when nothing is held: from here on the session refuses to enable the proxy, so a
+            // startup continuation that resumes after this cannot point it at a closing Piper.
+            await Task.Run(_systemProxy.Shutdown);
 
             if (_proxy.IsRunning)
             {
@@ -2234,6 +2208,7 @@ public sealed partial class MainForm : Form, IMessageFilter
             // Do not silently exit if the Windows proxy could not be restored: leaving it
             // pointed at a closed Piper instance would break the user's network access.
             _shutdownInProgress = false;
+            _panelHost.ShuttingDown = false;
             Enabled = true;
             Text = Strings.App.Name;
             _statusTimer.Start();
@@ -2265,5 +2240,7 @@ public sealed partial class MainForm : Form, IMessageFilter
             _ca.Dispose();
         }
         base.Dispose(disposing);
+        // Last: the panels the window's own disposal did not reach, such as a hidden one.
+        if (disposing) _panels.Dispose();
     }
 }

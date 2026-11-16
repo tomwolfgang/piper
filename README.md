@@ -55,6 +55,7 @@ src/Piper.Core/          no UI dependencies, targets net10.0
   Sessions/                 session model, store, search query compiler
 src/Piper.App/           WinForms shell, targets net10.0-windows
   Controls/                 session grid, inspectors, composer, autoresponder
+  Layout/                   movable panels: docking, floating windows, auto-hide flyouts
   Theme/                    dark palette and owner-drawn list/tab controls
 tests/Piper.SmokeTests/  end-to-end tests, no test framework needed
 tests/Piper.UiTests/     drives real WinForms controls; needs a desktop session
@@ -75,7 +76,9 @@ existing proxy settings are saved and restored when you turn it off or close the
 If Piper is killed outright (End Task in Task Manager, power loss) it cannot restore
 them until the next time it starts, so until then websites may not load; start Piper again, or
 turn off **Use a proxy server** in Windows Settings > Network & internet > Proxy. If the saved
-record is damaged, Piper tells you at startup and leaves your proxy settings unchanged.
+record is damaged, Piper tells you at startup and leaves your proxy settings unchanged. If it
+could not put them back, it keeps the record and will not use the system proxy until it can, so
+it never overwrites your only copy of them.
 
 ### HTTPS
 
@@ -170,6 +173,11 @@ method:POST host:api status:>=400 -is:image body:"order"
 | `Ctrl+MouseWheel` | resize the UI font |
 | `Ctrl++` / `Ctrl+-` | resize the UI font a step at a time |
 | `Ctrl+0` | reset the UI font to 100% |
+| `Ctrl+Alt+1` ... `Ctrl+Alt+6` | show and focus Sessions, Inspectors, Composer, Filters, AutoResponder or Log (outside text boxes, where `Ctrl+Alt` is `AltGr` and types a character) |
+| right-click a panel's tab, or `Shift+F10` / Menu key on it | move the panel to the left, right or bottom area, float it in its own window or dock it again, auto-hide its area, keep a floating window on top, or hide it |
+| click ▾ at the right end of a tab row (shown when its tabs do not all fit) | list every tab in that row and switch to one |
+| `Esc` in an auto-hidden panel's flyout | close the flyout |
+| `Esc` while dragging a panel's tab | cancel the drag |
 
 **View > Zoom** does the same from the menu. The size is clamped to 70-150% - past that a window
 built from fixed row heights starts clipping its own text - and it is remembered between runs. The
@@ -185,6 +193,35 @@ using `Ctrl+Shift+Left` / `Ctrl+Shift+Right`, selects that component rather than
 double-click and dragging extends the selection one character at a time, including in text boxes
 that wrap long lines.
 Supplementary Unicode characters and combining marks stay together in the selected word.
+
+## Window layout
+
+The panels sit in three areas: Left, Right and Bottom. To move a panel, open its tab menu
+(right-click its tab, or `Shift+F10` / Menu key on it) and choose **Move to Left**, **Right** or
+**Bottom**, or drag its tab:
+drop it on another area's tabs to move it there, along its own tabs to reorder them, on an
+auto-hidden area's strip to add it to that area, or outside the main window to float it there. An
+accent marker shows where it will land; `Esc` cancels the drag.
+
+**Float** puts a panel in a window of its own, which minimises with Piper, shows in Alt+Tab and
+takes the same keyboard shortcuts as the main window. Its title bar stands in for the tab:
+right-click it, or press `Shift+F10` on a control in the window that has no menu of its own, for
+the panel's menu. To dock the panel
+again, close the window, double-click its title bar, choose **Dock**, or drag the title bar onto an
+area's tab row.
+
+**Auto-hide area** folds an area into a thin strip of panel names along the window edge, as in
+Visual Studio. Clicking a name slides that panel out over the rest of the window without moving
+anything under it; clicking elsewhere, `Esc` or switching away closes it again. The flyout's title
+bar has three buttons: ▾ lists the area's panels to switch to, the pin docks the area again, and ✕
+hides the panel. The area holding the Sessions list cannot be auto-hidden.
+
+**View > Panels** shows or hides each panel; a hidden panel comes back where it was. The Sessions
+list cannot be hidden. **View > Reset layout** puts every panel back in its default place, pins
+every area and docks every floating window.
+
+The layout, floating windows included, is remembered between runs. An older Piper opening the same
+settings keeps the window size but drops the panel layout.
 
 ## Testing
 

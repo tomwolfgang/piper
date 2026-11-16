@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Piper.Core.Text;
 
 namespace Piper.App;
 
@@ -153,14 +154,8 @@ public static class SystemProxyBackupStore
         try
         {
             using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
-
-            // Read at most one byte past the limit rather than trusting Length, so a file that grows
-            // while it is read still cannot make this allocate more than the cap.
-            buffer = new byte[MaxBytes + 1];
-            length = 0;
-            int read;
-            while (length < buffer.Length && (read = stream.Read(buffer, length, buffer.Length - length)) > 0)
-                length += read;
+            if (!BoundedRead.TryRead(stream, MaxBytes, out buffer, out length))
+                return new SystemProxyBackupLoad(SystemProxyBackupStatus.TooLarge);
         }
         catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException)
         {
@@ -170,8 +165,6 @@ public static class SystemProxyBackupStore
         {
             return new SystemProxyBackupLoad(SystemProxyBackupStatus.Unreadable, Detail: ex.Message);
         }
-
-        if (length > MaxBytes) return new SystemProxyBackupLoad(SystemProxyBackupStatus.TooLarge);
 
         SystemProxyBackup? backup;
         try

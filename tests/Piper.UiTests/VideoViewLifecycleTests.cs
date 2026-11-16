@@ -80,6 +80,34 @@ internal static class VideoViewLifecycleTests
 
         check(!weak.IsAlive, "after Clear nothing in the view keeps the body array alive");
 
+        Console.WriteLine("== a recreated CoreWebView2 is hardened again");
+        var firstCore = view.View!.CoreWebView2;
+        WebpViewTests.RecreateHandle.Invoke(view.View, null);
+        var settled = 0;
+        pumpUntil(() => ++settled > 20);
+        check(Await(view.ShowAsync(Webm, null)) == VideoShowResult.Shown, "after the handle is recreated a video is shown again");
+        Console.WriteLine($"   (RecreateHandle {(ReferenceEquals(firstCore, view.View?.CoreWebView2) ? "kept" : "replaced")} the CoreWebView2)");
+        CheckBlocked("after RecreateHandle");
+
+        // A core the view has not seen before must be hardened too: swap in a new WebView2 control.
+        var oldControl = view.View!;
+        view.Controls.Remove(oldControl);
+        oldControl.Dispose();
+        typeof(VideoView).GetField("_view", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.SetValue(view, null);
+        check(Await(view.ShowAsync(Webm, null)) == VideoShowResult.Shown && !ReferenceEquals(firstCore, view.View?.CoreWebView2),
+            "a video is shown in a new CoreWebView2");
+        CheckBlocked("in the new core");
+        view.Clear();
+
+        void CheckBlocked(string when)
+        {
+            var before = view.Blocked;
+            view.View!.CoreWebView2.Navigate("https://localhost:1/other");
+            var waited = Environment.TickCount64 + 5000;
+            pumpUntil(() => view.Blocked > before || Environment.TickCount64 > waited);
+            check(view.Blocked > before && view.View?.Source?.Host == VideoView.Host, $"{when} a navigation away is cancelled");
+        }
+
         Console.WriteLine("== a failed show after a successful one hides the view");
         var starts = 0;
         using var flakyForm = new Form { Width = 500, Height = 400 };
