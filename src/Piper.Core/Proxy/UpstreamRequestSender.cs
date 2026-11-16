@@ -18,6 +18,31 @@ internal readonly record struct UpstreamResponse(
     HttpResponseData Head, HttpBodyDescriptor Body, bool IsBuffered, HttpStreamReader? BodyReader = null);
 
 /// <summary>
+/// How far one exchange got, for deciding whether a failure on a reused connection can be retried
+/// on a fresh one without the origin seeing the request twice or the client half an answer.
+/// </summary>
+internal sealed class UpstreamSendProgress
+{
+    /// <summary>At least one byte of the answer arrived.</summary>
+    public bool ResponseStarted { get; set; }
+
+    /// <summary>
+    /// True when the exchange can go again on a fresh connection: nothing of an answer arrived and
+    /// repeating the request is harmless (an idempotent method, RFC 9110 9.2.2; RFC 9112 9.3.1.1).
+    /// How much of the request was written does not matter: once any byte has left, the origin may
+    /// already be acting on it -- a handler streaming an upload, or one that answers early and closes
+    /// -- so a POST that failed part way must not be sent again.
+    /// </summary>
+    public bool CanRetry(string method) => !ResponseStarted && IsIdempotent(method);
+
+    private static bool IsIdempotent(string method) => method.ToUpperInvariant() switch
+    {
+        "GET" or "HEAD" or "OPTIONS" or "TRACE" or "PUT" or "DELETE" => true,
+        _ => false,
+    };
+}
+
+/// <summary>
 /// Sends one request over an already-connected <see cref="UpstreamConnection"/>, branching on
 /// whichever protocol ALPN actually negotiated. Shared by every downstream direction that can
 /// reach an ALPN-h2-capable upstream (the HTTP/1.1 loop in <see cref="ProxyServer"/> and
@@ -32,8 +57,11 @@ internal static class UpstreamRequestSender
     /// <c>AwaitingResponse</c> and start timing time-to-first-byte. For HTTP/2, sending and
     /// receiving are fused into one call on <see cref="Http2ClientConnection"/>, so this fires
     /// immediately before that call rather than after only the request bytes are flushed.</param>
+    /// <param name="progress">Filled in as the exchange gets further, for a caller deciding whether a
+    /// failure can be retried on another connection.</param>
     public static async Task<UpstreamResponse> SendAsync(
-        UpstreamConnection upstream, HttpRequestData outbound, Action onRequestSent, CancellationToken ct)
+        UpstreamConnection upstream, HttpRequestData outbound, Action onRequestSent, CancellationToken ct,
+        UpstreamSendProgress? progress = null)
     {
         if (upstream.IsHttp2)
         {
@@ -50,6 +78,12 @@ internal static class UpstreamRequestSender
         await outbound.WriteOriginFormAsync(upstream.Stream, ct).ConfigureAwait(false);
         await upstream.Stream.FlushAsync(ct).ConfigureAwait(false);
         onRequestSent();
+
+        // The first read on its own, so a caller can tell an origin that closed without answering at
+        // all from one that failed part way through its answer: only the first is safe to retry.
+        if (!await upstream.Reader.HasMoreDataAsync(ct).ConfigureAwait(false))
+            throw new HttpParseException("Connection closed before a response was received.");
+        if (progress is not null) progress.ResponseStarted = true;
 
         // Head only. The body stays on the connection so the caller can decide whether to relay it
         // onward as it arrives or buffer it, which is a decision that has to be made here -- once

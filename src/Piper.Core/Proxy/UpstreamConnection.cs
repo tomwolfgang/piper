@@ -49,16 +49,22 @@ internal sealed class UpstreamConnection : IDisposable
         IsTls == isTls && Port == port && RemappingRevision == remappingRevision
         && string.Equals(Host, host, StringComparison.OrdinalIgnoreCase);
 
+    /// <summary>Whether an idle connection can carry the next request. Asked only between requests,
+    /// when the origin has nothing left to say: any byte it has sent since, buffered here or still on
+    /// the socket, is a closing notice (TLS close_notify, an unsolicited 408) or a FIN or reset, and
+    /// a request written after it would be answered by an end of stream.</summary>
     public bool IsUsable
     {
         get
         {
             try
             {
+                if (Reader.Buffered > 0 || Reader.EndOfStream) return false;
                 var socket = Client.Client;
                 if (socket is null || !Client.Connected) return false;
-                // Poll reports readable-with-zero-available only when the peer has closed.
-                return !(socket.Poll(0, SelectMode.SelectRead) && socket.Available == 0);
+                // Readable means data, a FIN or a reset. Checking Available as well would let a TLS
+                // close_notify record through, because it arrives as data.
+                return !socket.Poll(0, SelectMode.SelectRead);
             }
             catch (SocketException) { return false; }
             catch (ObjectDisposedException) { return false; }
