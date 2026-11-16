@@ -43,7 +43,8 @@ jobs:
       # uses the same installation before it runs the same smoke tests.
       - name: Install Git for Windows for the Copy as round trips
         shell: pwsh
-        run: choco install git --version=2.56.0.4 --allow-downgrade --yes --no-progress
+        # Not pinned: runner images ship newer Git, and the pinned installer exits 1 on a downgrade.
+        run: choco install git --yes --no-progress
 
       # Test-only. The Copy as smoke tests run the generated Python snippet against the real `requests`
       # package, and a missing tool fails under CI by design so the security evidence cannot silently
