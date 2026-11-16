@@ -7,7 +7,8 @@ namespace Piper.Core.Security;
 
 /// <summary>
 /// Root CA plus an on-demand per-host leaf certificate factory, used to terminate TLS
-/// for inspection. The root lives in the user profile as a password-protected PFX.
+/// for inspection. The root's key lives in the user profile, protected with DPAPI for the
+/// current Windows user (see <see cref="RootKeyStore"/>).
 /// </summary>
 /// <remarks>
 /// This class never touches the machine or user trust stores. Installing the root is a
@@ -16,8 +17,18 @@ namespace Piper.Core.Security;
 /// </remarks>
 public sealed class CertificateAuthority : IDisposable
 {
-    private const string PfxPassword = "Piper";
+    /// <summary>
+    /// Only for the in-memory round trip that gives a freshly signed leaf a key SChannel can use.
+    /// Nothing protected by it is ever written to disk.
+    /// </summary>
+    private const string InMemoryPfxPassword = "Piper";
     private const int LeafCacheLimit = 512;
+
+    /// <summary>The file holding the DPAPI-protected root key, in the certificates folder.</summary>
+    public const string ProtectedKeyFileName = RootKeyStore.ProtectedKeyFileName;
+
+    /// <inheritdoc cref="RootKeyStore.MaxKeyFileBytes"/>
+    internal const int MaxKeyFileBytes = RootKeyStore.MaxKeyFileBytes;
 
     /// <summary>
     /// The name shown in the Windows Certificates list for Piper's interception root.
@@ -25,6 +36,12 @@ public sealed class CertificateAuthority : IDisposable
     /// a certificate issued by a public CA.
     /// </summary>
     public const string RootCommonName = "Piper Root CA - DO NOT TRUST";
+
+    /// <summary>The full subject of the root this version makes.</summary>
+    internal const string RootSubject = $"CN={RootCommonName}, O=Piper, OU=Generated locally";
+
+    /// <summary>The subject of the roots Piper made before <see cref="RootCommonName"/> was introduced.</summary>
+    internal const string LegacyRootSubject = "CN=Piper Root CA, O=Piper, OU=Generated locally - do not trust elsewhere";
 
     private readonly ConcurrentDictionary<string, X509Certificate2> _leafCache = new(StringComparer.OrdinalIgnoreCase);
     private readonly object _mintLock = new();
@@ -47,61 +64,56 @@ public sealed class CertificateAuthority : IDisposable
 
     public X509Certificate2 RootCertificate { get; }
 
+    /// <summary>The DPAPI-protected file holding the root's private key (the name predates the format).</summary>
     public string RootPfxPath { get; }
 
-    private CertificateAuthority(X509Certificate2 root, string pfxPath)
+    /// <summary>
+    /// Set when a saved root existed but a new one had to be made this run. The user must be told:
+    /// anything that trusted the old root rejects Piper's certificates until the new one is trusted.
+    /// </summary>
+    public RootReplacement? Replacement { get; }
+
+    /// <summary>Why the certificates folder could not be restricted to the current user, or null when it was.</summary>
+    public string? FolderRestrictionError { get; }
+
+    private CertificateAuthority(X509Certificate2 root, string pfxPath, RootReplacement? replacement, string? folderRestrictionError)
     {
         RootCertificate = root;
         RootPfxPath = pfxPath;
+        Replacement = replacement;
+        FolderRestrictionError = folderRestrictionError;
     }
 
     public static string DefaultDirectory => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Piper", "Certificates");
 
-    /// <summary>Loads the existing root, or generates one if it is missing or expired.</summary>
+    /// <summary>
+    /// Loads the saved root (migrating one saved by an older Piper without changing it), or makes one
+    /// if none is saved or the saved one is unreadable, expiring or under an old name. A replaced
+    /// root is reported through <see cref="Replacement"/>; an unreadable key file is kept aside.
+    /// </summary>
     public static CertificateAuthority LoadOrCreate(string? directory = null)
     {
         directory ??= DefaultDirectory;
-        Directory.CreateDirectory(directory);
-        var pfxPath = Path.Combine(directory, "Piper-Root.pfx");
 
-        if (File.Exists(pfxPath))
-        {
-            try
-            {
-                var existing = X509CertificateLoader.LoadPkcs12(
-                    File.ReadAllBytes(pfxPath), PfxPassword,
-                    X509KeyStorageFlags.Exportable | X509KeyStorageFlags.EphemeralKeySet);
+        // Root subjects are immutable. Roots made by earlier Piper versions under another name are
+        // replaced so the trusted-root list identifies this local MITM CA unambiguously; the new root
+        // still requires an explicit Trust action.
+        var root = RootKeyStore.LoadOrCreate(directory,
+            existing => existing.NotAfter > DateTime.Now.AddDays(30)
+                && existing.HasPrivateKey
+                && existing.GetNameInfo(X509NameType.SimpleName, forIssuer: false) == RootCommonName,
+            CreateRootPfx, out var replacement, out var restrictionError);
 
-                if (existing.NotAfter > DateTime.Now.AddDays(30)
-                    && existing.HasPrivateKey
-                    && existing.GetNameInfo(X509NameType.SimpleName, forIssuer: false) == RootCommonName)
-                    return new CertificateAuthority(existing, pfxPath);
-
-                // Root subjects are immutable. Replace roots made by earlier Piper
-                // versions so the trusted-root list identifies this local MITM CA
-                // unambiguously. The new root still requires an explicit Trust action.
-                existing.Dispose();
-            }
-            catch (CryptographicException)
-            {
-                // Corrupt or unreadable - fall through and mint a fresh root.
-            }
-        }
-
-        var root = CreateRoot();
-        File.WriteAllBytes(pfxPath, root.Export(X509ContentType.Pfx, PfxPassword));
-        File.WriteAllText(Path.Combine(directory, "Piper-Root.cer"),
-            ExportPem(root), System.Text.Encoding.ASCII);
-
-        return new CertificateAuthority(root, pfxPath);
+        return new CertificateAuthority(root, Path.Combine(directory, RootKeyStore.ProtectedKeyFileName), replacement, restrictionError);
     }
 
-    private static X509Certificate2 CreateRoot()
+    /// <summary>A new self-signed root and its key as an unencrypted PKCS#12 blob, for the caller to protect and zero.</summary>
+    private static byte[] CreateRootPfx()
     {
         using var rsa = RSA.Create(2048);
         var request = new CertificateRequest(
-            $"CN={RootCommonName}, O=Piper, OU=Generated locally",
+            RootSubject,
             rsa, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
 
         request.CertificateExtensions.Add(new X509BasicConstraintsExtension(true, false, 0, true));
@@ -110,12 +122,8 @@ public sealed class CertificateAuthority : IDisposable
         request.CertificateExtensions.Add(new X509SubjectKeyIdentifierExtension(request.PublicKey, false));
 
         var now = DateTimeOffset.UtcNow;
-        var cert = request.CreateSelfSigned(now.AddDays(-1), now.AddYears(5));
-
-        // Round-trip through PFX so the private key is in a form SChannel will use.
-        return X509CertificateLoader.LoadPkcs12(
-            cert.Export(X509ContentType.Pfx, PfxPassword), PfxPassword,
-            X509KeyStorageFlags.Exportable | X509KeyStorageFlags.EphemeralKeySet);
+        using var cert = request.CreateSelfSigned(now.AddDays(-1), now.AddYears(5));
+        return cert.Export(X509ContentType.Pfx);
     }
 
     /// <summary>Returns a cached leaf certificate for <paramref name="host"/>, minting one if needed.</summary>
@@ -185,7 +193,7 @@ public sealed class CertificateAuthority : IDisposable
         // container, not an in-memory-only CNG key). The root never plays the server role -- it
         // only signs leaves and gets exported for the trust-store dialog -- so it is unaffected.
         return X509CertificateLoader.LoadPkcs12(
-            withKey.Export(X509ContentType.Pfx, PfxPassword), PfxPassword,
+            withKey.Export(X509ContentType.Pfx, InMemoryPfxPassword), InMemoryPfxPassword,
             X509KeyStorageFlags.Exportable);
     }
 

@@ -60,8 +60,8 @@ public static class Analytics
 
     /// <summary>
     /// Applies the user's choice. Turning it off also discards anything not yet delivered. Returns
-    /// false if switching off could not erase the stored identifier, so a caller does not claim it
-    /// did.
+    /// false if the choice could not be saved or, when switching off, the identifiers or pending
+    /// reports could not be erased, so a caller does not claim the opt-out took.
     /// </summary>
     public static bool SetEnabled(bool enabled) => _client?.SetEnabled(enabled) ?? true;
 

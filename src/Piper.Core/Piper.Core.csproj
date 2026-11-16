@@ -5,7 +5,6 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <LangVersion>latest</LangVersion>
-    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
   </PropertyGroup>
 
   <ItemGroup>
@@ -13,6 +12,12 @@
          callers, such as how often an HTTP/2 sender had to wait for flow-control window.
          Widening those to public to make them testable would be the worse trade. -->
     <InternalsVisibleTo Include="Piper.SmokeTests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Windows DPAPI (ProtectedData) for the root CA's private key at rest. A Microsoft package that
+         wraps crypt32's CryptProtectData; it is not part of the shared framework. -->
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="10.0.2" />
   </ItemGroup>
 
 </Project>

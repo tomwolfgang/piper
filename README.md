@@ -77,9 +77,15 @@ existing proxy settings are saved and restored when you turn it off or close the
 ### HTTPS
 
 Decrypting HTTPS needs the generated root CA trusted, via **Tools > Configurations > HTTPS >
-Trust root certificate**. Read the dialog before accepting: the private key sits unencrypted in
-`%LOCALAPPDATA%\Piper\Certificates`, so anything able to read it can impersonate any
-TLS site to your Windows account. **Remove trusted root** on the same page reverses it (after a
+Trust root certificate**. Read the dialog before accepting: anything holding the root's private key
+can impersonate any TLS site to your Windows account. The key sits in
+`%LOCALAPPDATA%\Piper\Certificates`, in a folder only your Windows account can open, encrypted with
+Windows DPAPI to your account, so a copy taken to another account or machine is useless - but any
+program running as you can still read it. A key saved by an older Piper is converted on first start
+and keeps the same root, so a root you already trust keeps working (an older Piper cannot read the
+converted key, so going back to one makes a new root you have to trust). If the saved key cannot be read,
+Piper makes a new root, says so, and keeps the unreadable file next to it; you then trust the new
+root again. **Remove trusted root** on the same page reverses it (after a
 confirmation), and that page shows whether the root is trusted right now.
 
 Nothing installs the root implicitly - it is only ever a deliberate click. While the root is not
@@ -311,7 +317,13 @@ Close other programs first, use `--wait-quiet 10`, and report the median and ran
   its first byte or sitting between kept-alive requests; there is no per-address quota, because
   every local process connects from 127.0.0.1. A connection's first byte must arrive within
   `RequestHeadTimeout` (30 s); from that first byte, the request line and headers have a further
-  `RequestHeadTimeout` in total (so dripping bytes does not help) and at most 64 KB. Only a
+  `RequestHeadTimeout` in total (so dripping bytes does not help) and at most 64 KB and 200 headers
+  (past that a `431`, or a `414` for a request line that long). A header name must be a token and a
+  value may not hold a CR or NUL, the rules HTTP/2 and HTTP/3 apply too: a request that breaks them
+  gets a `400` and a failed session, and such a response from an origin is a `502`; obsolete line
+  folding is joined with a space. The Composer (what it sends and the response it shows), SAZ import
+  and AutoResponder response files keep such headers as written. A chunked body's size lines may
+  carry 16 KB of extensions in total and its trailers 64 KB (`400` and `431` past them). Only a
   connection reused for a further request waits `IdleTimeout` (120 s) for its next one. A body may
   pause for at most `IdleTimeout` and must deliver `MinRequestBodyBytesPerWindow` (1,024) bytes in
   each such window (or the rest of the body, when less is left, with whatever arrived along with the
@@ -714,7 +726,9 @@ own code. Counts are reported as buckets rather than exact figures.
 
 Reports wait in `%LOCALAPPDATA%\Piper\analytics\pending.jsonl`, a plain text file you can read before
 it is sent. **Tools > Configurations > Privacy** holds the switch and a button that opens that
-folder. Turning reporting off deletes the identifiers and discards anything not yet sent.
+folder. Turning reporting off deletes the identifiers and discards anything not yet sent. If a locked
+or read-only file stops that from finishing, the Log tab says so, and each later start with reporting
+off tries the deletion again.
 
 ## Why is nothing captured?
 
@@ -784,8 +798,11 @@ If dropping a `.saz` file onto the window does nothing, the log usually names th
 
 Set the `<Version>` in `src/Piper.App/Piper.App.csproj`, commit it, then create and push a
 matching tag (for example, `v0.2.0`). The GitHub release workflow verifies the tag matches the
-project version, runs the smoke tests, and publishes an NSIS installer, a portable Windows x64
-ZIP, a source ZIP, and SHA-256 checksums.
+project version, runs the same gate as pull requests (`eng/verify.ps1 -IncludeInstaller`: NuGet audit,
+analyzers, warnings as errors, smoke and UI tests), and publishes an NSIS installer, a portable Windows
+x64 ZIP, a source ZIP, and SHA-256 checksums, with a GitHub build-provenance attestation for each.
+Check a download with `gh attestation verify <file> --repo tomwolfgang/piper`. Releases are not
+Authenticode-signed yet.
 
 To build an installer from Visual Studio, open `Piper.slnx`, choose the `Release` configuration,
 then right-click `installer/Piper.Installer` and select **Build**. The installer is written to

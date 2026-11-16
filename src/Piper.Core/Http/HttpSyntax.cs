@@ -1,3 +1,5 @@
+using System.Buffers;
+
 namespace Piper.Core.Http;
 
 /// <summary>A request line: method, request target and version.</summary>
@@ -189,19 +191,23 @@ public static class HttpSyntax
         && version.StartsWith("HTTP/", StringComparison.Ordinal)
         && char.IsAsciiDigit(version[5]) && version[6] == '.' && char.IsAsciiDigit(version[7]);
 
-    /// <summary>A method (or header name) is a token: visible ASCII without delimiters (RFC 9110 5.6.2).</summary>
-    internal static bool IsToken(string value)
-    {
-        if (value.Length == 0) return false;
+    /// <summary>A method (or header name) is a token: visible ASCII without delimiters (RFC 9110 5.6.2).
+    /// The one definition the HTTP/1.x parsers and the HTTP/2 and HTTP/3 adapter all use.</summary>
+    internal static bool IsToken(string value) =>
+        value.Length > 0 && value.AsSpan().IndexOfAnyExcept(TokenChars) < 0;
 
-        foreach (var c in value)
-        {
-            var ok = c is >= 'a' and <= 'z' or >= 'A' and <= 'Z' or >= '0' and <= '9'
-                or '!' or '#' or '$' or '%' or '&' or '\'' or '*' or '+' or '-' or '.' or '^' or '_' or '`' or '|' or '~';
-            if (!ok) return false;
-        }
-        return true;
-    }
+    private static readonly SearchValues<char> TokenChars =
+        SearchValues.Create("!#$%&'*+-.^_`|~0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz");
+
+    /// <summary>
+    /// True when a field value holds NUL, CR or LF, the characters RFC 9110 5.5 says a recipient must
+    /// refuse (or replace) because a next hop may end a line on them. Each parser that writes field
+    /// values onward refuses such a value, so HTTP/1.1, HTTP/2 and HTTP/3 drop the same messages.
+    /// </summary>
+    internal static bool HasForbiddenFieldValueChar(string value) =>
+        value.AsSpan().IndexOfAny(ForbiddenFieldValueChars) >= 0;
+
+    private static readonly SearchValues<char> ForbiddenFieldValueChars = SearchValues.Create("\0\r\n");
 
     /// <summary>NUL and the other C0 controls (HTAB excepted) and DEL: bytes that, copied into a line
     /// sent onward, would let one peer's text end a line for the next hop.</summary>

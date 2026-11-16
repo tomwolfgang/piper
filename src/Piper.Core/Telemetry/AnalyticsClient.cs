@@ -90,6 +90,21 @@ public sealed class AnalyticsClient : IDisposable
     private readonly CancellationTokenSource _shutdown = new();
     private readonly HttpClient _http;
 
+    /// <summary>
+    /// Lets one flush run at a time. The timer and a direct call can otherwise overlap, and the
+    /// second re-claims the in-flight file the first is still sending - every event in it goes out
+    /// twice, and the two then trim the file under each other. The batch fields below and the
+    /// failure counters are only touched while this is held. Never disposed: it allocates no wait
+    /// handle, and a flush still finishing after Dispose must be able to release it.
+    /// </summary>
+    private readonly SemaphoreSlim _flushGate = new(1, 1);
+
+    /// <summary>
+    /// Bumped by every opt-out. A flush records it before claiming a batch and stops sending once it
+    /// changes, so a batch collected under withdrawn consent is never resumed by opting back in.
+    /// </summary>
+    private int _consentEpoch;
+
     /// <summary>Raw line index in the in-flight file of each event in the last claimed batch.</summary>
     private int[] _batchLines = [];
 
@@ -168,30 +183,44 @@ public sealed class AnalyticsClient : IDisposable
     /// the delivery of what was collected before they found the switch.
     /// </summary>
     /// <returns>
-    /// <see langword="false"/> when switching off could not fully take effect - the stored
-    /// identifier survived. Nothing is collected either way, but the caller must not tell the user
-    /// their identifier was discarded when it was not.
+    /// <see langword="false"/> when the choice could not be fully persisted: the settings file could
+    /// not be written, or - when switching off - the machine identifier or the pending reports
+    /// survived. Nothing more is collected in this run either way, but the caller must tell the user
+    /// rather than claim the opt-out took: a settings file still saying Enabled resumes collection on
+    /// the next launch, and a surviving spool is delivered after a later opt-in.
     /// </returns>
     public bool SetEnabled(bool enabled)
     {
         lock (_settingsLock)
         {
             _settings.Enabled = enabled;
-            var forgotten = true;
+            var erased = true;
             if (!enabled)
             {
-                _settings.InstallId = null;
-
-                // The machine identifier is the one that actually reaches the collector, so
-                // forgetting only the installation identifier would leave the user re-linkable to
-                // everything they reported before - precisely what the dialog says will not happen.
-                forgotten = _forgetMachineId?.Invoke() ?? true;
-                DiscardSpool();
+                // Bumped before anything else, under the same lock ResolveIdentity checks it in, so a
+                // flush already holding a claimed batch stops even if the user opts back in before
+                // its next request: those events were collected under the consent just withdrawn.
+                Interlocked.Increment(ref _consentEpoch);
+                erased = EraseCollectedData();
             }
 
-            AnalyticsSettingsStore.Save(_settings, _settingsPath);
-            return forgotten;
+            return AnalyticsSettingsStore.Save(_settings, _settingsPath) && erased;
         }
+    }
+
+    /// <summary>
+    /// Forgets both identifiers and discards everything not yet sent, reporting whether all of it is
+    /// gone. Caller holds <see cref="_settingsLock"/>.
+    /// </summary>
+    private bool EraseCollectedData()
+    {
+        _settings.InstallId = null;
+
+        // The machine identifier is the one that actually reaches the collector, so forgetting only
+        // the installation identifier would leave the user re-linkable to everything they reported
+        // before - precisely what the dialog says will not happen.
+        var forgotten = _forgetMachineId?.Invoke() ?? true;
+        return DiscardSpool() && forgotten;
     }
 
     /// <summary>
@@ -228,35 +257,75 @@ public sealed class AnalyticsClient : IDisposable
         }
     }
 
-    private void DiscardSpool()
+    /// <summary>
+    /// Deletes the spool and any claimed batch and empties the queue, reporting whether both files
+    /// are gone. Each file is attempted even if the other fails, so one locked file does not keep
+    /// the other alive.
+    /// </summary>
+    private bool DiscardSpool()
     {
-        try
+        lock (_spoolLock)
         {
-            lock (_spoolLock)
-            {
-                if (File.Exists(_spoolPath)) File.Delete(_spoolPath);
-                if (File.Exists(_inflightPath)) File.Delete(_inflightPath);
+            // The queue is cleared after the deletes, inside the lock. Clearing first left a gap in
+            // which a Track already past its own Enabled check could enqueue, and the next drain
+            // would rebuild the spool the user had just discarded - a file the Privacy tab then
+            // offers to open. DrainToSpool refuses to write while disabled for the same reason.
+            var spoolGone = TryDelete(_spoolPath);
+            var inflightGone = TryDelete(_inflightPath);
+            _queue.Clear();
+            Interlocked.Exchange(ref _queued, 0);
+            return spoolGone && inflightGone;
+        }
 
-                // Cleared inside the lock and after the deletes. Clearing first left a gap in which
-                // a Track already past its own Enabled check could enqueue, and the next drain would
-                // rebuild the spool the user had just discarded - a file the Privacy tab then offers
-                // to open. DrainToSpool refuses to write while disabled for the same reason.
-                _queue.Clear();
-                Interlocked.Exchange(ref _queued, 0);
+        static bool TryDelete(string path)
+        {
+            try
+            {
+                // Guarded because a missing directory throws DirectoryNotFoundException, an
+                // IOException, and nothing there is not a failure to erase.
+                if (File.Exists(path)) File.Delete(path);
+                return true;
             }
-        }
-        catch (IOException)
-        {
-        }
-        catch (UnauthorizedAccessException)
-        {
+            catch (IOException)
+            {
+                // Reported, not retried here: the caller tells the user, and the next start with
+                // reporting off tries again.
+                return false;
+            }
+            catch (UnauthorizedAccessException)
+            {
+                return false;
+            }
         }
     }
 
-    /// <summary>Starts the background flush loop. Safe to call once; later calls do nothing.</summary>
+    /// <summary>
+    /// Starts the background flush loop. Safe to call once; later calls do nothing.
+    ///
+    /// With reporting off, it first erases anything an earlier run left behind - a spool, a claimed
+    /// batch, either identifier - because an opt-out that could not finish (a locked file, a crash
+    /// between the steps) must not leave data waiting for a later opt-in to deliver it. A settings
+    /// file that cannot be read loads as the default, off, so an opted-in user whose file is locked at
+    /// launch loses their identifier and pending reports too. That errs toward forgetting, and the
+    /// same unreadable file has them asked for consent again anyway.
+    /// </summary>
     public void Start()
     {
         if (_pump is not null || _disposed) return;
+
+        lock (_settingsLock)
+        {
+            if (!_settings.Enabled)
+            {
+                var hadInstallId = _settings.InstallId is not null;
+                EraseCollectedData();
+
+                // Written only when there was an identifier to remove, so a user who was never asked
+                // does not get a settings file created on their behalf by merely launching Piper.
+                if (hadInstallId) AnalyticsSettingsStore.Save(_settings, _settingsPath);
+            }
+        }
+
         _pump = Task.Run(() => PumpAsync(_shutdown.Token));
     }
 
@@ -327,6 +396,26 @@ public sealed class AnalyticsClient : IDisposable
     {
         FlushToDisk();
 
+        // Single flight. A flush already running will deliver what is spooled, so a second caller
+        // has nothing to add and returns rather than queueing behind up to a full batch of requests.
+        if (!await _flushGate.WaitAsync(0, cancellationToken).ConfigureAwait(false)) return;
+        try
+        {
+            await DeliverSpoolAsync(cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            _flushGate.Release();
+        }
+    }
+
+    /// <summary>Claims and sends one batch. Caller holds <see cref="_flushGate"/>.</summary>
+    private async Task DeliverSpoolAsync(CancellationToken cancellationToken)
+    {
+        // Read before the gates below, so an opt-out at any point after them - even one followed by
+        // opting back in - is seen as a change.
+        var epoch = Volatile.Read(ref _consentEpoch);
+
         // Two independent gates, both of which must be open: the user asked for this, and they were
         // actually asked. Neither alone is enough to justify a request leaving the machine.
         if (!_settings.Enabled || string.IsNullOrEmpty(_settings.NoticeShownVersion)) return;
@@ -343,14 +432,15 @@ public sealed class AnalyticsClient : IDisposable
         // One request per event: the collector counts events, it does not accept batches. Sent in
         // order and stopped at the first failure, so a dropped connection halfway through costs a
         // retry of the remainder rather than a re-send of everything.
-        // Enabled is re-read before every event, not just when the batch was claimed: a user who
+        // Consent is re-checked before every event, not just when the batch was claimed: a user who
         // opts out while a flush is in flight has the rest of the batch stopped mid-way, which is
-        // what the dialog promises. Without this, a claimed batch finishes regardless.
+        // what the dialog promises. The epoch, not just Enabled, because opting straight back in
+        // does not restore consent for events the opt-out discarded.
         var delivered = 0;
         var rejected = false;
-        while (delivered < batch.Length && _settings.Enabled)
+        while (delivered < batch.Length && ConsentHolds(epoch))
         {
-            var outcome = await TryDeliverAsync(batch[delivered], cancellationToken).ConfigureAwait(false);
+            var outcome = await TryDeliverAsync(batch[delivered], epoch, cancellationToken).ConfigureAwait(false);
             if (outcome == Delivery.Sent)
             {
                 delivered++;
@@ -360,6 +450,19 @@ public sealed class AnalyticsClient : IDisposable
 
             rejected = outcome == Delivery.Rejected;
             break;
+        }
+
+        if (!ConsentHolds(epoch))
+        {
+            // The opt-out already discarded the claimed batch; if that delete failed, it is retried
+            // now. The live spool is left alone: after an opt-back-in it holds only newly consented
+            // events. Not a delivery failure, so no backoff and nothing counted against the collector.
+            lock (_spoolLock)
+            {
+                DiscardInflight();
+            }
+
+            return;
         }
 
         if (rejected && ++_consecutiveRejections >= MaxConsecutiveRejections)
@@ -418,6 +521,9 @@ public sealed class AnalyticsClient : IDisposable
             }
         }
     }
+
+    /// <summary>Reporting is on and has not been switched off since <paramref name="epoch"/> was read.</summary>
+    private bool ConsentHolds(int epoch) => _settings.Enabled && Volatile.Read(ref _consentEpoch) == epoch;
 
     private async Task PumpAsync(CancellationToken cancellationToken)
     {
@@ -701,11 +807,11 @@ public sealed class AnalyticsClient : IDisposable
     }
 
     /// <summary>Sends one event, reporting which of those three happened.</summary>
-    private async Task<Delivery> TryDeliverAsync(AnalyticsEvent recorded, CancellationToken cancellationToken)
+    private async Task<Delivery> TryDeliverAsync(AnalyticsEvent recorded, int epoch, CancellationToken cancellationToken)
     {
         try
         {
-            var url = BuildCounterUrl(recorded);
+            var url = BuildCounterUrl(recorded, epoch);
 
             // Nothing can make this event sendable, and it is Piper's own doing rather than the
             // collector's, so it is dropped without counting against the contract.
@@ -749,7 +855,7 @@ public sealed class AnalyticsClient : IDisposable
     /// made here. That is survivable only because the vocabulary is closed: the values are short
     /// tokens from a fixed list, so nothing captured can end up in a URL that intermediaries log.
     /// </summary>
-    private Uri? BuildCounterUrl(AnalyticsEvent recorded)
+    private Uri? BuildCounterUrl(AnalyticsEvent recorded, int epoch)
     {
         var extra = new Dictionary<string, string>(StringComparer.Ordinal);
         foreach (var (key, value) in recorded.Properties) extra[key] = value;
@@ -769,7 +875,7 @@ public sealed class AnalyticsClient : IDisposable
         extra[AnalyticsProperties.Sequence] =
             recorded.Sequence.ToString(System.Globalization.CultureInfo.InvariantCulture);
 
-        var identity = ResolveIdentity();
+        var identity = ResolveIdentity(epoch);
         if (identity is null) return null;
 
         var url = $"{_endpoint.GetLeftPart(UriPartial.Authority)}/analytics/Counter"
@@ -802,14 +908,16 @@ public sealed class AnalyticsClient : IDisposable
     /// undashed form was accepted and then silently dropped. Identifiers stored in that form are
     /// the same GUID, so re-rendering them keeps each machine's identity rather than starting anew.
     /// </summary>
-    private string? ResolveIdentity()
+    private string? ResolveIdentity(int epoch)
     {
         lock (_settingsLock)
         {
             // Resolving mints and stores an identifier, so it must not happen once the user has
             // opted out - the machine-id callback would recreate in the registry exactly what
-            // SetEnabled(false) just deleted, moments after deleting it.
-            if (!_settings.Enabled) return null;
+            // SetEnabled(false) just deleted, moments after deleting it. Checked against the epoch
+            // under the lock SetEnabled bumps it in, so an opt-out (and back in) since the loop last
+            // looked cannot send an old event under the new identity.
+            if (!ConsentHolds(epoch)) return null;
 
             if (AnalyticsSchema.TryNormaliseIdentifier(_machineId?.Invoke(), out var machine)) return machine;
             if (AnalyticsSchema.TryNormaliseIdentifier(_settings.InstallId, out var existing)) return existing;

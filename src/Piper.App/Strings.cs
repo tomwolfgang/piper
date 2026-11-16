@@ -322,6 +322,9 @@ internal static class Strings
         public static string TrustBody(string privateKeyPath, string? thumbprint) =>
             I18n.T("certificates.trustBody", ("privateKeyPath", privateKeyPath), ("thumbprint", thumbprint));
 
+        public static string RootUnreadable(string paths) => I18n.T("certificates.rootUnreadable", ("paths", paths));
+        public static string RootReplaced => I18n.T("certificates.rootReplaced");
+
         public static string RemoveCaption => I18n.T("certificates.removeCaption");
         public static string RemoveBody => I18n.T("certificates.removeBody");
 
@@ -373,7 +376,8 @@ internal static class Strings
         public static string Empty => I18n.T("log.empty");
         public static string AnalyticsOn => I18n.T("log.analyticsOn");
         public static string AnalyticsOff => I18n.T("log.analyticsOff");
-        public static string AnalyticsOffIdentifierKept => I18n.T("log.analyticsOffIdentifierKept");
+        public static string AnalyticsOffNotPersisted => I18n.T("log.analyticsOffNotPersisted");
+        public static string AnalyticsOnNotPersisted => I18n.T("log.analyticsOnNotPersisted");
         public static string AnalyticsUnavailable => I18n.T("log.analyticsUnavailable");
         public static string AnalyticsConsentOn => I18n.T("log.analyticsConsentOn");
         public static string AnalyticsConsentOff => I18n.T("log.analyticsConsentOff");
@@ -381,6 +385,9 @@ internal static class Strings
         public static string RootCaPath(string path) => I18n.T("log.rootCaPath", ("path", path));
         public static string RootCaTrusted => I18n.T("log.rootCaTrusted");
         public static string RootCaNotTrusted => I18n.T("log.rootCaNotTrusted");
+        public static string RootCaUnreadable(string paths) => I18n.T("log.rootCaUnreadable", ("paths", paths));
+        public static string RootCaReplaced => I18n.T("log.rootCaReplaced");
+        public static string RootCaFolderNotRestricted(string message) => I18n.T("log.rootCaFolderNotRestricted", ("message", message));
         public static string UpstreamValidationOffAtStartup => I18n.T("log.upstreamValidationOffAtStartup");
         public static string UpstreamValidationOffAfterSave => I18n.T("log.upstreamValidationOffAfterSave");
 
