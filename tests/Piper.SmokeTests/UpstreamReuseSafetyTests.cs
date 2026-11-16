@@ -13,7 +13,7 @@ using Piper.Core.Sessions;
 // P6c: the upstream connection a client connection keeps between requests (on by default since
 // P6a) has to cope with an origin that closes it while it sits idle. A connection the origin has
 // already closed must not be reused, a reused one that dies before answering is retried once on
-// a fresh connection when that cannot repeat a delivered request, and any other failure is a 502
+// a fresh connection only when the method is idempotent, and any other failure is a 502
 // and a Failed row rather than a bare close.
 internal static class UpstreamReuseSafetyTests
 {
@@ -130,6 +130,56 @@ internal static class UpstreamReuseSafetyTests
                 runner.AreEqual(1, Volatile.Read(ref posts), $"{name}: the origin received the POST exactly once");
                 runner.AreEqual(1, origin.Connections, $"{name}: no retry connection was opened");
             }
+        });
+
+        await runner.RunAsync("a large POST whose upload a kept upstream connection resets part way is not retried", async () =>
+        {
+            // The write fails before the request is fully out, but the head and part of the body
+            // already reached the origin, which may be acting on it (a streaming upload handler, or
+            // one that answers 413 early and closes). RFC 9112 9.3.1.1: it must not go again.
+            var posts = 0;
+            await using var origin = new ScriptedOrigin(null, async (index, stream, reader, ct) =>
+            {
+                if (index > 0)
+                {
+                    // A retry would land here.
+                    while (await HttpParser.ReadRequestAsync(reader, ct) is { } request)
+                    {
+                        if (request.Method == "POST") Interlocked.Increment(ref posts);
+                        await stream.WriteAsync(KeepAliveResponse(request).ToBytes(), ct);
+                    }
+                    return;
+                }
+
+                await AnswerOneAsync(stream, reader, ct);
+
+                // Take the head and some of the body raw, then reset the connection mid-upload.
+                var buffer = new byte[64 * 1024];
+                var read = 0;
+                while (read < 256 * 1024)
+                {
+                    var n = await stream.ReadAsync(buffer, ct);
+                    if (n == 0) return;
+                    if (read == 0) Interlocked.Increment(ref posts);
+                    read += n;
+                }
+                var socket = ((NetworkStream)stream).Socket;
+                socket.LingerState = new LingerOption(true, 0); // close with RST
+                socket.Close();
+            });
+            await using var proxy = StartProxy(ca, out var store);
+            using var client = CreateClient(proxy.Endpoint!.Port, root);
+
+            await ExpectOkAsync(runner, client, $"http://127.0.0.1:{origin.Port}/upload/0", "the first request");
+
+            using var response = await client.PostAsync($"http://127.0.0.1:{origin.Port}/upload/1",
+                new ByteArrayContent(new byte[32 * 1024 * 1024]));
+
+            runner.AreEqual(HttpStatusCode.BadGateway, response.StatusCode, "the client is answered 502");
+            var session = await WaitForSessionAsync(store, s => s.Path == "/upload/1");
+            runner.AreEqual(SessionState.Failed, session.State, "the session is Failed");
+            runner.AreEqual(1, Volatile.Read(ref posts), "the origin received the POST exactly once");
+            runner.AreEqual(1, origin.Connections, "no retry connection was opened");
         });
 
         await runner.RunAsync("a GET whose answer had started on a kept upstream connection is not retried", async () =>

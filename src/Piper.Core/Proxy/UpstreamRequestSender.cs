@@ -23,20 +23,17 @@ internal readonly record struct UpstreamResponse(
 /// </summary>
 internal sealed class UpstreamSendProgress
 {
-    /// <summary>Every byte of the request was handed to the connection.</summary>
-    public bool RequestWritten { get; set; }
-
     /// <summary>At least one byte of the answer arrived.</summary>
     public bool ResponseStarted { get; set; }
 
     /// <summary>
-    /// True when the exchange can go again on a fresh connection: nothing of an answer arrived, and
-    /// either the request never fully left or repeating it is harmless (an idempotent method, RFC 9110
-    /// 9.2.2). A request whose write failed part way is incomplete, so the origin cannot have acted on
-    /// it; one that was written in full may have been, and a POST must not be sent twice.
+    /// True when the exchange can go again on a fresh connection: nothing of an answer arrived and
+    /// repeating the request is harmless (an idempotent method, RFC 9110 9.2.2; RFC 9112 9.3.1.1).
+    /// How much of the request was written does not matter: once any byte has left, the origin may
+    /// already be acting on it -- a handler streaming an upload, or one that answers early and closes
+    /// -- so a POST that failed part way must not be sent again.
     /// </summary>
-    public bool CanRetry(string method) =>
-        !ResponseStarted && (!RequestWritten || IsIdempotent(method));
+    public bool CanRetry(string method) => !ResponseStarted && IsIdempotent(method);
 
     private static bool IsIdempotent(string method) => method.ToUpperInvariant() switch
     {
@@ -68,8 +65,6 @@ internal static class UpstreamRequestSender
     {
         if (upstream.IsHttp2)
         {
-            // Sending and receiving are one call here, so the request counts as delivered from the start.
-            if (progress is not null) progress.RequestWritten = true;
             onRequestSent();
             var h2 = new Http2ClientConnection(upstream.Stream, upstream.Reader.IdleTimeout);
             var h2Head = await h2.SendRequestHeadAsync(outbound, ct).ConfigureAwait(false);
@@ -81,9 +76,6 @@ internal static class UpstreamRequestSender
         MakeValidHttp11(outbound);
 
         await outbound.WriteOriginFormAsync(upstream.Stream, ct).ConfigureAwait(false);
-        // Before the flush: once the last write has returned, the bytes may reach the origin even if
-        // the flush then fails.
-        if (progress is not null) progress.RequestWritten = true;
         await upstream.Stream.FlushAsync(ct).ConfigureAwait(false);
         onRequestSent();
 

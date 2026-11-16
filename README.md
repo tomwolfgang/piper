@@ -280,8 +280,8 @@ Close other programs first, use `--wait-quiet 10`, and report the median and ran
   and its requests share one reusable origin connection, as they would without Piper. A kept
   connection the origin has closed while idle is not reused, and a request that meets one closing
   just as it arrives is sent once more on a new connection, but only when no answer had started and
-  the request was not delivered or is safe to repeat (GET, HEAD, OPTIONS, TRACE, PUT, DELETE): a POST
-  is never sent twice. **Configurations
+  the request is safe to repeat (GET, HEAD, OPTIONS, TRACE, PUT, DELETE): a POST is never sent
+  twice, even when its upload failed part way. **Configurations
   > HTTPS > Use HTTP/1.1 with origin servers for HTTP/1.1 clients** turns that off, so such a client
   is translated to h2 when the origin offers it; an h2 origin connection is not reused on that path,
   so every request then pays a new TCP and TLS handshake (about two round trips). An origin that
