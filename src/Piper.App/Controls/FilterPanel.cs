@@ -58,7 +58,8 @@ public sealed class FilterPanel : UserControl
             Dock = DockStyle.Fill,
             Text = Strings.Filters.UseFilters,
             AutoSize = false,
-            Padding = new Padding(6, 10, 0, 0),
+            AutoEllipsis = true,
+            Padding = new Padding(6, 0, 0, 0),
             Font = Palette.UiFontBold,
         };
         // The global switch is live in both directions, matching Fiddler: unchecking stops
@@ -99,11 +100,14 @@ public sealed class FilterPanel : UserControl
             e.SuppressKeyPress = true;
         };
 
-        var addHost = new Button { Dock = DockStyle.Right, Text = Strings.Filters.AddHost, Width = 70 };
+        var addHost = NewButton(Strings.Filters.AddHost);
         addHost.Click += (_, _) => AddHosts();
-        var addHostRow = new Panel { Dock = DockStyle.Top, Height = 36, Padding = new Padding(0, 2, 0, 2) };
-        addHostRow.Controls.Add(_hostEntry);
-        addHostRow.Controls.Add(addHost);
+        // The entry takes what the button, sized to its label, leaves.
+        _hostEntry.Dock = DockStyle.None;
+        _hostEntry.Anchor = AnchorStyles.Left | AnchorStyles.Right;
+        var addHostRow = TwoColumnRow();
+        addHostRow.Controls.Add(_hostEntry, 0, 0);
+        addHostRow.Controls.Add(addHost, 1, 0);
 
         _hostsList = new CheckedListBox
         {
@@ -127,9 +131,16 @@ public sealed class FilterPanel : UserControl
             e.Handled = true;
         };
 
-        var removeHost = new Button { Dock = DockStyle.Right, Text = Strings.Filters.RemoveSelectedHost, Width = 130 };
+        var removeHost = NewButton(Strings.Filters.RemoveSelectedHost);
         removeHost.Click += (_, _) => RemoveSelectedHost();
-        var removeHostRow = new Panel { Dock = DockStyle.Bottom, Height = 36, Padding = new Padding(0, 2, 0, 2) };
+        var removeHostRow = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Bottom,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            FlowDirection = FlowDirection.RightToLeft,
+            WrapContents = false,
+        };
         removeHostRow.Controls.Add(removeHost);
 
         var hostsGroup = new GroupBox
@@ -182,19 +193,24 @@ public sealed class FilterPanel : UserControl
         actions.DropDownItems.Add(new ToolStripSeparator());
         actions.DropDownItems.Add(Strings.Filters.HelpMenu, null, (_, _) => ShowHelp());
 
+        // Sized to its button: a fixed width clipped the label at 150%.
         var actionsBar = new ToolStrip
         {
-            Dock = DockStyle.Right,
-            AutoSize = false,
-            Width = 86,
+            Dock = DockStyle.None,
+            Anchor = AnchorStyles.Right,
+            LayoutStyle = ToolStripLayoutStyle.HorizontalStackWithOverflow,
+            AutoSize = true,
+            CanOverflow = false,
             GripStyle = ToolStripGripStyle.Hidden,
             Font = Palette.UiFont,
         };
         actionsBar.Items.Add(actions);
 
-        var filterHeader = new Panel { Dock = DockStyle.Top, Height = 38 };
-        filterHeader.Controls.Add(_useFilters);
-        filterHeader.Controls.Add(actionsBar);
+        // The switch takes what Actions leaves, and ends in an ellipsis rather than running under it.
+        var filterHeader = TwoColumnRow();
+        filterHeader.Padding = new Padding(0, 2, 0, 2);
+        filterHeader.Controls.Add(_useFilters, 0, 0);
+        filterHeader.Controls.Add(actionsBar, 1, 0);
 
         // Hosts fills all available space so its checkbox list grows with the Filters tab.
         Controls.Add(hostsGroup);
@@ -207,9 +223,38 @@ public sealed class FilterPanel : UserControl
         Dock = DockStyle.Top,
         Text = text,
         AutoSize = false,
+        // A label wider than the panel ends in "..." and shows in full as a tooltip.
+        AutoEllipsis = true,
         Height = 32,
         Padding = new Padding(4, 7, 0, 0),
     };
+
+    /// <summary>A button sized to its label, so no translation or font size cuts it off.</summary>
+    private Button NewButton(string text) => new()
+    {
+        Text = text,
+        AutoSize = true,
+        AutoSizeMode = AutoSizeMode.GrowAndShrink,
+        MinimumSize = new Size(LogicalToDeviceUnits(70), 0),
+        Padding = new Padding(LogicalToDeviceUnits(6), 0, LogicalToDeviceUnits(6), 0),
+    };
+
+    /// <summary>A docked row whose first column fills and whose second fits its control, as tall as its tallest control.</summary>
+    private static TableLayoutPanel TwoColumnRow()
+    {
+        var row = new TableLayoutPanel
+        {
+            Dock = DockStyle.Top,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            ColumnCount = 2,
+            RowCount = 1,
+        };
+        row.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        row.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        row.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        return row;
+    }
 
     // ------------------------------------------------------------------ actions
 

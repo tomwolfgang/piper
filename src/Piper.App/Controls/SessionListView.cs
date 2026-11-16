@@ -121,8 +121,8 @@ public sealed class SessionListView : UserControl
         };
         _filterBox.TextChanged += (_, _) => ApplyFilter();
 
-        var filterRow = new Panel { Dock = DockStyle.Top, Height = 26, Padding = new Padding(2) };
-        filterRow.Controls.Add(_filterBox);
+        // One line under the filter, where the box's own frame used to sit inside the page's edge.
+        var filterRow = new FieldRow(_filterBox, bottomEdgeOnly: true);
 
         _list = new SteadyListView
         {
@@ -135,6 +135,8 @@ public sealed class SessionListView : UserControl
             MultiSelect = true,
             OwnerDraw = true,
             HeaderStyle = ColumnHeaderStyle.Clickable,
+            // The page and the filter row already edge the grid; its own frame doubled them.
+            BorderStyle = BorderStyle.None,
         };
         DarkListView.EnableDoubleBuffering(_list);
 
@@ -274,6 +276,55 @@ public sealed class SessionListView : UserControl
             foreach (int index in _list.SelectedIndices)
                 if (index < _visible.Count) result.Add(_visible[index]);
             return result;
+        }
+    }
+
+    /// <summary>
+    /// The selected rows, the row with the focus rectangle and the row at the top, as sessions, so they
+    /// survive the grid moving to another window, which can recreate its handle.
+    /// </summary>
+    /// <remarks>Public, not internal, because the panel host that calls it is also compiled into the UI tests.</remarks>
+    public (IReadOnlyList<Session> Selected, Session? Focused, Session? Top) CaptureViewState()
+    {
+        Session? At(int index) => index >= 0 && index < _visible.Count ? _visible[index] : null;
+        var focused = _list.IsHandleCreated ? At(_list.FocusedItem?.Index ?? -1) : null;
+        return (SelectedSessions, focused, At(TopIndex()));
+    }
+
+    /// <summary>Puts back what <see cref="CaptureViewState"/> recorded, for the rows still shown, without raising selection events.</summary>
+    public void RestoreViewState((IReadOnlyList<Session> Selected, Session? Focused, Session? Top) state)
+    {
+        // A rebuild may be pending, so only rows the control already has are touched.
+        var count = Math.Min(_visible.Count, _list.VirtualListSize);
+        if (!_list.IsHandleCreated || count == 0) return;
+        int IndexOf(Session session) => _visible.IndexOf(session, 0, count);
+
+        var selected = state.Selected.ToHashSet(ReferenceEqualityComparer.Instance);
+        _list.BeginUpdate();
+        try
+        {
+            _suppressSelectionChanged = true;
+            _list.SelectedIndices.Clear();
+            if (selected.Count > 0)
+            {
+                for (var index = 0; index < count; index++)
+                    if (selected.Contains(_visible[index])) _list.SelectedIndices.Add(index);
+            }
+
+            if (state.Focused is { } focused && IndexOf(focused) is var focusedIndex and >= 0)
+                _list.FocusedItem = _list.Items[focusedIndex];
+        }
+        finally
+        {
+            _suppressSelectionChanged = false;
+            _list.EndUpdate();
+        }
+
+        // As HoldAnchorInView does: to the bottom and back up, so EnsureVisible clamps the origin.
+        if (state.Top is { } top && IndexOf(top) is var topIndex and >= 0 && topIndex != TopIndex())
+        {
+            _list.EnsureVisible(count - 1);
+            _list.EnsureVisible(topIndex);
         }
     }
 

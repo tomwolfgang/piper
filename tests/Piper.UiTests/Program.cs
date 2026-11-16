@@ -59,6 +59,12 @@ internal static class Program
             return _failures == 0 ? 0 : 1;
         }
 
+        if (args is ["--panels"])
+        {
+            PanelHostTests.Run(Check, PumpUntil);
+            return _failures == 0 ? 0 : 1;
+        }
+
         RunTextBoxWordSelectionTest();
         RunTextWizardJwtMenuTest();
         RunComposerHistoryTooltipTest();
@@ -76,6 +82,7 @@ internal static class Program
         TlsFailureUiTests.Run(Check, PumpUntil);
         TlsFailureInspectorUiTests.Run(Check, PumpUntil);
         TlsFailureSettingUiTests.Run(Check);
+        PanelHostTests.Run(Check, PumpUntil);
 
         Run("clearing a scrolled grid shows the next rows from the top", (store, grid, list) =>
         {
