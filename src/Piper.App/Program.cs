@@ -115,7 +115,10 @@ internal static class Program
     /// </summary>
     private static void RestoreSystemProxyLeftovers()
     {
-        if (_ownsSystemProxy) SystemProxy.RestoreLeftovers();
+        // Best effort, and the result is dropped on purpose: there is no window to report to here.
+        // Anything this could not undo (a damaged or unreadable record, a failed write) keeps its
+        // record on disk, and the next launch restores it or tells the user.
+        if (_ownsSystemProxy) SystemProxyRecovery.RestoreLeftovers(SystemProxy.Settings);
     }
 
     /// <summary>Path of the crash log, also used by the smoke harness to diagnose startup failures.</summary>
