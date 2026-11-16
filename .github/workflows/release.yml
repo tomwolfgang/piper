@@ -5,21 +5,28 @@ on:
     tags:
       - "v*"
 
+# Read-only by default. Only the publish job, which runs no repository code, can write.
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  package-and-publish:
+  build:
+    name: Verify and package
     runs-on: windows-2022
+    timeout-minutes: 40
     env:
-      PROJECT: src/Piper.App/Piper.App.csproj
       RUNTIME: win-x64
+    outputs:
+      version: ${{ steps.version.outputs.version }}
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          persist-credentials: false
 
+      # No NuGet cache here on purpose: a release restores from nuget.org, never from a cache that
+      # another workflow run wrote.
       - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
           dotnet-version: 10.0.x
@@ -27,6 +34,8 @@ jobs:
       - name: Verify release version
         id: version
         shell: pwsh
+        env:
+          PROJECT: src/Piper.App/Piper.App.csproj
         run: |
           git merge-base --is-ancestor $env:GITHUB_SHA origin/main
           if ($LASTEXITCODE -ne 0) {
@@ -50,102 +59,129 @@ jobs:
 
           "version=$($Matches.version)" | Add-Content -Path $env:GITHUB_OUTPUT
 
-      - name: Restore
-        run: dotnet restore Piper.slnx --runtime ${{ env.RUNTIME }}
+      # The same pinned tool installs as ci.yml, which proves them on every pull request. Git for
+      # Windows (ANSI curl.exe) and Python requests are test-only for the Copy as round trips, and
+      # nothing installed here reaches the artifacts. NSIS builds the installer.
+      - name: Install NSIS
+        shell: pwsh
+        run: choco install nsis --version=3.13.0 --allow-downgrade --yes --no-progress
 
-      - name: Build
-        run: dotnet build Piper.slnx --configuration Release --no-restore
-
-      # Test-only. The Copy as smoke tests exercise Git for Windows' ANSI curl.exe. Install it
-      # explicitly because hosted runner images are mutable; this tool is not shipped in artifacts.
       - name: Install Git for Windows for the Copy as round trips
         shell: pwsh
-        run: choco install git --yes --no-progress
+        run: choco install git --version=2.56.0.4 --allow-downgrade --yes --no-progress
 
-      # Test-only, the same command and pinned, hash-checked file as ci.yml: the smoke tests fail under
-      # GITHUB_ACTIONS when the Python round trip cannot run. Nothing installed here reaches the artifacts.
       - name: Install Python requests for the Copy as round trips
         shell: pwsh
         run: 'python -m pip install --disable-pip-version-check --no-input --only-binary=:all: --require-hashes -r eng/ci-test-requirements.txt'
 
-      - name: Run smoke tests
-        run: dotnet run --project tests/Piper.SmokeTests/Piper.SmokeTests.csproj --configuration Release --no-build
-
-      - name: Publish portable application
+      # The same gate as every pull request: NuGet audit, analyzers, warnings as errors, smoke and UI
+      # tests. -IncludeInstaller publishes the self-contained single-file app and builds the NSIS
+      # installer from it (installer/Piper.Installer.csproj), so the release ships exactly what was tested.
+      - name: Verify analyzers, build, audit, tests, and installer
         shell: pwsh
-        run: |
-          dotnet publish $env:PROJECT --configuration Release --runtime $env:RUNTIME --self-contained true `
-            -p:PublishSingleFile=true --no-restore --output publish
-          if ($LASTEXITCODE -ne 0) { throw "dotnet publish failed." }
+        run: ./eng/verify.ps1 -IncludeInstaller
 
-      - name: Package portable archive and source
-        id: package
+      - name: Package portable archive, installer, and source
         shell: pwsh
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
-          $version = '${{ steps.version.outputs.version }}'
+          $version = $env:VERSION
+          $installerOutput = Join-Path $env:GITHUB_WORKSPACE 'installer\bin\Release'
+          $publishDirectory = Join-Path $installerOutput 'publish'
+          if (-not (Test-Path -LiteralPath (Join-Path $publishDirectory 'Piper.exe') -PathType Leaf)) {
+            throw "The installer build did not leave a published Piper.exe in $publishDirectory."
+          }
+          # The installer target deletes old setup files before it builds, so exactly one is expected.
+          $installers = @(Get-ChildItem -LiteralPath $installerOutput -Filter 'Piper-*-setup.exe' -File)
+          if ($installers.Count -ne 1) {
+            throw "Expected exactly one installer in $installerOutput, found $($installers.Count)."
+          }
+
           $artifacts = Join-Path $env:GITHUB_WORKSPACE 'artifacts'
           $portableDirectory = Join-Path $artifacts "Piper-$version-$env:RUNTIME"
           New-Item -ItemType Directory -Path $portableDirectory -Force | Out-Null
-          Copy-Item -Path (Join-Path $env:GITHUB_WORKSPACE 'publish\*') -Destination $portableDirectory -Recurse -Force
+          Copy-Item -Path (Join-Path $publishDirectory '*') -Destination $portableDirectory -Recurse -Force
 
           $portableZip = Join-Path $artifacts "Piper-$version-$env:RUNTIME-portable.zip"
           Compress-Archive -Path $portableDirectory -DestinationPath $portableZip -CompressionLevel Optimal
+          Remove-Item -LiteralPath $portableDirectory -Recurse -Force
+
+          # The installer is named after the four-part file version; release assets use the tag version.
+          Copy-Item -LiteralPath $installers[0].FullName -Destination (Join-Path $artifacts "Piper-$version-setup.exe")
 
           $sourceZip = Join-Path $artifacts "Piper-$version-source.zip"
           git archive --format=zip --prefix="Piper-$version/" --output=$sourceZip $env:GITHUB_SHA
           if ($LASTEXITCODE -ne 0) { throw "Could not create the source archive." }
 
-          $fileVersion = [System.Diagnostics.FileVersionInfo]::GetVersionInfo(
-            (Join-Path $env:GITHUB_WORKSPACE 'publish\Piper.exe')).FileVersion
-          if ([string]::IsNullOrWhiteSpace($fileVersion)) {
-            throw "Could not read the file version from the published Piper executable."
-          }
-
-          "artifacts=$artifacts" | Add-Content -Path $env:GITHUB_OUTPUT
-          "file_version=$fileVersion" | Add-Content -Path $env:GITHUB_OUTPUT
-
-      - name: Install NSIS
-        shell: pwsh
-        run: choco install nsis --yes --no-progress
-
-      - name: Build installer
-        shell: pwsh
-        run: |
-          $version = '${{ steps.version.outputs.version }}'
-          $fileVersion = '${{ steps.package.outputs.file_version }}'
-          $artifacts = '${{ steps.package.outputs.artifacts }}'
-          $installer = Join-Path $artifacts "Piper-$version-setup.exe"
-          $publishDirectory = Join-Path $env:GITHUB_WORKSPACE 'publish'
-
-          & makensis.exe "/DPRODUCT_VERSION=$fileVersion" "/DPUBLISH_DIR=$publishDirectory" `
-            "/DOUTPUT_FILE=$installer" 'installer\Piper.nsi'
-          if ($LASTEXITCODE -ne 0) { throw "NSIS packaging failed." }
-
-      - name: Create checksums
-        shell: pwsh
-        run: |
-          $artifacts = '${{ steps.package.outputs.artifacts }}'
           $checksums = Join-Path $artifacts 'SHA256SUMS.txt'
           Get-ChildItem -Path $artifacts -File |
             Get-FileHash -Algorithm SHA256 |
             ForEach-Object { "$($_.Hash.ToLowerInvariant())  $($_.Path | Split-Path -Leaf)" } |
             Set-Content -Path $checksums
 
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-assets
+          path: artifacts/*
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Attest and publish
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # The only job that can write: it downloads the verified assets, attests them, and uploads them.
+    # It checks out and runs no repository code.
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-assets
+          path: artifacts
+
+      - name: Check checksums
+        shell: pwsh
+        working-directory: artifacts
+        run: |
+          $lines = @(Get-Content -LiteralPath 'SHA256SUMS.txt')
+          $assets = @(Get-ChildItem -File | Where-Object Name -ne 'SHA256SUMS.txt')
+          # The portable zip, the installer and the source zip.
+          if ($lines.Count -ne $assets.Count -or $assets.Count -ne 3) {
+            throw "Expected 3 assets listed in SHA256SUMS.txt; found $($assets.Count) files and $($lines.Count) lines."
+          }
+          foreach ($line in $lines) {
+            $hash, $name = $line -split '  ', 2
+            if ((Get-FileHash -LiteralPath $name -Algorithm SHA256).Hash.ToLowerInvariant() -ne $hash) {
+              throw "Checksum mismatch for $name."
+            }
+          }
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: artifacts/*
+
       - name: Create GitHub release
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.build.outputs.version }}
         run: |
           $tag = $env:GITHUB_REF_NAME
-          $version = '${{ steps.version.outputs.version }}'
-          $artifacts = '${{ steps.package.outputs.artifacts }}'
-          $assets = Get-ChildItem -Path $artifacts -File | ForEach-Object { $_.FullName }
+          $assets = Get-ChildItem -Path artifacts -File | ForEach-Object { $_.FullName }
 
           gh release view $tag 2>$null
           if ($LASTEXITCODE -eq 0) {
             gh release upload $tag $assets --clobber
           }
           else {
-            gh release create $tag $assets --title "Piper $version" --generate-notes --verify-tag
+            gh release create $tag $assets --title "Piper $env:VERSION" --generate-notes --verify-tag
           }
           if ($LASTEXITCODE -ne 0) { throw "GitHub release publishing failed." }

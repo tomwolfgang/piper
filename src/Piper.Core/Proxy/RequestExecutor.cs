@@ -69,7 +69,9 @@ public sealed class RequestExecutor(ProxyOptions options, SessionStore store)
             store.NotifyUpdated(session);
 
             var beforeResponse = stopwatch.Elapsed;
-            session.Response = await HttpParser.ReadResponseAsync(upstream.Reader, request.Method, ct).ConfigureAwait(false);
+            // Lenient fields: the response is shown, never relayed, so a header the proxy path would
+            // refuse (a non-token name, a CR or NUL in a value) is kept for the user to see.
+            session.Response = await HttpParser.ReadResponseAsync(upstream.Reader, request.Method, ct, lenientFields: true).ConfigureAwait(false);
             session.TimeToFirstByte = stopwatch.Elapsed - beforeResponse;
             session.State = SessionState.Complete;
         }

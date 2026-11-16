@@ -148,10 +148,12 @@ public static class HttpBodyRelay
         byte[] buffer, MemoryStream captured, long captureLimit, Action<long>? onProgress, CancellationToken ct)
     {
         long total = 0;
+        var extensionBytes = 0;
         while (true)
         {
-            var sizeLine = await source.ReadLineAsync(ct).ConfigureAwait(false);
+            var sizeLine = await HttpParser.ReadChunkSizeLineAsync(source, extensionBytes, ct).ConfigureAwait(false);
             if (sizeLine is null) throw new HttpParseException("Connection closed inside a chunked body.");
+            extensionBytes += HttpParser.ChunkLineExtensionBytes(sizeLine);
 
             if (!HttpSyntax.TryParseChunkSize(sizeLine, out var chunkSize))
                 throw new HttpParseException($"Bad chunk size: '{HttpParser.Truncate(sizeLine)}'");

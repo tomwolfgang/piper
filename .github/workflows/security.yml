@@ -48,6 +48,8 @@ jobs:
       - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
           dotnet-version: 10.0.x
+          cache: true
+          cache-dependency-path: "**/*.csproj"
 
       - name: Initialize CodeQL
         uses: github/codeql-action/init@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
@@ -55,18 +57,10 @@ jobs:
           languages: csharp
           queries: security-extended
 
-      - name: Restore
-        run: dotnet restore Piper.slnx
-
-      - name: Build analyzed projects
+      # The same restore and project set as the gate, from one list in eng/verify.ps1.
+      - name: Restore and build analyzed projects
         shell: pwsh
-        run: |
-          dotnet build src/Piper.App/Piper.App.csproj --configuration Release --no-restore -p:TreatWarningsAsErrors=true
-          if ($LASTEXITCODE -ne 0) { throw "Application build failed." }
-          dotnet build tests/Piper.SmokeTests/Piper.SmokeTests.csproj --configuration Release --no-restore -p:TreatWarningsAsErrors=true
-          if ($LASTEXITCODE -ne 0) { throw "Test build failed." }
-          dotnet build tools/Piper.TrafficGen/Piper.TrafficGen.csproj --configuration Release --no-restore -p:TreatWarningsAsErrors=true
-          if ($LASTEXITCODE -ne 0) { throw "Traffic generator build failed." }
+        run: ./eng/verify.ps1 -BuildOnly
 
       - name: Analyze
         uses: github/codeql-action/analyze@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
