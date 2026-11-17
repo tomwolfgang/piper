@@ -72,6 +72,45 @@ internal static class SessionHideListTests
             runner.IsTrue(!hides.Clear(), "and reports nothing to do when it is empty");
             return Task.CompletedTask;
         });
+
+        await runner.RunAsync("hides survive a restart and a tampered file is checked again", () =>
+        {
+            var directory = Path.Combine(Path.GetTempPath(), "piper-hides-" + Guid.NewGuid().ToString("N"));
+            var path = Path.Combine(directory, "session-hides.json");
+            try
+            {
+                runner.AreEqual(0, SessionHideList.Load(path).Count, "no file is no hides");
+
+                var hides = new SessionHideList();
+                hides.Add(SessionHideKind.Host, "example.com");
+                hides.Add(SessionHideKind.Process, "game");
+                hides.Add(SessionHideKind.ContentType, "image/png");
+                SessionHideList.Save(hides.Items, path);
+                var loaded = SessionHideList.Load(path);
+                runner.AreEqual(3, loaded.Count, "every hide comes back");
+                runner.AreEqual(SessionHideKind.Process, loaded.Items[1].Kind, "with its kind");
+                runner.AreEqual("game", loaded.Items[1].Value, "and its value, in order");
+
+                File.WriteAllText(path, "[{\"Kind\":0,\"Value\":\"a.com host:b\"},{\"Kind\":99,\"Value\":\"x\"},null,{\"Kind\":1,\"Value\":null},{\"Kind\":1,\"Value\":\"ok\"},{\"Kind\":1,\"Value\":\"OK\"}]");
+                loaded = SessionHideList.Load(path);
+                runner.AreEqual(1, loaded.Count, "a bad host, unknown kind, null entry, null value and duplicate are dropped");
+                runner.AreEqual("ok", loaded.Items[0].Value, "and the valid hide is kept");
+
+                File.WriteAllText(path, "[" + string.Join(",", Enumerable.Range(0, 200).Select(i => $"{{\"Kind\":1,\"Value\":\"p{i}\"}}")) + "]");
+                runner.AreEqual(SessionHideList.MaxHides, SessionHideList.Load(path).Count, "a file past the cap loads only up to it");
+
+                File.WriteAllText(path, "{not json");
+                runner.AreEqual(0, SessionHideList.Load(path).Count, "malformed JSON is no hides");
+
+                File.WriteAllText(path, "[" + new string(' ', (int)SessionHideList.MaxFileBytes) + "]");
+                runner.AreEqual(0, SessionHideList.Load(path).Count, "an oversized file is not read");
+            }
+            finally
+            {
+                if (Directory.Exists(directory)) Directory.Delete(directory, recursive: true);
+            }
+            return Task.CompletedTask;
+        });
     }
 
     private static Session Session(string host, string? process = null, string? contentType = null)

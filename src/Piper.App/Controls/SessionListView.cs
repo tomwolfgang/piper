@@ -64,9 +64,10 @@ public sealed class SessionListView : UserControl
     private FindSessionsRequest _lastFind = FindSessionsRequest.Default;
     private Func<Session, bool>? _visibilityFilter;
     private Func<Session, bool>? _filtersetFilter;
-    // What the right-click menu hid, for this run only, shown as tags in _hiddenBar. Like Fiddler's
-    // "Filter Now", these are the user's quick view and stay apart from the Filters tab. Values come
-    // from captured sessions: they are only compared in memory and shown, never composed into a query.
+    // What the right-click menu hid, shown as tags in _hiddenBar; MainForm saves and restores them.
+    // Like Fiddler's "Filter Now", these are the user's quick view and stay apart from the Filters tab.
+    // Values come from captured sessions: they are only compared in memory and shown, never composed
+    // into a query.
     private readonly SessionHideList _hides = new();
     private readonly FlowLayoutPanel _hiddenBar;
     private bool _hiddenHostsFilterChanged;
@@ -394,6 +395,21 @@ public sealed class SessionListView : UserControl
     /// <summary>Hides a host's sessions until its tag is clicked, as the menu's "Hide host" does.</summary>
     public void HideHost(string host) => AddHide(SessionHideKind.Host, host);
 
+    /// <summary>What is hidden now, in tag order.</summary>
+    public IReadOnlyList<SessionHide> Hides => _hides.Items;
+
+    /// <summary>Raised after a hide is added or removed, so the host can save the list.</summary>
+    public event EventHandler? HidesChanged;
+
+    /// <summary>Puts back hides saved by an earlier run; each still goes through the list's checks.</summary>
+    public void RestoreHides(IEnumerable<SessionHide> saved)
+    {
+        ArgumentNullException.ThrowIfNull(saved);
+        var added = false;
+        foreach (var hide in saved) added |= _hides.Add(hide.Kind, hide.Value);
+        if (added) RebuildForHide();
+    }
+
     private void AddHide(SessionHideKind kind, string value)
     {
         if (_hides.Add(kind, value)) RebuildForHide();
@@ -416,6 +432,7 @@ public sealed class SessionListView : UserControl
         FillHiddenBar();
         _hiddenHostsFilterChanged = true;
         Rebuild();
+        HidesChanged?.Invoke(this, EventArgs.Empty);
     }
 
     /// <summary>The bar under the filter box listing what is hidden, named so a test can find it.</summary>
@@ -1377,7 +1394,7 @@ public sealed class SessionListView : UserControl
         {
             if (SelectedSession is { } session) FilterText = $"host:{session.Host}";
         });
-        // Fiddler's "Filter Now": hide what this row has, for this run, as tags in the hidden bar.
+        // Fiddler's "Filter Now": hide what this row has, as tags in the hidden bar.
         // The host, the common case, is one click; the rarer criteria sit in "Hide by". Both are
         // filled as the menu opens, from the selected row.
         var hideHost = new ToolStripMenuItem(string.Empty, null, (_, _) =>
