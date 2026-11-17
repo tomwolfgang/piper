@@ -90,6 +90,10 @@ internal static class SessionHideListTests
                 runner.AreEqual(3, loaded.Count, "every hide comes back");
                 runner.AreEqual(SessionHideKind.Process, loaded.Items[1].Kind, "with its kind");
                 runner.AreEqual("game", loaded.Items[1].Value, "and its value, in order");
+                runner.IsTrue(!File.Exists(path + ".tmp"), "the save leaves no temporary file behind");
+                SessionHideList.Save(Array.Empty<SessionHide>(), path);
+                runner.AreEqual(0, SessionHideList.Load(path).Count, "a later save replaces the earlier one");
+                SessionHideList.Save(hides.Items, path);
 
                 File.WriteAllText(path, "[{\"Kind\":0,\"Value\":\"a.com host:b\"},{\"Kind\":99,\"Value\":\"x\"},null,{\"Kind\":1,\"Value\":null},{\"Kind\":1,\"Value\":\"ok\"},{\"Kind\":1,\"Value\":\"OK\"}]");
                 loaded = SessionHideList.Load(path);

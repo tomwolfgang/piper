@@ -66,7 +66,11 @@ public sealed class SessionHideList
         {
             var directory = Path.GetDirectoryName(path);
             if (!string.IsNullOrEmpty(directory)) Directory.CreateDirectory(directory);
-            File.WriteAllText(path, JsonSerializer.Serialize(hides.Select(hide => new Stored(hide.Kind, hide.Value))));
+            // Write then replace, so a crash mid-write leaves the previous hides rather than a torn file.
+            // ponytail: synchronous on the caller's thread; at most 64 short entries, as FilterSettingsStore does.
+            var temp = path + ".tmp";
+            File.WriteAllText(temp, JsonSerializer.Serialize(hides.Select(hide => new Stored(hide.Kind, hide.Value))));
+            File.Move(temp, path, overwrite: true);
         }
         catch (IOException)
         {
