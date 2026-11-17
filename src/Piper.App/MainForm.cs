@@ -225,6 +225,8 @@ public sealed partial class MainForm : Form, IMessageFilter
         if (FilterSettingsStore.Load() is { } filterSettings)
             _filterPanel.ApplySettings(filterSettings);
         _filterPanel.ApplyCurrentFilterset();
+        _sessionList.RestoreHides(SessionHideList.Load().Items);
+        _sessionList.HidesChanged += (_, _) => SessionHideList.Save(_sessionList.Hides);
 
         // Rules apply the moment they are edited, so the proxy and the panel never disagree about
         // what is live. The tab glyph is the reminder that traffic is being intercepted.
