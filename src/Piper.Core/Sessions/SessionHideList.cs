@@ -90,9 +90,11 @@ public sealed class SessionHideList
         var list = new SessionHideList();
         try
         {
-            var file = new FileInfo(path);
-            if (!file.Exists || file.Length > MaxFileBytes) return list;
-            foreach (var stored in JsonSerializer.Deserialize<List<Stored?>>(File.ReadAllText(path)) ?? [])
+            if (!File.Exists(path)) return list;
+            // OpenRead shares read-only, so nothing can grow the file between the size check and the read.
+            using var stream = File.OpenRead(path);
+            if (stream.Length > MaxFileBytes) return list;
+            foreach (var stored in JsonSerializer.Deserialize<List<Stored?>>(stream) ?? [])
             {
                 if (stored is not null && Enum.IsDefined(stored.Kind)) list.Add(stored.Kind, stored.Value);
             }
