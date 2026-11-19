@@ -46,7 +46,7 @@ public sealed partial class MainForm : Form, IMessageFilter
     private readonly ToolStripStatusLabel _breakpointsLabel;
     private readonly ToolStripStatusLabel _sessionsLabel;
     private readonly ToolStripStatusLabel _selectedSessionDetailsLabel;
-    private ToolStripButton? _themeToggle;
+    private ToolStripDropDownButton? _themePicker;
     private ToolStripMenuItem? _checkForUpdatesMenuItem;
     private readonly CancellationTokenSource _updatesCancellation = new();
 
@@ -82,6 +82,9 @@ public sealed partial class MainForm : Form, IMessageFilter
             FontScale.WheelEnabled = fontScale.WheelZoomEnabled;
         }
         Palette.RescaleFonts();
+        // Same reason as the font: before any control reads a colour. Until a theme is picked, the
+        // palette keeps the Windows light/dark setting it detected.
+        if (Palette.TryParseMode(ThemeSettingsStore.Load()?.Theme, out var savedTheme)) Palette.SetMode(savedTheme);
 
         DoubleBuffered = true;
         Text = Strings.App.Name;
@@ -1122,39 +1125,56 @@ public sealed partial class MainForm : Form, IMessageFilter
             _composer.FocusSearch();
         };
 
-        _themeToggle = new ToolStripButton
+        _themePicker = new ToolStripDropDownButton
         {
             Alignment = ToolStripItemAlignment.Right,
             DisplayStyle = ToolStripItemDisplayStyle.Text,
+            ToolTipText = Strings.Toolbar.ThemeTooltip,
         };
-        _themeToggle.Click += (_, _) => ToggleTheme();
-        UpdateThemeToggle();
+        foreach (var mode in Enum.GetValues<ThemeMode>())
+        {
+            var item = new ToolStripMenuItem(ThemeName(mode)) { Tag = mode };
+            item.Click += (_, _) => ChooseTheme(mode);
+            _themePicker.DropDownItems.Add(item);
+        }
+        UpdateThemePicker();
 
         toolbar.Items.AddRange([
             clear, new ToolStripSeparator(),
             composer,
-            _themeToggle,
+            _themePicker,
         ]);
         return toolbar;
     }
 
-    private void ToggleTheme()
+    /// <summary>Applies a theme template and remembers it, so Piper stops following Windows.</summary>
+    private void ChooseTheme(ThemeMode mode)
     {
-        Palette.ToggleMode();
+        ThemeSettingsStore.Save(new ThemeSettings { Theme = mode.ToString() });
+        if (mode == Palette.Mode) return;
+
+        Palette.SetMode(mode);
         Palette.Apply(this);
         RefreshStatusIcons();
-        UpdateThemeToggle();
+        UpdateThemePicker();
         InvalidateTheme(this);
         _panelHost.ApplyTheme();
     }
 
-    private void UpdateThemeToggle()
+    private static string ThemeName(ThemeMode mode) => mode switch
     {
-        if (_themeToggle is null) return;
+        ThemeMode.Light => Strings.Toolbar.ThemeLight,
+        ThemeMode.Purple => Strings.Toolbar.ThemePurple,
+        _ => Strings.Toolbar.ThemeDark,
+    };
 
-        var target = Palette.IsLightMode ? Strings.Toolbar.DarkMode : Strings.Toolbar.LightMode;
-        _themeToggle.Text = Strings.Toolbar.ThemeToggle(target);
-        _themeToggle.ToolTipText = Strings.Toolbar.ThemeToggleTooltip(target);
+    private void UpdateThemePicker()
+    {
+        if (_themePicker is null) return;
+
+        _themePicker.Text = Strings.Toolbar.Theme(ThemeName(Palette.Mode));
+        foreach (ToolStripMenuItem item in _themePicker.DropDownItems)
+            item.Checked = item.Tag is ThemeMode mode && mode == Palette.Mode;
     }
 
     private void RefreshStatusIcons()
@@ -1888,7 +1908,7 @@ public sealed partial class MainForm : Form, IMessageFilter
     }
 
     /// <summary>
-    /// Pushes a new font size onto the live control tree. Mirrors <see cref="ToggleTheme"/>: the
+    /// Pushes a new font size onto the live control tree. Mirrors <see cref="ChooseTheme"/>: the
     /// palette re-walks the tree and everything repaints.
     /// </summary>
     private void ChangeFontScale(bool changed)
