@@ -95,6 +95,7 @@
     "zoomOut": "Zoom &out",
     "resetZoom": "&Reset zoom",
     "resetZoomTo": "&Reset zoom (now {{percent}}%)",
+    "inspectorSideBySide": "Request and response &side by side",
 
     "rules": "&Rules",
     "userAgent": "&User-Agent",

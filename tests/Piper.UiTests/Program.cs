@@ -71,6 +71,7 @@ internal static class Program
         RunComposerHistoryTooltipTest();
         ImageDecodingTests.Run(Check, PumpUntil);
         InspectorSaveTests.Run(Check, PumpUntil);
+        InspectorLayoutTests.Run(Check, PumpUntil);
         WebpViewTests.Run(Check, PumpUntil);
         WebpInspectorTests.Run(Check, PumpUntil);
         VideoViewTests.Run(Check, PumpUntil);

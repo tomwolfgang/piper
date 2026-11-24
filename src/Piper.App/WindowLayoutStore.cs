@@ -101,6 +101,7 @@ internal static class WindowLayoutStore
         writer.WriteNumber("Width", layout.Width);
         writer.WriteNumber("Height", layout.Height);
         writer.WriteBoolean("Maximized", layout.Maximized);
+        writer.WriteBoolean("InspectorSideBySide", layout.InspectorSideBySide);
 
         writer.WriteStartArray("Panels");
         foreach (var id in AllPanels)
@@ -170,7 +171,9 @@ internal static class WindowLayoutStore
         if (root.TryGetProperty("Panels", out var list) && list.ValueKind == JsonValueKind.Array) ReadPanels(list, panels);
         if (root.TryGetProperty("Areas", out var areas) && areas.ValueKind == JsonValueKind.Object) ReadAreas(areas, panels);
 
-        return new WindowLayout(new Rectangle(x, y, width, height), maximized, panels);
+        // Anything but a literal true keeps the stacked default.
+        var sideBySide = root.TryGetProperty("InspectorSideBySide", out var s) && s.ValueKind == JsonValueKind.True;
+        return new WindowLayout(new Rectangle(x, y, width, height), maximized, panels) { InspectorSideBySide = sideBySide };
     }
 
     private static void ReadPanels(JsonElement list, PanelLayout panels)
@@ -277,6 +280,7 @@ internal static class WindowLayoutStore
         public int Width { get; set; }
         public int Height { get; set; }
         public bool Maximized { get; set; }
+        public bool InspectorSideBySide { get; set; }
         public PanelLayout Panels { get; set; } = PanelLayout.Default();
 
         public Rectangle ToRectangle() => new(X, Y, Width, Height);
