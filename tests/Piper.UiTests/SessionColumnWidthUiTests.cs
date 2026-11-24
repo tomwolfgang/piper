@@ -22,7 +22,7 @@ internal static class SessionColumnWidthUiTests
             check(Describe(clamped.UserColumnWidths) == "Size=2000,Time=20", $"restored widths are clamped ({Describe(clamped.UserColumnWidths)})");
         }
 
-        var grid = new SessionListView(new SessionStore()) { Dock = DockStyle.Fill };
+        var grid = new SessionListView(new SessionStore()) { Location = Point.Empty, Size = new Size(1100, 400) };
         var threw = false;
         try
         {
@@ -36,7 +36,9 @@ internal static class SessionColumnWidthUiTests
         check(!threw, "restoring widths before the grid has a handle does not throw");
         check(Describe(grid.UserColumnWidths) == "Host=240", $"restored widths are kept ({Describe(grid.UserColumnWidths)})");
 
-        using var form = new Form { Width = 1100, Height = 500, ShowInTaskbar = false, StartPosition = FormStartPosition.Manual, Location = new Point(0, 0) };
+        // The grid is sized directly, not the form: a CI desktop can be narrower than the widths used
+        // here, and Windows caps a top-level window at the screen's size.
+        using var form = new Form { Width = 600, Height = 500, ShowInTaskbar = false, StartPosition = FormStartPosition.Manual, Location = new Point(0, 0) };
         form.Controls.Add(grid);
         form.Show();
         var list = All(grid).OfType<ListView>().First();
@@ -44,7 +46,7 @@ internal static class SessionColumnWidthUiTests
 
         var host = list.Columns[Host].Width;
         var path = list.Columns[Path].Width;
-        form.Width = 1500;
+        grid.Width = 1500;
         pumpUntil(() => list.Columns[Path].Width != path);
         check(list.Columns[Host].Width == host, $"a restored column keeps its width through a resize ({host} -> {list.Columns[Host].Width})");
         check(list.Columns[Path].Width > path, $"the columns the user did not size still flex ({path} -> {list.Columns[Path].Width})");
@@ -75,9 +77,9 @@ internal static class SessionColumnWidthUiTests
         {
             grid.RestoreColumnWidths(all);
             grid.RefitColumns();
-            form.Width = 1200;
+            grid.Width = 1200;
             pumpUntil(() => list.Columns[Path].Width == list.Columns[Host].Width);
-            form.Width = 1600;
+            grid.Width = 1600;
             pumpUntil(() => true);
         }
         catch (Exception)
