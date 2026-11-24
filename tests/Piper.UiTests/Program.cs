@@ -84,6 +84,7 @@ internal static class Program
         TlsFailureUiTests.Run(Check, PumpUntil);
         TlsFailureInspectorUiTests.Run(Check, PumpUntil);
         TlsFailureSettingUiTests.Run(Check);
+        ThemeTemplateUiTests.Run(Check);
         PanelHostTests.Run(Check, PumpUntil);
 
         Run("clearing a scrolled grid shows the next rows from the top", (store, grid, list) =>

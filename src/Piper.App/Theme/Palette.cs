@@ -31,6 +31,14 @@ public static class Palette
         Color.FromArgb(35, 130, 65), Color.FromArgb(55, 115, 180), Color.FromArgb(170, 105, 15),
         Color.FromArgb(190, 55, 55), Color.FromArgb(105, 105, 112), Color.FromArgb(125, 80, 180),
         Color.FromArgb(20, 125, 125));
+    /// <summary>Dark-based, so the title bar, scrollbars and accent headers treat it like Dark.</summary>
+    private static readonly ThemeColors Purple = new(
+        Color.FromArgb(30, 26, 43), Color.FromArgb(38, 33, 54), Color.FromArgb(62, 30, 46),
+        Color.FromArgb(46, 40, 66), Color.FromArgb(72, 62, 100), Color.FromArgb(232, 226, 245),
+        Color.FromArgb(165, 156, 190), Color.FromArgb(155, 107, 242), Color.FromArgb(74, 52, 120),
+        Color.FromArgb(110, 200, 130), Color.FromArgb(130, 175, 235), Color.FromArgb(235, 185, 105),
+        Color.FromArgb(240, 115, 125), Color.FromArgb(150, 145, 170), Color.FromArgb(200, 160, 245),
+        Color.FromArgb(105, 210, 205));
 
     /// <summary>
     /// Unscaled heights of the fixed-height rows the walk resizes. Keyed weakly so a closed dialog's
@@ -42,7 +50,12 @@ public static class Palette
 
     public static ThemeMode Mode => _mode;
     public static bool IsLightMode => _mode == ThemeMode.Light;
-    private static ThemeColors Current => IsLightMode ? Light : Dark;
+    private static ThemeColors Current => _mode switch
+    {
+        ThemeMode.Light => Light,
+        ThemeMode.Purple => Purple,
+        _ => Dark,
+    };
 
     public static Color Background => Current.Background;
     public static Color Surface => Current.Surface;
@@ -120,6 +133,18 @@ public static class Palette
     {
         if (_mode == mode) return;
         _mode = mode;
+    }
+
+    /// <summary>
+    /// Reads a saved theme name. Only an exact template name is accepted -- not a number, and not a
+    /// different casing -- so a hand-edited settings file falls back to following Windows.
+    /// </summary>
+    public static bool TryParseMode(string? name, out ThemeMode mode)
+    {
+        mode = default;
+        if (name is null || Array.IndexOf(Enum.GetNames<ThemeMode>(), name) < 0) return false;
+        mode = Enum.Parse<ThemeMode>(name);
+        return true;
     }
 
     private static ThemeMode DetectWindowsTheme()
@@ -499,4 +524,5 @@ public enum ThemeMode
 {
     Dark,
     Light,
+    Purple,
 }

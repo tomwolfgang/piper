@@ -187,13 +187,12 @@ internal static class Strings
         public static string Clear => I18n.T("toolbar.clear");
         public static string Composer => I18n.T("toolbar.composer");
 
-        public static string DarkMode => I18n.T("toolbar.darkMode");
-        public static string LightMode => I18n.T("toolbar.lightMode");
-        public static string ThemeToggle(string target) => I18n.T("toolbar.themeToggle", ("target", target));
+        public static string Theme(string name) => I18n.T("toolbar.theme", ("name", name));
+        public static string ThemeTooltip => I18n.T("toolbar.themeTooltip");
 
-        /// <summary>The case change stays here: casing rules are per-language, not per-template.</summary>
-        public static string ThemeToggleTooltip(string target) =>
-            I18n.T("toolbar.themeToggleTooltip", ("target", target.ToLowerInvariant()));
+        public static string ThemeDark => I18n.T("toolbar.themeDark");
+        public static string ThemeLight => I18n.T("toolbar.themeLight");
+        public static string ThemePurple => I18n.T("toolbar.themePurple");
     }
 
     public static class StatusBar

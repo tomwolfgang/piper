@@ -109,10 +109,11 @@
   "toolbar": {
     "clear": "Clear",
     "composer": "Composer  (Ctrl+K)",
-    "darkMode": "Dark",
-    "lightMode": "Light",
-    "themeToggle": "{{target}} mode",
-    "themeToggleTooltip": "Switch to {{target}} mode"
+    "theme": "Theme: {{name}}",
+    "themeTooltip": "Choose the colour theme",
+    "themeDark": "Dark",
+    "themeLight": "Light",
+    "themePurple": "Purple"
   },
 
   "statusBar": {
