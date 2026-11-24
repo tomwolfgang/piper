@@ -67,6 +67,28 @@ internal static class SessionColumnWidthUiTests
             File.Delete(file);
         }
 
+        // Every column pinned leaves ColumnLayout.Fit an all-zero weight vector: nothing grows, the
+        // filler takes the spare width, and neither a refit nor a resize throws.
+        var all = Enum.GetValues<SessionSortColumn>().ToDictionary(column => column, _ => 60);
+        var pinnedThrew = false;
+        try
+        {
+            grid.RestoreColumnWidths(all);
+            grid.RefitColumns();
+            form.Width = 1200;
+            pumpUntil(() => list.Columns[Path].Width == list.Columns[Host].Width);
+            form.Width = 1600;
+            pumpUntil(() => true);
+        }
+        catch (Exception)
+        {
+            pinnedThrew = true;
+        }
+
+        check(!pinnedThrew, "with every column sized by the user, a refit and resizes do not throw");
+        check(list.Columns[Path].Width == list.Columns[Host].Width && Math.Abs(list.Columns[Host].Width - host / 4) <= 1,
+            $"and every column keeps its own width ({list.Columns[Host].Width}, {list.Columns[Path].Width}, expected {host / 4})");
+
         form.Close();
     }
 
