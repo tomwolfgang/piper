@@ -107,6 +107,7 @@ internal static class WindowLayoutStore
         writer.WriteNumber("Width", layout.Width);
         writer.WriteNumber("Height", layout.Height);
         writer.WriteBoolean("Maximized", layout.Maximized);
+        writer.WriteBoolean("InspectorSideBySide", layout.InspectorSideBySide);
 
         writer.WriteStartArray("Panels");
         foreach (var id in AllPanels)
@@ -192,7 +193,13 @@ internal static class WindowLayoutStore
                     columns[column] = Math.Clamp(w, MinColumnWidth, MaxColumnWidth);
         }
 
-        return new WindowLayout(new Rectangle(x, y, width, height), maximized, panels) { SessionColumnWidths = columns };
+        // Anything but a literal true keeps the stacked default.
+        var sideBySide = root.TryGetProperty("InspectorSideBySide", out var s) && s.ValueKind == JsonValueKind.True;
+        return new WindowLayout(new Rectangle(x, y, width, height), maximized, panels)
+        {
+            SessionColumnWidths = columns,
+            InspectorSideBySide = sideBySide,
+        };
     }
 
     private static void ReadPanels(JsonElement list, PanelLayout panels)
@@ -299,6 +306,7 @@ internal static class WindowLayoutStore
         public int Width { get; set; }
         public int Height { get; set; }
         public bool Maximized { get; set; }
+        public bool InspectorSideBySide { get; set; }
         public PanelLayout Panels { get; set; } = PanelLayout.Default();
 
         /// <summary>Session-list columns the user resized, in 96-DPI pixels at 100% zoom.</summary>

@@ -171,6 +171,7 @@ internal static class Strings
         public static string ZoomOut => I18n.T("menu.zoomOut");
         public static string ResetZoom => I18n.T("menu.resetZoom");
         public static string ResetZoomTo(int percent) => I18n.T("menu.resetZoomTo", ("percent", percent));
+        public static string InspectorSideBySide => I18n.T("menu.inspectorSideBySide");
 
         public static string Rules => I18n.T("menu.rules");
         public static string UserAgent => I18n.T("menu.userAgent");

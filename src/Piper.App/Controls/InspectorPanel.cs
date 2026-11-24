@@ -5,7 +5,7 @@ using Piper.Core.Sessions;
 
 namespace Piper.App.Controls;
 
-/// <summary>Request above, response below, for the currently selected session.</summary>
+/// <summary>Request above (or left of) the response, for the currently selected session.</summary>
 public sealed class InspectorPanel : UserControl
 {
     private readonly MessageInspector _request = new(Strings.Inspector.Request, showWebForms: true) { Dock = DockStyle.Fill };
@@ -34,15 +34,35 @@ public sealed class InspectorPanel : UserControl
     private readonly SplitContainer _split;
     private bool _splitPositioned;
 
+    /// <summary>Request on the left and response on the right, rather than request above response.</summary>
+    [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
+    public bool SideBySide
+    {
+        get => _split.Orientation == Orientation.Vertical;
+        set
+        {
+            if (SideBySide == value) return;
+            _split.Orientation = value ? Orientation.Vertical : Orientation.Horizontal;
+            _splitPositioned = false;
+            CentreSplit();
+        }
+    }
+
     /// <summary>
-    /// Splits request and response evenly once the panel has a real height. Setting this
+    /// Splits request and response evenly once the panel has a real size. Setting this
     /// in the constructor is silently clamped against the 150px design-time default.
     /// </summary>
     protected override void OnSizeChanged(EventArgs e)
     {
         base.OnSizeChanged(e);
-        if (_splitPositioned || _split.Height <= 200) return;
-        _split.SplitterDistance = _split.Height / 2;
+        CentreSplit();
+    }
+
+    private void CentreSplit()
+    {
+        var length = SideBySide ? _split.Width : _split.Height;
+        if (_splitPositioned || length <= 200) return;
+        _split.SplitterDistance = length / 2;
         _splitPositioned = true;
     }
 

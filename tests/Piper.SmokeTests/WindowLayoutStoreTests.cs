@@ -80,6 +80,29 @@ internal static class WindowLayoutStoreTests
             return Task.CompletedTask;
         });
 
+        await runner.RunAsync("layout store round trips the inspector orientation and defaults to stacked", () =>
+        {
+            WithFile(path =>
+            {
+                var bounds = new Rectangle(1, 2, 900, 700);
+                WindowLayoutStore.Save(new WindowLayoutStore.WindowLayout(bounds, false, PanelLayout.Default()) { InspectorSideBySide = true }, path);
+                runner.IsTrue(WindowLayoutStore.Load(path)!.InspectorSideBySide, "side by side round trips");
+                WindowLayoutStore.Save(new WindowLayoutStore.WindowLayout(bounds, false, PanelLayout.Default()), path);
+                runner.IsTrue(!WindowLayoutStore.Load(path)!.InspectorSideBySide, "stacked round trips");
+
+                foreach (var value in new[] { "\"true\"", "1", "null", "{}", "[true]" })
+                {
+                    File.WriteAllText(path, $$"""{"X":1,"Y":2,"Width":900,"Height":700,"InspectorSideBySide":{{value}}}""");
+                    var loaded = WindowLayoutStore.Load(path);
+                    runner.IsTrue(loaded is { InspectorSideBySide: false }, $"a malformed orientation ({value}) is stacked");
+                }
+
+                File.WriteAllText(path, """{"X":1,"Y":2,"Width":900,"Height":700}""");
+                runner.IsTrue(!WindowLayoutStore.Load(path)!.InspectorSideBySide, "a file without the setting is stacked");
+            });
+            return Task.CompletedTask;
+        });
+
         await runner.RunAsync("layout store falls back to defaults for bad panel data", () =>
         {
             WithFile(path =>

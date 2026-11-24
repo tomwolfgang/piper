@@ -66,6 +66,7 @@ public sealed partial class MainForm : Form, IMessageFilter
     private bool _captureToggleInProgress;
     private bool _restoreMaximized;
     private IReadOnlyDictionary<SessionSortColumn, int>? _savedColumnWidths;
+    private bool _restoreInspectorSideBySide;
     private bool _shutdownInProgress;
     private bool _closeAfterShutdown;
     private bool _sessionsStatusUpdateQueued;
@@ -122,7 +123,7 @@ public sealed partial class MainForm : Form, IMessageFilter
 
         _sessionList = new SessionListView(_store) { Dock = DockStyle.Fill };
         if (_savedColumnWidths is { } columnWidths) _sessionList.RestoreColumnWidths(columnWidths);
-        _inspector = new InspectorPanel { Dock = DockStyle.Fill };
+        _inspector = new InspectorPanel { Dock = DockStyle.Fill, SideBySide = _restoreInspectorSideBySide };
         _composer = new ComposerPanel(_executor) { Dock = DockStyle.Fill };
         _filterPanel = new FilterPanel { Dock = DockStyle.Fill };
         _autoResponder = new AutoResponderPanel(_options.AutoResponder) { Dock = DockStyle.Fill };
@@ -779,8 +780,14 @@ public sealed partial class MainForm : Form, IMessageFilter
             _panelHost.ResetLayout();
             SaveWindowBounds();
         });
+        var sideBySide = new ToolStripMenuItem(Strings.Menu.InspectorSideBySide) { CheckOnClick = true, Checked = _inspector.SideBySide };
+        sideBySide.CheckedChanged += (_, _) =>
+        {
+            _inspector.SideBySide = sideBySide.Checked;
+            SaveWindowBounds();
+        };
         view.DropDownItems.AddRange([_zoomInItem, _zoomOutItem, new ToolStripSeparator(), _zoomResetItem,
-            new ToolStripSeparator(), PanelMenus.Panels(_panelHost), resetLayout]);
+            new ToolStripSeparator(), sideBySide, PanelMenus.Panels(_panelHost), resetLayout]);
         UpdateZoomMenu();
         return view;
     }
@@ -1253,6 +1260,7 @@ public sealed partial class MainForm : Form, IMessageFilter
     {
         if (WindowLayoutStore.Load() is not { } layout) return PanelLayout.Default();
         _savedColumnWidths = layout.SessionColumnWidths;
+        _restoreInspectorSideBySide = layout.InspectorSideBySide;
         var panels = layout.Panels;
         panels.Normalise(Screen.AllScreens.Select(screen => screen.WorkingArea).ToList());
         var bounds = layout.ToRectangle();
@@ -1276,7 +1284,11 @@ public sealed partial class MainForm : Form, IMessageFilter
         var bounds = WindowState == FormWindowState.Normal ? Bounds : RestoreBounds;
         if (bounds.Width >= MinimumSize.Width && bounds.Height >= MinimumSize.Height)
             WindowLayoutStore.Save(new WindowLayoutStore.WindowLayout(bounds, WindowState == FormWindowState.Maximized,
-                _panelHost.Snapshot()) { SessionColumnWidths = _sessionList.UserColumnWidths });
+                _panelHost.Snapshot())
+            {
+                SessionColumnWidths = _sessionList.UserColumnWidths,
+                InspectorSideBySide = _inspector.SideBySide,
+            });
     }
 
     private static ToolStripStatusLabel NewStatusAction(string text, Image image, string tooltip) => new(text, image)

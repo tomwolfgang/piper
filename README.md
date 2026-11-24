@@ -224,7 +224,8 @@ hides the panel. The area holding the Sessions list cannot be auto-hidden.
 
 **View > Panels** shows or hides each panel; a hidden panel comes back where it was. The Sessions
 list cannot be hidden. **View > Reset layout** puts every panel back in its default place, pins
-every area and docks every floating window.
+every area and docks every floating window. **View > Request and response side by side** puts the
+inspector's request on the left and response on the right instead of one above the other.
 
 The layout, floating windows included, is remembered between runs. An older Piper opening the same
 settings keeps the window size but drops the panel layout.
