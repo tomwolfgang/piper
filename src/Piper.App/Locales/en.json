@@ -457,6 +457,7 @@
     "showAllHidden": "Show all",
     "sendUrlToTextWizard": "Send URL to Text&Wizard",
     "removeSelected": "&Remove selected",
+    "resetColumnWidths": "Reset column &widths",
 
     "saveResponseBodyCaption": "Save response body",
     "saveResponseBodyFailed": "Could not save the response body: {{message}}",

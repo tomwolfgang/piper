@@ -27,6 +27,8 @@
     <Compile Include="..\..\src\Piper.App\Theme\StatusImages.cs" Link="StatusImages.cs" />
     <!-- The panel host and the internal types it is built from, for PanelHostTests. -->
     <Compile Include="..\..\src\Piper.App\Layout\PanelLayout.cs" Link="PanelLayout.cs" />
+    <!-- The layout file, for the remembered session-column widths round trip. -->
+    <Compile Include="..\..\src\Piper.App\WindowLayoutStore.cs" Link="WindowLayoutStore.cs" />
     <Compile Include="..\..\src\Piper.App\Layout\PanelRegistry.cs" Link="PanelRegistry.cs" />
     <Compile Include="..\..\src\Piper.App\Layout\PanelHost.cs" Link="PanelHost.cs" />
     <Compile Include="..\..\src\Piper.App\Layout\PanelMenus.cs" Link="PanelMenus.cs" />

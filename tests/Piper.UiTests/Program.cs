@@ -82,6 +82,7 @@ internal static class Program
         StatusImagesTests.Run(Check);
         TrustUiTests.Run(Check);
         TlsFailureUiTests.Run(Check, PumpUntil);
+        SessionColumnWidthUiTests.Run(Check, PumpUntil);
         TlsFailureInspectorUiTests.Run(Check, PumpUntil);
         TlsFailureSettingUiTests.Run(Check);
         ThemeTemplateUiTests.Run(Check);
