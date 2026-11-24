@@ -651,6 +651,7 @@ internal static class Strings
         public static string FollowTailTooltip => I18n.T("sessionList.followTailTooltip");
         public static string SendUrlToTextWizard => I18n.T("sessionList.sendUrlToTextWizard");
         public static string RemoveSelected => I18n.T("sessionList.removeSelected");
+        public static string ResetColumnWidths => I18n.T("sessionList.resetColumnWidths");
 
         public static string SaveResponseBodyCaption => I18n.T("sessionList.saveResponseBodyCaption");
         public static string SaveResponseBodyFailed(string message) =>

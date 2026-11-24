@@ -89,6 +89,12 @@ internal static class SessionColumnWidthUiTests
         check(list.Columns[Path].Width == list.Columns[Host].Width && Math.Abs(list.Columns[Host].Width - host / 4) <= 1,
             $"and every column keeps its own width ({list.Columns[Host].Width}, {list.Columns[Path].Width}, expected {host / 4})");
 
+        grid.ResetColumnWidths();
+        pumpUntil(() => list.Columns[Path].Width > list.Columns[Host].Width);
+        check(grid.UserColumnWidths.Count == 0, "reset forgets every width the user set");
+        check(list.Columns[Path].Width > list.Columns[Host].Width,
+            $"and the columns flex again ({list.Columns[Host].Width}, {list.Columns[Path].Width})");
+
         form.Close();
     }
 

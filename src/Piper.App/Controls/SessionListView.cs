@@ -609,6 +609,13 @@ public sealed class SessionListView : UserControl
         ExpandColumnsToView();
     }
 
+    /// <summary>Forgets every width the user set, so all columns share the grid's width again.</summary>
+    public void ResetColumnWidths()
+    {
+        _userColumnWidths.Clear();
+        ExpandColumnsToView();
+    }
+
     private void OnColumnWidthChanged(object? sender, ColumnWidthChangedEventArgs e)
     {
         // ponytail: a change counts as the user's only while the left button is down over the grid,
@@ -1450,6 +1457,8 @@ public sealed class SessionListView : UserControl
         menu.Items.Add(textWizard);
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(Menus.Item(Strings.SessionList.RemoveSelected, Strings.Shortcuts.Delete, (_, _) => RemoveSelected()));
+        menu.Items.Add(new ToolStripSeparator());
+        var resetWidths = menu.Items.Add(Strings.SessionList.ResetColumnWidths, null, (_, _) => ResetColumnWidths());
         menu.Opening += (_, _) =>
         {
             textWizard.Enabled = SelectedSession is { Url.Length: > 0 };
@@ -1459,6 +1468,7 @@ public sealed class SessionListView : UserControl
             resend.Enabled = SelectedSession is { IsTunnel: false, Request: not null };
             copyAs.Enabled = resend.Enabled;
             clearMarks.Enabled = _marks.Count > 0;
+            resetWidths.Enabled = _userColumnWidths.Count > 0;
             FillHideMenu(hideHost, hide);
             autoResponder.Enabled = SelectedSession is { IsTunnel: false, Request.Url: not null };
         };

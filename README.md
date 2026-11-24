@@ -620,6 +620,7 @@ are sized to the widest figure they can show at the current display scale and zo
 figure is never cut off.
 A column you drag to a new width keeps it, scaled with display scale and zoom, and is remembered
 across restarts in `window-layout.json`; the columns you have not sized keep sharing the rest.
+**Reset column widths** on the session list's right-click menu puts every column back to sharing.
 
 What *is* bounded is how much of a body is kept for inspection, by two limits:
 
