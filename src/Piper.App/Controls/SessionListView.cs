@@ -155,6 +155,7 @@ public sealed class SessionListView : UserControl
         _list.Resize += (_, _) => ExpandColumnsToView();
         _list.HandleCreated += (_, _) => RefitColumns();
         _list.DpiChangedAfterParent += (_, _) => RefitColumns();
+        _list.ColumnWidthChanged += OnColumnWidthChanged;
 
         _list.RetrieveVirtualItem += OnRetrieveVirtualItem;
         _list.ColumnClick += OnColumnClick;
@@ -253,6 +254,9 @@ public sealed class SessionListView : UserControl
     /// scroll back to the top. A store refresh (a new row, a deleted row) must keep the position.</summary>
     private bool _filterChanged;
     private int[] _columnMinimums = [];
+
+    // Columns the user dragged to a width, in 96-DPI pixels at 100% zoom; these stop flexing.
+    private readonly Dictionary<SessionSortColumn, int> _userColumnWidths = [];
 
     // One character of the grid font, and the padding TextRenderer adds around a run of them.
     private double _charWidth;
@@ -593,6 +597,32 @@ public sealed class SessionListView : UserControl
         ExpandColumnsToView();
     }
 
+    /// <summary>Columns the user resized, in 96-DPI pixels at 100% zoom, for the window layout file.</summary>
+    public IReadOnlyDictionary<SessionSortColumn, int> UserColumnWidths => _userColumnWidths;
+
+    /// <summary>Puts back widths from <see cref="UserColumnWidths"/>, already bounded by the layout store.</summary>
+    public void RestoreColumnWidths(IReadOnlyDictionary<SessionSortColumn, int> widths)
+    {
+        foreach (var (column, width) in widths)
+            if ((uint)column < (uint)FlexibleColumnFloors.Length)
+                _userColumnWidths[column] = Math.Clamp(width, WindowLayoutStore.MinColumnWidth, WindowLayoutStore.MaxColumnWidth);
+        ExpandColumnsToView();
+    }
+
+    private void OnColumnWidthChanged(object? sender, ColumnWidthChangedEventArgs e)
+    {
+        // ponytail: a change counts as the user's only while the left button is down over the grid,
+        // i.e. a header drag or divider double-click; the native control also reports the widths
+        // Piper sets itself. Keyboard auto-size (Ctrl+Plus) is not remembered.
+        if (_expandingColumns || e.ColumnIndex >= FlexibleColumnFloors.Length || MouseButtons != MouseButtons.Left
+            || !_list.ClientRectangle.Contains(_list.PointToClient(Cursor.Position)))
+            return;
+
+        var logical = (int)Math.Round(_list.Columns[e.ColumnIndex].Width * 96.0 / DeviceDpi / FontScale.Multiplier);
+        _userColumnWidths[(SessionSortColumn)e.ColumnIndex] =
+            Math.Clamp(logical, WindowLayoutStore.MinColumnWidth, WindowLayoutStore.MaxColumnWidth);
+    }
+
     /// <summary>The widest text a compact column can show, or null for a column that flexes.</summary>
     private static string[]? FixedColumnSamples(int column) => column switch
     {
@@ -627,7 +657,16 @@ public sealed class SessionListView : UserControl
         _expandingColumns = true;
         try
         {
-            var widths = ColumnLayout.Fit(_list.ClientSize.Width, _columnMinimums, ColumnGrowthWeights);
+            // A column the user sized keeps that width, scaled like the floors; the others share the rest.
+            var minimums = (int[])_columnMinimums.Clone();
+            var weights = (int[])ColumnGrowthWeights.Clone();
+            foreach (var (column, width) in _userColumnWidths)
+            {
+                minimums[(int)column] = (int)Math.Round(LogicalToDeviceUnits(width) * FontScale.Multiplier);
+                weights[(int)column] = 0;
+            }
+
+            var widths = ColumnLayout.Fit(_list.ClientSize.Width, minimums, weights);
             for (var index = 0; index < widths.Length; index++)
                 if (_list.Columns[index].Width != widths[index]) _list.Columns[index].Width = widths[index];
         }

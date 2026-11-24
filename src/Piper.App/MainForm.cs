@@ -65,6 +65,7 @@ public sealed partial class MainForm : Form, IMessageFilter
     private bool _captureEnabledOnStartup = true;
     private bool _captureToggleInProgress;
     private bool _restoreMaximized;
+    private IReadOnlyDictionary<SessionSortColumn, int>? _savedColumnWidths;
     private bool _shutdownInProgress;
     private bool _closeAfterShutdown;
     private bool _sessionsStatusUpdateQueued;
@@ -120,6 +121,7 @@ public sealed partial class MainForm : Form, IMessageFilter
         }, _store));
 
         _sessionList = new SessionListView(_store) { Dock = DockStyle.Fill };
+        if (_savedColumnWidths is { } columnWidths) _sessionList.RestoreColumnWidths(columnWidths);
         _inspector = new InspectorPanel { Dock = DockStyle.Fill };
         _composer = new ComposerPanel(_executor) { Dock = DockStyle.Fill };
         _filterPanel = new FilterPanel { Dock = DockStyle.Fill };
@@ -1250,6 +1252,7 @@ public sealed partial class MainForm : Form, IMessageFilter
     private PanelLayout RestoreWindowBounds()
     {
         if (WindowLayoutStore.Load() is not { } layout) return PanelLayout.Default();
+        _savedColumnWidths = layout.SessionColumnWidths;
         var panels = layout.Panels;
         panels.Normalise(Screen.AllScreens.Select(screen => screen.WorkingArea).ToList());
         var bounds = layout.ToRectangle();
@@ -1273,7 +1276,7 @@ public sealed partial class MainForm : Form, IMessageFilter
         var bounds = WindowState == FormWindowState.Normal ? Bounds : RestoreBounds;
         if (bounds.Width >= MinimumSize.Width && bounds.Height >= MinimumSize.Height)
             WindowLayoutStore.Save(new WindowLayoutStore.WindowLayout(bounds, WindowState == FormWindowState.Maximized,
-                _panelHost.Snapshot()));
+                _panelHost.Snapshot()) { SessionColumnWidths = _sessionList.UserColumnWidths });
     }
 
     private static ToolStripStatusLabel NewStatusAction(string text, Image image, string tooltip) => new(text, image)

@@ -1,6 +1,7 @@
 using System.Drawing;
 using System.Text.Json;
 using Piper.App.Layout;
+using Piper.Core.Sessions;
 using Piper.Core.Text;
 
 namespace Piper.App;
@@ -17,8 +18,13 @@ internal static class WindowLayoutStore
     private const int CurrentVersion = 2;
     private const int MaxJsonDepth = 8;
 
+    /// <summary>Bounds, in 96-DPI pixels at 100% zoom, for a session-list column width read back from disk.</summary>
+    public const int MinColumnWidth = 20;
+    public const int MaxColumnWidth = 2000;
+
     private static readonly PanelId[] AllPanels = Enum.GetValues<PanelId>();
     private static readonly DockArea[] AllAreas = Enum.GetValues<DockArea>();
+    private static readonly SessionSortColumn[] AllColumns = Enum.GetValues<SessionSortColumn>();
 
     public static string DefaultPath => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Piper", "window-layout.json");
@@ -147,6 +153,13 @@ internal static class WindowLayoutStore
         }
 
         writer.WriteEndObject();
+
+        // Only the columns the user sized; the rest keep sharing the grid's width.
+        writer.WriteStartObject("SessionColumns");
+        foreach (var (column, width) in layout.SessionColumnWidths)
+            writer.WriteNumber(column.ToString().ToLowerInvariant(), Math.Clamp(width, MinColumnWidth, MaxColumnWidth));
+        writer.WriteEndObject();
+
         writer.WriteEndObject();
         writer.Flush();
     }
@@ -170,7 +183,16 @@ internal static class WindowLayoutStore
         if (root.TryGetProperty("Panels", out var list) && list.ValueKind == JsonValueKind.Array) ReadPanels(list, panels);
         if (root.TryGetProperty("Areas", out var areas) && areas.ValueKind == JsonValueKind.Object) ReadAreas(areas, panels);
 
-        return new WindowLayout(new Rectangle(x, y, width, height), maximized, panels);
+        var columns = new Dictionary<SessionSortColumn, int>();
+        if (root.TryGetProperty("SessionColumns", out var widths) && widths.ValueKind == JsonValueKind.Object)
+        {
+            // Looked up by known column only, so unknown names are ignored and the count is bounded.
+            foreach (var column in AllColumns)
+                if (TryInt(widths, column.ToString().ToLowerInvariant(), out var w))
+                    columns[column] = Math.Clamp(w, MinColumnWidth, MaxColumnWidth);
+        }
+
+        return new WindowLayout(new Rectangle(x, y, width, height), maximized, panels) { SessionColumnWidths = columns };
     }
 
     private static void ReadPanels(JsonElement list, PanelLayout panels)
@@ -278,6 +300,9 @@ internal static class WindowLayoutStore
         public int Height { get; set; }
         public bool Maximized { get; set; }
         public PanelLayout Panels { get; set; } = PanelLayout.Default();
+
+        /// <summary>Session-list columns the user resized, in 96-DPI pixels at 100% zoom.</summary>
+        public IReadOnlyDictionary<SessionSortColumn, int> SessionColumnWidths { get; set; } = new Dictionary<SessionSortColumn, int>();
 
         public Rectangle ToRectangle() => new(X, Y, Width, Height);
     }

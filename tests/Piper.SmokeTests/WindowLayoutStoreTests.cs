@@ -1,6 +1,7 @@
 using System.Drawing;
 using Piper.App;
 using Piper.App.Layout;
+using Piper.Core.Sessions;
 
 /// <summary>The v2 window-layout file: round trips, the v1 upgrade, and a hostile file never breaking startup.</summary>
 internal static class WindowLayoutStoreTests
@@ -239,6 +240,32 @@ internal static class WindowLayoutStoreTests
             return Task.CompletedTask;
         });
 
+        await runner.RunAsync("layout store round trips session column widths and bounds hostile ones", () =>
+        {
+            WithFile(path =>
+            {
+                var layout = new WindowLayoutStore.WindowLayout(new Rectangle(0, 0, 1200, 800), false, PanelLayout.Default())
+                {
+                    SessionColumnWidths = new Dictionary<SessionSortColumn, int> { [SessionSortColumn.Host] = 240, [SessionSortColumn.Time] = 75 },
+                };
+                WindowLayoutStore.Save(layout, path);
+                var loaded = WindowLayoutStore.Load(path)!.SessionColumnWidths;
+                runner.AreEqual("Host=240,Time=75", Widths(loaded), "user widths round trip");
+
+                runner.AreEqual("", Widths(WindowLayoutStore.Load(path + ".missing")?.SessionColumnWidths ?? new Dictionary<SessionSortColumn, int>()),
+                    "a missing file gives no widths");
+                runner.AreEqual("", Widths(Columns(path, "")), "a file without columns gives no widths");
+                runner.AreEqual("", Widths(Columns(path, ",\"SessionColumns\":[1,2]")), "a non-object column block is ignored");
+                runner.AreEqual("Path=20,Size=2000", Widths(Columns(path,
+                    ",\"SessionColumns\":{\"path\":-50,\"size\":99999999,\"host\":\"wide\",\"time\":1.5,\"type\":1e999,\"evil\":300,\"Method\":90}")),
+                    "widths clamp, non-integers and unknown or miscased ids are ignored");
+
+                File.WriteAllText(path, "{ not json");
+                runner.IsTrue(WindowLayoutStore.Load(path) is null, "malformed JSON falls back to defaults");
+            });
+            return Task.CompletedTask;
+        });
+
         await runner.RunAsync("a hidden panel's place in the tab order survives a save and load", () =>
         {
             WithFile(path =>
@@ -263,6 +290,15 @@ internal static class WindowLayoutStoreTests
         File.WriteAllText(path, "{\"X\":0,\"Y\":0,\"Width\":900,\"Height\":700," + members + "}");
         return WindowLayoutStore.Load(path)!.Panels;
     }
+
+    private static IReadOnlyDictionary<SessionSortColumn, int> Columns(string path, string members)
+    {
+        File.WriteAllText(path, "{\"X\":0,\"Y\":0,\"Width\":900,\"Height\":700" + members + "}");
+        return WindowLayoutStore.Load(path)!.SessionColumnWidths;
+    }
+
+    private static string Widths(IReadOnlyDictionary<SessionSortColumn, int> widths) =>
+        string.Join(",", widths.OrderBy(pair => pair.Key).Select(pair => $"{pair.Key}={pair.Value}"));
 
     private static void WithFile(Action<string> body)
     {
