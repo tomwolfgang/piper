@@ -618,12 +618,11 @@ public sealed class SessionListView : UserControl
 
     private void OnColumnWidthChanged(object? sender, ColumnWidthChangedEventArgs e)
     {
-        // ponytail: a change counts as the user's only while the left button is down over the grid,
-        // i.e. a header drag or divider double-click; the native control also reports the widths
-        // Piper sets itself. Keyboard auto-size (Ctrl+Plus) is not remembered.
-        if (_expandingColumns || e.ColumnIndex >= FlexibleColumnFloors.Length || MouseButtons != MouseButtons.Left
-            || !_list.ClientRectangle.Contains(_list.PointToClient(Cursor.Position)))
-            return;
+        // Piper sets widths only in ExpandColumnsToView, under _expandingColumns, and WinForms only
+        // re-applies them while it creates the handle, so any other change is the user's: a header
+        // drag, a divider double-click or Ctrl+Plus. The mouse state is no guide: the header reports a
+        // drag after the button is released, and ColumnWidthChanging is not raised for it.
+        if (_expandingColumns || _list.CreatingHandle || e.ColumnIndex >= FlexibleColumnFloors.Length) return;
 
         var logical = (int)Math.Round(_list.Columns[e.ColumnIndex].Width * 96.0 / DeviceDpi / FontScale.Multiplier);
         _userColumnWidths[(SessionSortColumn)e.ColumnIndex] =
@@ -1837,6 +1836,22 @@ public sealed class SessionListView : UserControl
         private const uint LvisSelected = 0x0002;
 
         private bool _redrawSuspended;
+
+        /// <summary>True while WinForms re-applies the column widths to a new handle.</summary>
+        public bool CreatingHandle { get; private set; }
+
+        protected override void OnHandleCreated(EventArgs e)
+        {
+            CreatingHandle = true;
+            try
+            {
+                base.OnHandleCreated(e);
+            }
+            finally
+            {
+                CreatingHandle = false;
+            }
+        }
 
         /// <summary>Sets the selected state for every native row in one ListView message.</summary>
         public void SelectAllItems()

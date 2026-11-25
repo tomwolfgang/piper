@@ -108,6 +108,7 @@ internal static class WindowLayoutStore
         writer.WriteNumber("Height", layout.Height);
         writer.WriteBoolean("Maximized", layout.Maximized);
         writer.WriteBoolean("InspectorSideBySide", layout.InspectorSideBySide);
+        writer.WriteNumber("InspectorSplit", layout.InspectorSplit);
 
         writer.WriteStartArray("Panels");
         foreach (var id in AllPanels)
@@ -199,6 +200,7 @@ internal static class WindowLayoutStore
         {
             SessionColumnWidths = columns,
             InspectorSideBySide = sideBySide,
+            InspectorSplit = TryDouble(root, "InspectorSplit", out var split) ? split : 0.5,
         };
     }
 
@@ -307,6 +309,14 @@ internal static class WindowLayoutStore
         public int Height { get; set; }
         public bool Maximized { get; set; }
         public bool InspectorSideBySide { get; set; }
+
+        /// <summary>The request/response splitter as a fraction of the inspector's length, clamped to 0.1-0.9.</summary>
+        public double InspectorSplit
+        {
+            get;
+            set => field = PanelLayout.ClampFraction(value, 0.5);
+        } = 0.5;
+
         public PanelLayout Panels { get; set; } = PanelLayout.Default();
 
         /// <summary>Session-list columns the user resized, in 96-DPI pixels at 100% zoom.</summary>

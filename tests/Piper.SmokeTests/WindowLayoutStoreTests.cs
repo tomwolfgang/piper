@@ -99,6 +99,16 @@ internal static class WindowLayoutStoreTests
 
                 File.WriteAllText(path, """{"X":1,"Y":2,"Width":900,"Height":700}""");
                 runner.IsTrue(!WindowLayoutStore.Load(path)!.InspectorSideBySide, "a file without the setting is stacked");
+                runner.AreEqual(0.5, WindowLayoutStore.Load(path)!.InspectorSplit, "a file without a split is centred");
+
+                WindowLayoutStore.Save(new WindowLayoutStore.WindowLayout(bounds, false, PanelLayout.Default()) { InspectorSplit = 0.3 }, path);
+                runner.AreEqual(0.3, WindowLayoutStore.Load(path)!.InspectorSplit, "the request/response split round trips");
+
+                foreach (var (value, expected) in new[] { ("-4", 0.1), ("7", 0.9), ("1e999", 0.5), ("\"0.3\"", 0.5), ("null", 0.5), ("[0.3]", 0.5) })
+                {
+                    File.WriteAllText(path, $$"""{"X":1,"Y":2,"Width":900,"Height":700,"InspectorSplit":{{value}}}""");
+                    runner.AreEqual(expected, WindowLayoutStore.Load(path)!.InspectorSplit, $"a hostile split ({value}) is clamped or ignored");
+                }
             });
             return Task.CompletedTask;
         });
