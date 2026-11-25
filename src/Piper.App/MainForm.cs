@@ -67,6 +67,7 @@ public sealed partial class MainForm : Form, IMessageFilter
     private bool _restoreMaximized;
     private IReadOnlyDictionary<SessionSortColumn, int>? _savedColumnWidths;
     private bool _restoreInspectorSideBySide;
+    private double _restoreInspectorSplit = 0.5;
     private bool _shutdownInProgress;
     private bool _closeAfterShutdown;
     private bool _sessionsStatusUpdateQueued;
@@ -126,7 +127,7 @@ public sealed partial class MainForm : Form, IMessageFilter
 
         _sessionList = new SessionListView(_store) { Dock = DockStyle.Fill };
         if (_savedColumnWidths is { } columnWidths) _sessionList.RestoreColumnWidths(columnWidths);
-        _inspector = new InspectorPanel { Dock = DockStyle.Fill, SideBySide = _restoreInspectorSideBySide };
+        _inspector = new InspectorPanel { Dock = DockStyle.Fill, SideBySide = _restoreInspectorSideBySide, SplitFraction = _restoreInspectorSplit };
         _composer = new ComposerPanel(_executor) { Dock = DockStyle.Fill };
         _filterPanel = new FilterPanel { Dock = DockStyle.Fill };
         _autoResponder = new AutoResponderPanel(_options.AutoResponder) { Dock = DockStyle.Fill };
@@ -1281,6 +1282,7 @@ public sealed partial class MainForm : Form, IMessageFilter
         if (WindowLayoutStore.Load() is not { } layout) return PanelLayout.Default();
         _savedColumnWidths = layout.SessionColumnWidths;
         _restoreInspectorSideBySide = layout.InspectorSideBySide;
+        _restoreInspectorSplit = layout.InspectorSplit;
         var panels = layout.Panels;
         panels.Normalise(Screen.AllScreens.Select(screen => screen.WorkingArea).ToList());
         var bounds = layout.ToRectangle();
@@ -1308,6 +1310,7 @@ public sealed partial class MainForm : Form, IMessageFilter
             {
                 SessionColumnWidths = _sessionList.UserColumnWidths,
                 InspectorSideBySide = _inspector.SideBySide,
+                InspectorSplit = _inspector.SplitFraction,
             });
     }
 

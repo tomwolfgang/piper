@@ -27,6 +27,12 @@ public sealed class InspectorPanel : UserControl
         };
         _split.Panel1.Controls.Add(_request);
         _split.Panel2.Controls.Add(_response);
+        // Only at a real size: a minimised window or collapsed panel squeezes the splitter, and
+        // that is not where the user left it.
+        _split.SplitterMoved += (_, _) =>
+        {
+            if (_splitPositioned && SplitLength > 200) _splitFraction = (double)_split.SplitterDistance / SplitLength;
+        };
 
         Controls.Add(_split);
     }
@@ -43,14 +49,35 @@ public sealed class InspectorPanel : UserControl
         {
             if (SideBySide == value) return;
             _split.Orientation = value ? Orientation.Vertical : Orientation.Horizontal;
+            _splitFraction = 0.5;
             _splitPositioned = false;
             CentreSplit();
         }
     }
 
+    private double _splitFraction = 0.5;
+
     /// <summary>
-    /// Splits request and response evenly once the panel has a real size. Setting this
-    /// in the constructor is silently clamped against the 150px design-time default.
+    /// Where the splitter sits, as a fraction of the panel's height (stacked) or width (side by
+    /// side), for the window layout file. Values outside 0.1-0.9 are clamped; a non-finite one centres.
+    /// </summary>
+    [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
+    public double SplitFraction
+    {
+        get => _splitFraction;
+        set
+        {
+            _splitFraction = Piper.App.Layout.PanelLayout.ClampFraction(value, 0.5);
+            _splitPositioned = false;
+            CentreSplit();
+        }
+    }
+
+    private int SplitLength => SideBySide ? _split.Width : _split.Height;
+
+    /// <summary>
+    /// Places the splitter once the panel has a real size. Setting this in the constructor is
+    /// silently clamped against the 150px design-time default.
     /// </summary>
     protected override void OnSizeChanged(EventArgs e)
     {
@@ -60,9 +87,9 @@ public sealed class InspectorPanel : UserControl
 
     private void CentreSplit()
     {
-        var length = SideBySide ? _split.Width : _split.Height;
+        var length = SplitLength;
         if (_splitPositioned || length <= 200) return;
-        _split.SplitterDistance = length / 2;
+        _split.SplitterDistance = (int)(length * _splitFraction);
         _splitPositioned = true;
     }
 

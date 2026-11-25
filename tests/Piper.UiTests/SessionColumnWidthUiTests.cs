@@ -97,8 +97,37 @@ internal static class SessionColumnWidthUiTests
         check(list.Columns[Path].Width > list.Columns[Host].Width,
             $"and the columns flex again ({list.Columns[Host].Width}, {list.Columns[Path].Width})");
 
+        // Regression: a header drag was never remembered, because the width-changed event was only
+        // trusted while the real left button was down over the grid. The drag here is the header's own
+        // mouse messages, as the native control sees them; nothing reads the physical mouse.
+        var header = SendMessage(list.Handle, LvmGetHeader, 0, 0);
+        var edge = Enumerable.Range(0, Host + 1).Sum(index => list.Columns[index].Width) - 1;
+        var before = list.Columns[Host].Width;
+        SendMessage(header, WmLButtonDown, MkLButton, HeaderPoint(edge, 5));
+        SendMessage(header, WmMouseMove, MkLButton, HeaderPoint(edge + 40, 5));
+        SendMessage(header, WmLButtonUp, 0, HeaderPoint(edge + 40, 5));
+        pumpUntil(() => grid.UserColumnWidths.ContainsKey(SessionSortColumn.Host));
+        check(list.Columns[Host].Width > before, $"setup: the header drag widened Host ({before} -> {list.Columns[Host].Width})");
+        check(grid.UserColumnWidths.ContainsKey(SessionSortColumn.Host),
+            $"a header drag is remembered for the layout file ({Describe(grid.UserColumnWidths)})");
+        grid.Width = 1300;
+        pumpUntil(() => true);
+        check(grid.UserColumnWidths.Count == 1,
+            $"a resize after the drag remembers nothing else ({Describe(grid.UserColumnWidths)})");
+
         form.Close();
     }
+
+    private const int LvmGetHeader = 0x1000 + 31;
+    private const int WmMouseMove = 0x0200;
+    private const int WmLButtonDown = 0x0201;
+    private const int WmLButtonUp = 0x0202;
+    private const int MkLButton = 0x0001;
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern nint SendMessage(nint hwnd, int msg, nint wParam, nint lParam);
+
+    private static nint HeaderPoint(int x, int y) => (y << 16) | (x & 0xFFFF);
 
     private static string Describe(IReadOnlyDictionary<SessionSortColumn, int> widths) =>
         string.Join(",", widths.OrderBy(pair => pair.Key).Select(pair => $"{pair.Key}={pair.Value}"));
