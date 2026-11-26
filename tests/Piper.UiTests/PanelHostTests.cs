@@ -34,6 +34,7 @@ internal static class PanelHostTests
         BottomPanelsKeepWorking(check, pumpUntil);
         ShrunkWindow(check, pumpUntil);
         SnapshotKeepsFractionsWhenTiny(check, pumpUntil);
+        MaximisedRestoresFractions(check, pumpUntil);
         HiddenPanelThemed(check, pumpUntil);
         FocusChord(check);
         FloatThenDock(check, pumpUntil);
@@ -1839,6 +1840,37 @@ internal static class PanelHostTests
 
         check(error is null, $"nothing throws ({error?.GetType().Name}: {error?.Message})");
         check(StripOf(rig, PanelId.Log)?.TabCount == 3 && StripOf(rig, PanelId.Log)!.Height > 0, "the bottom strip is still shown with its three panels");
+    }
+
+    private static void MaximisedRestoresFractions(Action<bool, string> check, Action<Func<bool>> pumpUntil)
+    {
+        Console.WriteLine("== a window opened maximised applies the saved fractions at its maximised size");
+        var layout = PanelLayout.Default();
+        layout.Move(PanelId.Log, DockArea.Bottom);
+        layout.LeftFraction = 0.5676;
+        layout.BottomFraction = 0.3;
+        using var rig = new Rig(layout);
+        // As MainForm does on a restart: the restore bounds are set, then the window is maximised before it is shown.
+        rig.Form.Size = new Size(900, 600);
+        rig.Form.WindowState = FormWindowState.Maximized;
+        rig.Form.Show();
+        pumpUntil(() => rig.Grid.Width > 0);
+        PumpFor(pumpUntil, 200);
+        var outer = rig.Host.Controls.OfType<SplitContainer>().Single();
+        var inner = outer.Panel1.Controls.OfType<SplitContainer>().Single();
+        check(rig.Host.Width > 1000, $"setup: the host has its maximised width ({rig.Host.Width})");
+
+        double Left() => (double)inner.SplitterDistance / inner.Width;
+        double Bottom() => (double)(outer.Height - outer.SplitterDistance - outer.SplitterWidth) / outer.Height;
+        check(Math.Abs(Left() - 0.5676) < 0.01, $"the Sessions/Inspectors split is at the saved fraction ({Left():0.000})");
+        check(Math.Abs(Bottom() - 0.3) < 0.01, $"the bottom split is at the saved fraction ({Bottom():0.000})");
+        var snapshot = rig.Host.Snapshot();
+        check(Math.Abs(snapshot.LeftFraction - 0.5676) < 0.001 && Math.Abs(snapshot.BottomFraction - 0.3) < 0.001,
+            $"and the snapshot keeps them ({snapshot.LeftFraction}, {snapshot.BottomFraction})");
+
+        rig.Form.WindowState = FormWindowState.Normal;
+        PumpFor(pumpUntil, 200);
+        check(Math.Abs(Left() - 0.5676) < 0.01, $"restoring the window keeps the proportion ({Left():0.000})");
     }
 
     private static void SnapshotKeepsFractionsWhenTiny(Action<bool, string> check, Action<Func<bool>> pumpUntil)
