@@ -431,6 +431,16 @@ internal sealed class PanelHost : UserControl
         return _layout.Clone();
     }
 
+    /// <summary>
+    /// A window shown maximised has its final size before the host's handle exists, so no later layout
+    /// would apply the fractions; they would stay unapplied until the next resize.
+    /// </summary>
+    protected override void OnHandleCreated(EventArgs e)
+    {
+        base.OnHandleCreated(e);
+        if (_fractionsPending) PerformLayout();
+    }
+
     protected override void OnLayout(LayoutEventArgs e)
     {
         base.OnLayout(e);
