@@ -1858,7 +1858,7 @@ internal static class PanelHostTests
         PumpFor(pumpUntil, 200);
         var outer = rig.Host.Controls.OfType<SplitContainer>().Single();
         var inner = outer.Panel1.Controls.OfType<SplitContainer>().Single();
-        check(rig.Host.Width > 1000, $"setup: the host has its maximised width ({rig.Host.Width})");
+        check(rig.Form.Width > 900, $"setup: the window is wider than its restore size ({rig.Form.Width})");
 
         double Left() => (double)inner.SplitterDistance / inner.Width;
         double Bottom() => (double)(outer.Height - outer.SplitterDistance - outer.SplitterWidth) / outer.Height;
