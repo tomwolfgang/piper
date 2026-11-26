@@ -1871,6 +1871,17 @@ internal static class PanelHostTests
         rig.Form.WindowState = FormWindowState.Normal;
         PumpFor(pumpUntil, 200);
         check(Math.Abs(Left() - 0.5676) < 0.01, $"restoring the window keeps the proportion ({Left():0.000})");
+
+        Console.WriteLine("== a window opened at its restore size applies the saved fractions too");
+        using var windowed = new Rig(layout);
+        windowed.Form.Show();
+        pumpUntil(() => windowed.Grid.Width > 0);
+        PumpFor(pumpUntil, 200);
+        var wOuter = windowed.Host.Controls.OfType<SplitContainer>().Single();
+        var wInner = wOuter.Panel1.Controls.OfType<SplitContainer>().Single();
+        var wLeft = (double)wInner.SplitterDistance / wInner.Width;
+        var wBottom = (double)(wOuter.Height - wOuter.SplitterDistance - wOuter.SplitterWidth) / wOuter.Height;
+        check(Math.Abs(wLeft - 0.5676) < 0.01 && Math.Abs(wBottom - 0.3) < 0.01, $"both splits are at the saved fractions ({wLeft:0.000}, {wBottom:0.000})");
     }
 
     private static void SnapshotKeepsFractionsWhenTiny(Action<bool, string> check, Action<Func<bool>> pumpUntil)
